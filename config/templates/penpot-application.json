@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "penpot",
+  "name": "Penpot",
+  "type": "confidential",
+  "redirect_uris": ["https://penpot.example.com/api/auth/oidc/callback"],
+  "scopes": ["openid", "profile", "email"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "client_secret_post",
+  "pkce_required": false,
+  "nonce_required": false,
+  "secret_reference": {
+    "provider": "env",
+    "key": "PENPOT_OIDC_CLIENT_SECRET"
+  },
+  "consent_required": false
+}

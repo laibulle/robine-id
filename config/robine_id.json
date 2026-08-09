@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "issuers": [
+    {
+      "id": "default",
+      "url": "https://id.base59.dev/default",
+      "scopes": ["openid", "profile", "email"],
+      "token_policy": {
+        "authorization_code_lifetime": 60,
+        "id_token_lifetime": 300,
+        "access_token_lifetime": 300,
+        "clock_skew": 30
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "development-user",
+      "identifier": "admin@example.com",
+      "password_hash": "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+      "name": "Development Administrator",
+      "email": "admin@example.com"
+    }
+  ],
+  "claims": {
+    "name": {"source": "name", "scope": "profile"},
+    "email": {"source": "email", "scope": "email"}
+  },
+  "branding": {
+    "product_name": "Robine ID",
+    "primary_color": "#2563eb",
+    "default_locale": "en",
+    "locales": ["en", "fr"],
+    "messages": {
+      "fr": {
+        "sign_in.title": "Heureux de vous revoir",
+        "sign_in.identifier": "Adresse e-mail",
+        "sign_in.password": "Mot de passe",
+        "sign_in.submit": "Continuer",
+        "consent.title": "Autoriser l’accès ?",
+        "consent.approve": "Autoriser",
+        "consent.deny": "Annuler"
+      }
+    }
+  },
+  "reconciliation": {
+    "deletion_policy": "disable"
+  },
+  "authentication": {
+    "methods": ["password"],
+    "session": {
+      "idle_timeout": 1800,
+      "absolute_timeout": 28800,
+      "max_concurrent": 5
+    },
+    "rate_limit": {
+      "attempts": 5,
+      "window_seconds": 60
+    }
+  },
+  "storage": {
+    "database_path": "../robine_id_dev.db",
+    "pool_size": 5,
+    "signing_key_path": "../robine_id_signing_keys.bin"
+  },
+  "telemetry": {
+    "log_level": "info"
+  }
+}

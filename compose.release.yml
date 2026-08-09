@@ -1,0 +1,29 @@
+services:
+  robine-id:
+    build:
+      context: .
+    image: robine-id:0.1.0
+    restart: unless-stopped
+    env_file:
+      - .env.release
+    environment:
+      PHX_SERVER: "true"
+      PORT: "4001"
+      ROBINE_ID_CONFIG: /config/robine_id.json
+      ROBINE_ID_APPLICATIONS_DIR: /config/applications
+      DATABASE_PATH: /data/robine_id.db
+    ports:
+      - "127.0.0.1:4001:4001"
+    volumes:
+      - ./deploy/config/robine_id.json:/config/robine_id.json:ro
+      - ./deploy/config/applications:/config/applications:ro
+      - robine_id_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4001/health/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  robine_id_data:

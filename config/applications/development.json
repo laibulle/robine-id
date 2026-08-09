@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "development-client",
+  "name": "Development Client",
+  "type": "public",
+  "redirect_uris": ["http://localhost:4002/callback"],
+  "post_logout_redirect_uris": ["http://localhost:4002/signed-out"],
+  "scopes": ["openid", "profile", "email"]
+}

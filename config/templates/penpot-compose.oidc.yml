@@ -1,0 +1,33 @@
+# Merge this fragment into the existing Penpot Compose services.
+# ROBINE_ID_PUBLIC_ISSUER is the complete issuer URL, including the issuer ID,
+# for this deployment: https://id.base59.dev/default
+x-penpot-oidc: &penpot-oidc
+  PENPOT_FLAGS: >-
+    disable-email-verification
+    disable-registration
+    enable-mcp
+    enable-prepl-server
+    enable-login-with-oidc
+    enable-oidc-registration
+  PENPOT_OIDC_BASE_URI: "${ROBINE_ID_PUBLIC_ISSUER}"
+  PENPOT_OIDC_CLIENT_ID: "penpot"
+  PENPOT_OIDC_CLIENT_SECRET: "${PENPOT_OIDC_CLIENT_SECRET}"
+  PENPOT_OIDC_SCOPES: "openid profile email"
+  PENPOT_OIDC_USER_INFO_SOURCE: "userinfo"
+  PENPOT_OIDC_NAME: "Robine ID"
+
+services:
+  penpot-backend:
+    environment:
+      <<: *penpot-oidc
+
+  penpot-frontend:
+    environment:
+      PENPOT_FLAGS: >-
+        disable-email-verification
+        disable-registration
+        enable-mcp
+        enable-prepl-server
+        enable-login-with-oidc
+        enable-oidc-registration
+      PENPOT_OIDC_NAME: "Robine ID"
