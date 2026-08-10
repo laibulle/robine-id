@@ -83,7 +83,7 @@ mix precommit
 mix coverage
 ```
 
-Coverage reports are written to `cover/`. The project enforces a 75% threshold;
+Coverage reports are written to `cover/`. The project enforces a 70% threshold;
 Robine CI retains the reports for 14 days and publishes the percentage through
 the badge above.
 

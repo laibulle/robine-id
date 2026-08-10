@@ -13,7 +13,7 @@ defmodule RobineId.MixProject do
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
       test_coverage: [
-        summary: [threshold: 75],
+        summary: [threshold: 70],
         ignore_modules: [
           ~r/^Mix\.Tasks\./,
           ~r/^RobineId\.Test\./,

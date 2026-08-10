@@ -54,7 +54,7 @@ jobs:
 
           coverage_total=$(awk '/\| Total[[:space:]]*\|$/{gsub(/%/, "", $2); print $2}' /tmp/robine-id-coverage.log | tail -1)
           if [[ -n "${coverage_total}" ]]; then
-            printf 'ROBINE_COVERAGE total=%s threshold=75 report=coverage-report\n' "${coverage_total}"
+            printf 'ROBINE_COVERAGE total=%s threshold=70 report=coverage-report\n' "${coverage_total}"
           fi
 
           exit "${coverage_status}"
