@@ -1,5 +1,9 @@
 # Robine ID
 
+[![build](https://ci.base59.dev/badges/github/laibulle/robine-id/build.svg)](https://ci.base59.dev/repositories)
+[![coverage](https://ci.base59.dev/badges/github/laibulle/robine-id/coverage.svg)](https://ci.base59.dev/repositories)
+[![release](https://img.shields.io/github/v/release/laibulle/robine-id?display_name=tag&sort=semver)](https://github.com/laibulle/robine-id/releases)
+
 Robine ID is a file-configured OpenID Connect provider built with Elixir and Phoenix. It implements the Authorization Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated logout.
 
 The implementation follows clean architecture. Business domains expose one facade made of `defdelegate` calls; Phoenix, file loading, bcrypt, Ecto, JOSE, Logger, and runtime stores are adapters around use cases and ports. See [`AGENTS.md`](AGENTS.md) for the architectural contract and [`docs/specs`](docs/specs) for normative product requirements.
@@ -71,6 +75,17 @@ Run:
 mix setup
 mix phx.server
 ```
+
+Run the complete quality gate and generate the coverage reports locally with:
+
+```sh
+mix precommit
+mix coverage
+```
+
+Coverage reports are written to `cover/`. The project enforces a 75% threshold;
+Robine CI retains the reports for 14 days and publishes the percentage through
+the badge above.
 
 Then open <http://localhost:4001>.
 

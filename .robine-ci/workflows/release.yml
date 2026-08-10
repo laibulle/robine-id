@@ -1,0 +1,57 @@
+version: 1
+name: Robine ID Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  package:
+    image: hexpm/elixir@sha256:ae38be7cb19bffa78adedb04732d9e6ba83a507b4cfb06983cbe711edb49da54
+    shell: /bin/bash
+    timeout: 30m
+    env:
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
+    services:
+      docker:
+        image: docker:28-dind
+        privileged: true
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        command: ["--tls=false"]
+        readiness:
+          tcp: 2375
+          timeout: 60s
+    steps:
+      - name: Checkout tagged revision
+        uses: checkout
+      - name: Install Docker client
+        run: |
+          mkdir -p /tmp/apt-archives/partial
+          chmod 0777 /tmp/apt-archives /tmp/apt-archives/partial
+          apt-get -o APT::Sandbox::User=root \
+            -o Dir::Cache::archives=/tmp/apt-archives update
+          DEBIAN_FRONTEND=noninteractive apt-get \
+            -o APT::Sandbox::User=root \
+            -o Dir::Cache::archives=/tmp/apt-archives \
+            install --yes --no-install-recommends ca-certificates curl
+          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.5.2.tgz -o /tmp/docker.tgz
+          echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
+          tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker
+          rm /tmp/docker.tgz
+          docker version
+      - name: Build production image
+        run: docker build --tag robine-id:release .
+      - name: Prepare release payload
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker save robine-id:release | gzip -9 > dist/robine-id-image.tar.gz
+          sha256sum dist/robine-id-image.tar.gz > dist/robine-id-image.tar.gz.sha256
+      - name: Upload GitHub release payload
+        uses: artifacts/upload
+        with:
+          name: github-release-robine_id-${{ runner.os }}-${{ runner.arch }}
+          paths: [dist]
+          retention-days: 30

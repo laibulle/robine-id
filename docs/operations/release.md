@@ -108,3 +108,12 @@ Do not restore an older data volume unless the application rollback is incompati
 6. The data volume and `SECRET_KEY_BASE` are backed up.
 7. Readiness and discovery pass through Caddy.
 8. Every configured relying application completes login, token exchange, UserInfo, and callback.
+
+## Automated Tag Releases
+
+Pushing a semantic version tag matching `v*` runs the Robine CI release
+workflow. It builds the production image through an isolated Docker daemon,
+exports it with `docker save`, generates a SHA-256 checksum, and publishes the
+retained payload to the matching GitHub Release through the GitHub App. The
+GitHub App installation requires `Contents: write`; no installation token is
+exposed to the build container.

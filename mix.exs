@@ -11,7 +11,16 @@ defmodule RobineId.MixProject do
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      test_coverage: [
+        summary: [threshold: 75],
+        ignore_modules: [
+          ~r/^Mix\.Tasks\./,
+          ~r/^RobineId\.Test\./,
+          RobineId.DataCase,
+          RobineIdWeb.ConnCase
+        ]
+      ]
     ]
   end
 
@@ -27,7 +36,7 @@ defmodule RobineId.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, coverage: :test]
     ]
   end
 
@@ -87,6 +96,7 @@ defmodule RobineId.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      coverage: ["ecto.create --quiet", "ecto.migrate --quiet", "test --cover"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind robine_id", "esbuild robine_id"],
       "assets.deploy": [
