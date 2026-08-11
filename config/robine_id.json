@@ -28,7 +28,7 @@
   },
   "branding": {
     "product_name": "Robine ID",
-    "primary_color": "#2563eb",
+    "primary_color": "#176b70",
     "default_locale": "en",
     "locales": ["en", "fr"],
     "messages": {

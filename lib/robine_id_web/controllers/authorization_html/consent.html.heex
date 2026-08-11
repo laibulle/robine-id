@@ -1,7 +1,7 @@
 <main class="auth-shell" style={"--auth-primary: #{@theme.primary_color}"}>
   <section class="auth-card" aria-labelledby="consent-title">
     <img :if={@theme.logo} src={@theme.logo} alt={@theme.product_name} class="configured-logo" />
-    <div :if={!@theme.logo} class="brand-mark" aria-hidden="true">R</div>
+    <img :if={!@theme.logo} src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo" />
     <p class="eyebrow">{@theme.product_name}</p>
     <h1 id="consent-title">{@messages["consent.title"]}</h1>
     <p class="auth-intro"><strong>{@client_name}</strong> would like permission to:</p>
