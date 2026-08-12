@@ -6,8 +6,13 @@
     <meta name="csrf-token" content={get_csrf_token()} />
     <.live_title default="Robine ID" suffix=" · Robine ID" phx-no-format>{assigns[:page_title]}</.live_title>
     <link :if={assigns[:theme] && assigns.theme.favicon} rel="icon" href={assigns.theme.favicon} />
-    <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
-    <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
+    <link phx-track-static rel="stylesheet" href={RobineId.Runtime.path("/assets/css/app.css")} />
+    <script
+      defer
+      phx-track-static
+      type="text/javascript"
+      src={RobineId.Runtime.path("/assets/js/app.js")}
+    >
     </script>
     <script>
       (() => {

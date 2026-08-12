@@ -1,11 +1,16 @@
 <main class="auth-shell">
   <section class="auth-card" aria-labelledby="logout-title">
     <img :if={@theme.logo} src={@theme.logo} alt={@theme.product_name} class="configured-logo" />
-    <img :if={!@theme.logo} src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo" />
+    <img
+      :if={!@theme.logo}
+      src={RobineId.Runtime.path("/images/brand/robine-mark.png")}
+      alt=""
+      class="auth-brand-logo"
+    />
     <p class="eyebrow">{@theme.product_name}</p>
     <h1 id="logout-title">Sign out?</h1>
     <p class="auth-intro">This will end your local Robine ID session on this device.</p>
-    <.form for={%{}} action={"/#{@issuer_id}/logout"}>
+    <.form for={%{}} action={RobineId.Runtime.path("/#{@issuer_id}/logout")}>
       <button type="submit" class="primary-action full-width">Sign out</button>
     </.form>
   </section>

@@ -1,7 +1,12 @@
 <main class="auth-shell" style={"--auth-primary: #{@theme.primary_color}"}>
   <section class="auth-card" aria-labelledby="sign-in-title">
     <img :if={@theme.logo} src={@theme.logo} alt={@theme.product_name} class="configured-logo" />
-    <img :if={!@theme.logo} src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo" />
+    <img
+      :if={!@theme.logo}
+      src={RobineId.Runtime.path("/images/brand/robine-mark.png")}
+      alt=""
+      class="auth-brand-logo"
+    />
     <p class="eyebrow">{@theme.product_name}</p>
     <h1 id="sign-in-title">{@messages["sign_in.title"]}</h1>
     <p class="auth-intro">{@messages["sign_in.intro"]} to <strong>{@client_name}</strong>.</p>
@@ -12,7 +17,12 @@
       <small :if={@correlation_id}>Reference <code>{@correlation_id}</code></small>
     </div>
 
-    <.form for={%{}} as={:login} action={"/#{@issuer_id}/authorize"} class="auth-form">
+    <.form
+      for={%{}}
+      as={:login}
+      action={RobineId.Runtime.path("/#{@issuer_id}/authorize")}
+      class="auth-form"
+    >
       <label for="login_identifier">{@messages["sign_in.identifier"]}</label>
       <input
         id="login_identifier"

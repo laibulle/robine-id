@@ -3,11 +3,11 @@ defmodule RobineId.Clients.Adapters.ConfigurationRepository do
   @behaviour RobineId.Clients.Ports.Repository
 
   alias RobineId.Clients.Entities.Client
-  alias RobineId.Configuration.Adapters.MemoryStore
 
   @impl true
   def get(client_id) do
-    with {:ok, snapshot} <- RobineId.Configuration.active(MemoryStore),
+    with {:ok, snapshot} <-
+           RobineId.Configuration.active(RobineId.Runtime.adapter(:configuration_store)),
          data when is_map(data) <- Enum.find(snapshot.data["clients"], &(&1["id"] == client_id)),
          {:ok, client} <- Client.from_config(data) do
       {:ok, client}

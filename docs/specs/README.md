@@ -26,6 +26,7 @@ Robine ID is a configurable, idempotent OpenID Connect provider built with Elixi
 - [SECU-001 — Authentication Session Security](security/SECU-001-authentication-session-security.md)
 - [OPS-001 — Observability and Health](operations/OPS-001-observability-and-health.md)
 - [OPS-002 — Production Deployment](operations/OPS-002-production-deployment.md)
+- [OPS-003 — Embedded Provider](operations/OPS-003-embedded-provider.md)
 
 ## MVP Scope
 
@@ -71,6 +72,7 @@ Authorization codes, access-token grants, rate-limit counters, and authenticated
 | SECU-001 | `security_test.exs`, authorization and logout controller tests |
 | OPS-001 | `health_controller_test.exs` plus the real-server smoke gate |
 | OPS-002 | release build, readiness, restore drill, and real-client manual gates |
+| OPS-003 | `runtime_test.exs` plus the embedded-host controller integration tests |
 
 Before a release, perform these documented manual checks against the built production assets:
 

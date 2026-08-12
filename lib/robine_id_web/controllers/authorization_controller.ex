@@ -1,22 +1,22 @@
 defmodule RobineIdWeb.AuthorizationController do
   use RobineIdWeb, :controller
 
-  alias RobineId.Clients.Adapters.ConfigurationRepository, as: ClientRepository
-  alias RobineId.Configuration.Adapters.MemoryStore
-  alias RobineId.Identity.Adapters.{BcryptPasswordHasher, ConfigurationUserRepository}
-  alias RobineId.Operations.Adapters.LoggerAuditSink
-  alias RobineId.Protocol.Adapters.MemoryAuthorizationCodeStore
-  alias RobineId.Security.Adapters.MemoryRateLimiter
+  alias RobineId.Runtime
 
   def new(conn, %{"issuer_id" => issuer_id} = params) do
     result =
-      with {:ok, _metadata} <- RobineId.Protocol.discovery(issuer_id, MemoryStore) do
-        RobineId.Protocol.validate_authorization_request(issuer_id, params, ClientRepository)
+      with {:ok, _metadata} <-
+             RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)) do
+        RobineId.Protocol.validate_authorization_request(
+          issuer_id,
+          params,
+          adapter(:client_repository)
+        )
       end
 
     case result do
       {:ok, request} ->
-        {:ok, client} = RobineId.Clients.get(request.client_id, ClientRepository)
+        {:ok, client} = RobineId.Clients.get(request.client_id, adapter(:client_repository))
         theme = theme(issuer_id, request.client_id)
         {:ok, messages} = RobineId.Experience.messages(theme, request.locale)
 
@@ -50,23 +50,23 @@ defmodule RobineIdWeb.AuthorizationController do
          {:ok, _remaining} <-
            RobineId.Security.check_rate_limit(
              {conn.remote_ip, String.downcase(String.trim(identifier))},
-             MemoryRateLimiter,
+             adapter(:rate_limiter),
              rate_limit_options()
            ),
          {:ok, user} <-
            RobineId.Identity.authenticate(
              identifier,
              login["password"] || "",
-             ConfigurationUserRepository,
-             BcryptPasswordHasher
+             adapter(:user_repository),
+             adapter(:password_hasher)
            ),
-         {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, MemoryStore),
-         {:ok, client} <- RobineId.Clients.get(request.client_id, ClientRepository),
+         {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)),
+         {:ok, client} <- RobineId.Clients.get(request.client_id, adapter(:client_repository)),
          {:ok, session_id} <-
            RobineId.Security.start_session(
              user.id,
              session_policy()["max_concurrent"],
-             RobineId.Security.Adapters.MemorySessionRegistry
+             adapter(:session_registry)
            ) do
       identity_claims = configured_claims(user, request.scope)
 
@@ -130,7 +130,7 @@ defmodule RobineIdWeb.AuthorizationController do
 
     with %{issuer_id: ^issuer_id} <- request,
          true <- is_binary(subject),
-         {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, MemoryStore) do
+         {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)) do
       case decision do
         "approve" -> complete_authorization(conn, request, metadata["issuer"], subject, claims)
         "deny" -> deny_authorization(conn, request)
@@ -146,7 +146,7 @@ defmodule RobineIdWeb.AuthorizationController do
 
   defp render_invalid_credentials(conn, issuer_id, request) do
     client_name =
-      case request && RobineId.Clients.get(request.client_id, ClientRepository) do
+      case request && RobineId.Clients.get(request.client_id, adapter(:client_repository)) do
         {:ok, client} -> client.name
         _ -> "the application"
       end
@@ -166,7 +166,7 @@ defmodule RobineIdWeb.AuthorizationController do
 
   defp render_rate_limited(conn, issuer_id, request, retry_after) do
     client_name =
-      case request && RobineId.Clients.get(request.client_id, ClientRepository) do
+      case request && RobineId.Clients.get(request.client_id, adapter(:client_repository)) do
         {:ok, client} -> client.name
         _ -> "the application"
       end
@@ -201,7 +201,7 @@ defmodule RobineIdWeb.AuthorizationController do
            request,
            issuer,
            subject,
-           MemoryAuthorizationCodeStore,
+           adapter(:authorization_code_store),
            Keyword.put(code_options(request.issuer_id), :claims, claims)
          ) do
       {:ok, code} ->
@@ -242,23 +242,23 @@ defmodule RobineIdWeb.AuthorizationController do
   end
 
   defp code_options(issuer_id) do
-    {:ok, issuer} = RobineId.Configuration.issuer(issuer_id, MemoryStore)
+    {:ok, issuer} = RobineId.Configuration.issuer(issuer_id, adapter(:configuration_store))
     policy = issuer["token_policy"] || %{}
     [lifetime: policy["authorization_code_lifetime"] || 60]
   end
 
   defp configured_claims(user, scopes) do
-    {:ok, snapshot} = RobineId.Configuration.active(MemoryStore)
+    {:ok, snapshot} = RobineId.Configuration.active(adapter(:configuration_store))
     RobineId.Identity.map_claims(user, snapshot.data["claims"] || %{}, scopes)
   end
 
   defp session_policy do
-    {:ok, snapshot} = RobineId.Configuration.active(MemoryStore)
+    {:ok, snapshot} = RobineId.Configuration.active(adapter(:configuration_store))
     get_in(snapshot.data, ["authentication", "session"]) || %{"max_concurrent" => 5}
   end
 
   defp rate_limit_options do
-    {:ok, snapshot} = RobineId.Configuration.active(MemoryStore)
+    {:ok, snapshot} = RobineId.Configuration.active(adapter(:configuration_store))
     policy = get_in(snapshot.data, ["authentication", "rate_limit"]) || %{}
 
     [
@@ -268,7 +268,7 @@ defmodule RobineIdWeb.AuthorizationController do
   end
 
   defp theme(issuer_id, client_id) do
-    {:ok, theme} = RobineId.Experience.theme(issuer_id, client_id, MemoryStore)
+    {:ok, theme} = RobineId.Experience.theme(issuer_id, client_id, adapter(:configuration_store))
     theme
   end
 
@@ -302,7 +302,7 @@ defmodule RobineIdWeb.AuthorizationController do
   defp authorization_error(conn, params, error, description) do
     with client_id when is_binary(client_id) <- params["client_id"],
          redirect_uri when is_binary(redirect_uri) <- params["redirect_uri"],
-         {:ok, client} <- RobineId.Clients.get(client_id, ClientRepository),
+         {:ok, client} <- RobineId.Clients.get(client_id, adapter(:client_repository)),
          true <- redirect_uri in client.redirect_uris do
       values = %{"error" => to_string(error), "error_description" => description}
 
@@ -317,8 +317,9 @@ defmodule RobineIdWeb.AuthorizationController do
 
   defp audit(conn, event, attributes) do
     attributes = Map.put(attributes, :correlation_id, correlation_id(conn))
-    RobineId.Operations.audit(event, attributes, LoggerAuditSink)
+    RobineId.Operations.audit(event, attributes, adapter(:audit_sink))
   end
 
+  defp adapter(name), do: Runtime.adapter(name)
   defp correlation_id(conn), do: List.first(get_resp_header(conn, "x-request-id"))
 end

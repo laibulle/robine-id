@@ -10,6 +10,7 @@ import Config
 config :robine_id, :configuration_path, Path.expand("robine_id.json", __DIR__)
 config :robine_id, :configuration_reload_interval, 1_000
 config :robine_id, :secure_cookies, config_env() == :prod
+config :robine_id, :mode, :standalone
 
 config :robine_id,
   ecto_repos: [RobineId.Repo],

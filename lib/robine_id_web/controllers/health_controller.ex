@@ -5,8 +5,8 @@ defmodule RobineIdWeb.HealthController do
 
   def ready(conn, _params) do
     case RobineId.Operations.readiness(
-           RobineId.Configuration.Adapters.MemoryStore,
-           [RobineId.Operations.Adapters.DatabaseHealth]
+           RobineId.Runtime.adapter(:configuration_store),
+           [RobineId.Runtime.adapter(:database_health)]
          ) do
       {:ok, %{revision: revision}} ->
         json(conn, %{status: "ready", revision: revision})

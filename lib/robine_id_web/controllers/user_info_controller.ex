@@ -1,16 +1,13 @@
 defmodule RobineIdWeb.UserInfoController do
   use RobineIdWeb, :controller
 
-  alias RobineId.Identity.Adapters.ConfigurationUserRepository
-  alias RobineId.Protocol.Adapters.MemoryAccessTokenStore
-
   def show(conn, _params) do
     with {:ok, token} <- bearer_token(conn),
          {:ok, claims} <-
            RobineId.Protocol.user_info(
              token,
-             MemoryAccessTokenStore,
-             ConfigurationUserRepository,
+             RobineId.Runtime.adapter(:access_token_store),
+             RobineId.Runtime.adapter(:user_repository),
              []
            ) do
       json(conn, claims)

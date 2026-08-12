@@ -85,8 +85,12 @@ defmodule RobineId.Protocol.Adapters.MemoryKeyStore do
   end
 
   defp key_store_secret do
-    endpoint = Application.fetch_env!(:robine_id, RobineIdWeb.Endpoint)
-    endpoint[:secret_key_base] || raise "secret_key_base is required for signing key persistence"
+    Application.get_env(:robine_id, :key_store_secret) || endpoint_secret()
+  end
+
+  defp endpoint_secret do
+    endpoint = Application.get_env(:robine_id, RobineIdWeb.Endpoint, [])
+    endpoint[:secret_key_base] || raise "key_store_secret is required for signing key persistence"
   end
 
   defp new_key(previous) do

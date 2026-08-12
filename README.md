@@ -6,6 +6,8 @@
 
 Robine ID is a file-configured OpenID Connect provider built with Elixir and Phoenix. It implements the Authorization Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated logout.
 
+It can run as a standalone service or as an embedded OTP dependency mounted inside another Phoenix application. Both modes use the same protocol implementation and configuration model. See [`docs/embedding.md`](docs/embedding.md) for the host contract.
+
 The implementation follows clean architecture. Business domains expose one facade made of `defdelegate` calls; Phoenix, file loading, bcrypt, Ecto, JOSE, Logger, and runtime stores are adapters around use cases and ports. See [`AGENTS.md`](AGENTS.md) for the architectural contract and [`docs/specs`](docs/specs) for normative product requirements.
 
 ## Getting started with Docker

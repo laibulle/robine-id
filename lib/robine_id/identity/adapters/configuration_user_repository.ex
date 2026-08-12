@@ -2,7 +2,6 @@ defmodule RobineId.Identity.Adapters.ConfigurationUserRepository do
   @moduledoc "User repository backed by active file configuration."
   @behaviour RobineId.Identity.Ports.UserRepository
 
-  alias RobineId.Configuration.Adapters.MemoryStore
   alias RobineId.Identity.Entities.User
 
   @impl true
@@ -16,7 +15,8 @@ defmodule RobineId.Identity.Adapters.ConfigurationUserRepository do
   end
 
   defp find_user(predicate) do
-    with {:ok, snapshot} <- RobineId.Configuration.active(MemoryStore),
+    with {:ok, snapshot} <-
+           RobineId.Configuration.active(RobineId.Runtime.adapter(:configuration_store)),
          data when is_map(data) <-
            Enum.find(snapshot.data["users"] || [], predicate),
          {:ok, user} <- User.from_config(data) do

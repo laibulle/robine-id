@@ -1,14 +1,15 @@
 defmodule RobineIdWeb.LogoutController do
   use RobineIdWeb, :controller
 
-  alias RobineId.Clients.Adapters.ConfigurationRepository, as: ClientRepository
-  alias RobineId.Configuration.Adapters.MemoryStore
-  alias RobineId.Protocol.Adapters.MemoryKeyStore
-
   def new(conn, %{"issuer_id" => issuer_id} = params) do
     case validate_return(issuer_id, params) do
       {:ok, return_to} ->
-        {:ok, theme} = RobineId.Experience.theme(issuer_id, nil, MemoryStore)
+        {:ok, theme} =
+          RobineId.Experience.theme(
+            issuer_id,
+            nil,
+            RobineId.Runtime.adapter(:configuration_store)
+          )
 
         conn
         |> put_session(:logout_return_to, return_to)
@@ -30,7 +31,7 @@ defmodule RobineIdWeb.LogoutController do
       RobineId.Security.end_session(
         subject,
         session_id,
-        RobineId.Security.Adapters.MemorySessionRegistry
+        RobineId.Runtime.adapter(:session_registry)
       )
 
     conn =
@@ -41,7 +42,9 @@ defmodule RobineIdWeb.LogoutController do
     if is_binary(return_to) do
       redirect(conn, external: return_to)
     else
-      {:ok, theme} = RobineId.Experience.theme(issuer_id, nil, MemoryStore)
+      {:ok, theme} =
+        RobineId.Experience.theme(issuer_id, nil, RobineId.Runtime.adapter(:configuration_store))
+
       render(conn, :done, page_title: "Signed out", issuer_id: issuer_id, theme: theme)
     end
   end
@@ -57,15 +60,20 @@ defmodule RobineIdWeb.LogoutController do
            "post_logout_redirect_uri" => redirect_uri
          } = params
        ) do
-    with {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, MemoryStore),
+    with {:ok, metadata} <-
+           RobineId.Protocol.discovery(
+             issuer_id,
+             RobineId.Runtime.adapter(:configuration_store)
+           ),
          {:ok, claims} <-
            RobineId.Protocol.verify_id_token(
              token,
              metadata["issuer"],
-             MemoryKeyStore,
+             RobineId.Runtime.adapter(:key_store),
              token_options(issuer_id)
            ),
-         {:ok, client} <- RobineId.Clients.get(claims["aud"], ClientRepository),
+         {:ok, client} <-
+           RobineId.Clients.get(claims["aud"], RobineId.Runtime.adapter(:client_repository)),
          true <- redirect_uri in client.post_logout_redirect_uris do
       {:ok, append_state(redirect_uri, params["state"])}
     else
@@ -85,7 +93,9 @@ defmodule RobineIdWeb.LogoutController do
   end
 
   defp token_options(issuer_id) do
-    {:ok, issuer} = RobineId.Configuration.issuer(issuer_id, MemoryStore)
+    {:ok, issuer} =
+      RobineId.Configuration.issuer(issuer_id, RobineId.Runtime.adapter(:configuration_store))
+
     [clock_skew: get_in(issuer, ["token_policy", "clock_skew"]) || 0]
   end
 end

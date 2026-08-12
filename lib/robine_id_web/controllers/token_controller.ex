@@ -1,14 +1,7 @@
 defmodule RobineIdWeb.TokenController do
   use RobineIdWeb, :controller
 
-  alias RobineId.Protocol.Adapters.{
-    MemoryAccessTokenStore,
-    MemoryAuthorizationCodeStore,
-    MemoryKeyStore
-  }
-
-  alias RobineId.Operations.Adapters.LoggerAuditSink
-  alias RobineId.Clients.Adapters.{ConfigurationRepository, EnvironmentSecretResolver}
+  alias RobineId.Runtime
 
   def create(conn, %{"issuer_id" => _issuer_id} = params) do
     {client_id, authentication_method, secret} = client_credentials(conn, params)
@@ -18,21 +11,21 @@ defmodule RobineIdWeb.TokenController do
       with {:ok, metadata} <-
              RobineId.Protocol.discovery(
                params["issuer_id"],
-               RobineId.Configuration.Adapters.MemoryStore
+               adapter(:configuration_store)
              ),
            {:ok, _client} <-
              RobineId.Clients.authenticate(
                client_id || "",
                authentication_method,
                secret,
-               ConfigurationRepository,
-               EnvironmentSecretResolver
+               adapter(:client_repository),
+               adapter(:secret_resolver)
              ) do
         RobineId.Protocol.exchange_authorization_code(
           Map.put(params, "_issuer", metadata["issuer"]),
-          MemoryAuthorizationCodeStore,
-          MemoryKeyStore,
-          MemoryAccessTokenStore,
+          adapter(:authorization_code_store),
+          adapter(:key_store),
+          adapter(:access_token_store),
           token_options(params["issuer_id"])
         )
       else
@@ -51,7 +44,7 @@ defmodule RobineIdWeb.TokenController do
         RobineId.Operations.audit(
           :token_exchange,
           %{outcome: :success, issuer_id: params["issuer_id"], client_id: params["client_id"]},
-          LoggerAuditSink
+          adapter(:audit_sink)
         )
 
         conn
@@ -69,7 +62,7 @@ defmodule RobineIdWeb.TokenController do
         RobineId.Operations.audit(
           :token_exchange,
           %{outcome: :failure, issuer_id: params["issuer_id"], client_id: params["client_id"]},
-          LoggerAuditSink
+          adapter(:audit_sink)
         )
 
         conn =
@@ -114,7 +107,7 @@ defmodule RobineIdWeb.TokenController do
 
   defp token_options(issuer_id) do
     {:ok, issuer} =
-      RobineId.Configuration.issuer(issuer_id, RobineId.Configuration.Adapters.MemoryStore)
+      RobineId.Configuration.issuer(issuer_id, adapter(:configuration_store))
 
     policy = issuer["token_policy"] || %{}
 
@@ -123,4 +116,6 @@ defmodule RobineIdWeb.TokenController do
       access_token_lifetime: policy["access_token_lifetime"] || 300
     ]
   end
+
+  defp adapter(name), do: Runtime.adapter(name)
 end

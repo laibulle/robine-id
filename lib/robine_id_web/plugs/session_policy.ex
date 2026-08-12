@@ -2,9 +2,6 @@ defmodule RobineIdWeb.Plugs.SessionPolicy do
   @moduledoc "Phoenix inbound adapter for configured session constraints."
   import Plug.Conn
 
-  alias RobineId.Configuration.Adapters.MemoryStore
-  alias RobineId.Security.Adapters.MemorySessionRegistry
-
   def init(options), do: options
 
   def call(conn, _options) do
@@ -13,7 +10,7 @@ defmodule RobineIdWeb.Plugs.SessionPolicy do
     case RobineId.Security.validate_session(
            get_session(conn),
            policy,
-           MemorySessionRegistry,
+           RobineId.Runtime.adapter(:session_registry),
            System.system_time(:second)
          ) do
       {:ok, updates} ->
@@ -29,7 +26,8 @@ defmodule RobineIdWeb.Plugs.SessionPolicy do
   end
 
   defp session_policy do
-    with {:ok, snapshot} <- RobineId.Configuration.active(MemoryStore) do
+    with {:ok, snapshot} <-
+           RobineId.Configuration.active(RobineId.Runtime.adapter(:configuration_store)) do
       get_in(snapshot.data, ["authentication", "session"]) || defaults()
     else
       _ -> defaults()

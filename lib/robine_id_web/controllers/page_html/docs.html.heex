@@ -1,14 +1,19 @@
 <main class="docs-shell" style={"--auth-primary: #{@theme.primary_color}"}>
   <header class="docs-topbar">
-    <a href="/" class="landing-brand" aria-label="Robine ID home">
+    <a href={RobineId.Runtime.path("/")} class="landing-brand" aria-label="Robine ID home">
       <img :if={@theme.logo} src={@theme.logo} alt="" class="configured-logo nav-logo" />
-      <img :if={!@theme.logo} src="/images/brand/robine-mark.png" alt="" class="brand-logo" />
+      <img
+        :if={!@theme.logo}
+        src={RobineId.Runtime.path("/images/brand/robine-mark.png")}
+        alt=""
+        class="brand-logo"
+      />
       <span>Robine <span class="product-suffix">ID</span></span>
     </a>
     <nav class="docs-topnav" aria-label="Documentation navigation">
-      <a href="/">Home</a>
-      <a href={"/#{@issuer_id}/.well-known/openid-configuration"}>Discovery</a>
-      <a href="/health/ready">Status</a>
+      <a href={RobineId.Runtime.path("/")}>Home</a>
+      <a href={RobineId.Runtime.path("/#{@issuer_id}/.well-known/openid-configuration")}>Discovery</a>
+      <a href={RobineId.Runtime.path("/health/ready")}>Status</a>
     </nav>
   </header>
 
@@ -219,7 +224,7 @@
 
       <footer class="docs-footer">
         <p>Ready to integrate?</p>
-        <a href={"/#{@issuer_id}/.well-known/openid-configuration"}>Open the discovery document
+        <a href={RobineId.Runtime.path("/#{@issuer_id}/.well-known/openid-configuration")}>Open the discovery document
         <span aria-hidden="true">→</span></a>
       </footer>
     </article>

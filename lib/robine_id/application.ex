@@ -7,24 +7,30 @@ defmodule RobineId.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      RobineIdWeb.Telemetry,
-      RobineId.Repo,
+    runtime_children = [
       RobineId.Configuration.Adapters.MemoryStore,
       RobineId.Protocol.Adapters.MemoryKeyStore,
       RobineId.Protocol.Adapters.MemoryAuthorizationCodeStore,
       RobineId.Protocol.Adapters.MemoryAccessTokenStore,
       RobineId.Security.Adapters.MemoryRateLimiter,
-      RobineId.Security.Adapters.MemorySessionRegistry,
+      RobineId.Security.Adapters.MemorySessionRegistry
+    ]
+
+    standalone_children = [
+      RobineIdWeb.Telemetry,
+      RobineId.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:robine_id, :ecto_repos), skip: skip_migrations?()},
       {DNSCluster, query: Application.get_env(:robine_id, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: RobineId.PubSub},
-      # Start a worker by calling: RobineId.Worker.start_link(arg)
-      # {RobineId.Worker, arg},
-      # Start to serve requests, typically the last entry
       RobineIdWeb.Endpoint
     ]
+
+    children =
+      case RobineId.Runtime.mode() do
+        :standalone -> runtime_children ++ standalone_children
+        :embedded -> runtime_children
+      end
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -36,7 +42,7 @@ defmodule RobineId.Application do
   # whenever the application is updated.
   @impl true
   def config_change(changed, _new, removed) do
-    RobineIdWeb.Endpoint.config_change(changed, removed)
+    if RobineId.Runtime.standalone?(), do: RobineIdWeb.Endpoint.config_change(changed, removed)
     :ok
   end
 

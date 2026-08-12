@@ -2,7 +2,7 @@ defmodule RobineIdWeb.PageController do
   use RobineIdWeb, :controller
 
   def home(conn, _params) do
-    store = RobineId.Configuration.Adapters.MemoryStore
+    store = RobineId.Runtime.adapter(:configuration_store)
     {:ok, snapshot} = RobineId.Configuration.active(store)
     issuer = List.first(snapshot.data["issuers"])
     {:ok, theme} = RobineId.Experience.theme(issuer["id"], nil, store)
@@ -10,7 +10,7 @@ defmodule RobineIdWeb.PageController do
     ready? =
       match?(
         {:ok, _},
-        RobineId.Operations.readiness(store, [RobineId.Operations.Adapters.DatabaseHealth])
+        RobineId.Operations.readiness(store, [RobineId.Runtime.adapter(:database_health)])
       )
 
     render(conn, :home,
@@ -23,7 +23,7 @@ defmodule RobineIdWeb.PageController do
   end
 
   def docs(conn, _params) do
-    store = RobineId.Configuration.Adapters.MemoryStore
+    store = RobineId.Runtime.adapter(:configuration_store)
     {:ok, snapshot} = RobineId.Configuration.active(store)
     issuer = List.first(snapshot.data["issuers"])
     {:ok, theme} = RobineId.Experience.theme(issuer["id"], nil, store)

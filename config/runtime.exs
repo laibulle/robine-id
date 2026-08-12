@@ -129,6 +129,8 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
+  config :robine_id, :key_store_secret, secret_key_base
+
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :robine_id, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
