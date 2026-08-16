@@ -11,17 +11,21 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help check-variables preflight build login push publish
+.PHONY: help dev check-variables preflight build login push publish
 
 help:
-	@echo "Robine ID container targets"
+	@echo "Robine ID development and container targets"
 	@echo ""
+	@echo "  make dev        Run the Rust development server"
 	@echo "  make build      Build $(VERSION_TAG) and $(LATEST_TAG)"
 	@echo "  make login      Authenticate with Docker Hub"
 	@echo "  make push       Push the already-built version and latest tags"
 	@echo "  make publish    Run preflight, build, and push"
 	@echo ""
-	@echo "Overrides: DOCKERHUB_USER, IMAGE, VERSION, PLATFORM"
+	@echo "Overrides: HOST, PORT, DOCKERHUB_USER, IMAGE, VERSION, PLATFORM"
+
+dev:
+	cargo run --bin robine-id
 
 check-variables:
 	@test -n "$(DOCKERHUB_USER)" || (echo "DOCKERHUB_USER is required" >&2; exit 1)
