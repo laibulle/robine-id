@@ -12,6 +12,7 @@ async fn main() -> io::Result<()> {
         .init();
 
     let application = Application::load().map_err(io::Error::other)?;
+    application.migrate().await.map_err(io::Error::other)?;
     let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let port = env::var("PORT")
         .ok()

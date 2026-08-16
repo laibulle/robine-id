@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use vercel_runtime::{Error, Request, Response, ResponseBody, run, service_fn};
 
 static APPLICATION: OnceLock<Result<Application, String>> = OnceLock::new();
+static MIGRATED: OnceLock<()> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -21,6 +22,13 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
         .get_or_init(|| Application::load().map_err(|error| error.to_string()))
         .clone()
         .map_err(|error| -> Error { error.into() })?;
+    if MIGRATED.get().is_none() {
+        application
+            .migrate()
+            .await
+            .map_err(|error| -> Error { Box::new(error) })?;
+        let _ = MIGRATED.set(());
+    }
 
     let (parts, body) = request.into_parts();
     let body = http_body_util::BodyExt::collect(body).await?.to_bytes();

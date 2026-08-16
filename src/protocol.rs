@@ -1,5 +1,7 @@
 use crate::configuration::{Client, Snapshot};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveryDocument {
@@ -29,6 +31,19 @@ pub struct AuthorizationRequest {
     pub nonce: String,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuthorizationGrant {
+    pub issuer: String,
+    pub subject: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub nonce: Option<String>,
+    pub code_challenge: Option<String>,
+    pub claims: Value,
+    pub expires_at: DateTime<Utc>,
 }
 
 impl DiscoveryDocument {
@@ -87,20 +102,39 @@ impl AuthorizationRequest {
             return Err("The redirect URI is not registered for this client");
         }
 
-        let pkce_required = client.client_type == "public" || client.pkce_required.unwrap_or(false);
+        let requested_scopes = self.scope.split_ascii_whitespace().collect::<Vec<_>>();
+        if requested_scopes
+            .iter()
+            .any(|scope| !client.scopes.iter().any(|allowed| allowed == scope))
+        {
+            return Err("One or more requested scopes are not allowed");
+        }
+
+        let pkce_required = client.client_type == "public" || client.pkce_required.unwrap_or(true);
         if pkce_required
             && (self
                 .code_challenge
                 .as_deref()
                 .unwrap_or_default()
                 .is_empty()
-                || self.code_challenge_method.as_deref() != Some("S256"))
+                || self.code_challenge_method.as_deref() != Some("S256")
+                || !self
+                    .code_challenge
+                    .as_deref()
+                    .is_some_and(valid_pkce_challenge))
         {
             return Err("PKCE using S256 is required for this client");
         }
 
         Ok(client)
     }
+}
+
+fn valid_pkce_challenge(challenge: &str) -> bool {
+    (43..=128).contains(&challenge.len())
+        && challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[cfg(test)]
@@ -116,6 +150,7 @@ mod tests {
                     id: "default".to_owned(),
                     url: "https://id.example/default".to_owned(),
                     scopes: vec!["openid".to_owned()],
+                    token_policy: crate::configuration::TokenPolicy::default(),
                 }],
                 clients: vec![Client {
                     id: "web".to_owned(),
@@ -125,8 +160,14 @@ mod tests {
                     post_logout_redirect_uris: vec![],
                     scopes: vec!["openid".to_owned()],
                     pkce_required: None,
+                    nonce_required: None,
+                    consent_required: None,
+                    authentication_method: None,
+                    secret_reference: None,
                 }],
                 branding: Branding::default(),
+                users: vec![],
+                claims: Default::default(),
             },
             revision: "revision".to_owned(),
         }
@@ -148,6 +189,25 @@ mod tests {
         assert_eq!(
             request.validate(&snapshot(), "default").unwrap_err(),
             "The redirect URI is not registered for this client"
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_pkce_challenge() {
+        let request = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: "web".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid".to_owned(),
+            state: "state".to_owned(),
+            nonce: "nonce".to_owned(),
+            code_challenge: Some("too-short".to_owned()),
+            code_challenge_method: Some("S256".to_owned()),
+        };
+
+        assert_eq!(
+            request.validate(&snapshot(), "default").unwrap_err(),
+            "PKCE using S256 is required for this client"
         );
     }
 }

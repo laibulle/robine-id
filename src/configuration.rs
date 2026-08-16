@@ -13,6 +13,10 @@ pub struct RootConfiguration {
     pub clients: Vec<Client>,
     #[serde(default)]
     pub branding: Branding,
+    #[serde(default)]
+    pub users: Vec<User>,
+    #[serde(default)]
+    pub claims: std::collections::HashMap<String, ClaimMapping>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,6 +25,8 @@ pub struct Issuer {
     pub url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub token_policy: TokenPolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,6 +43,49 @@ pub struct Client {
     pub scopes: Vec<String>,
     #[serde(default)]
     pub pkce_required: Option<bool>,
+    #[serde(default)]
+    pub nonce_required: Option<bool>,
+    #[serde(default)]
+    pub consent_required: Option<bool>,
+    pub authentication_method: Option<String>,
+    pub secret_reference: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct User {
+    pub id: String,
+    pub identifier: String,
+    pub password_hash: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    #[serde(default)]
+    pub claims: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ClaimMapping {
+    pub source: String,
+    pub scope: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TokenPolicy {
+    #[serde(default = "default_authorization_code_lifetime")]
+    pub authorization_code_lifetime: i64,
+    #[serde(default = "default_token_lifetime")]
+    pub id_token_lifetime: i64,
+    #[serde(default = "default_token_lifetime")]
+    pub access_token_lifetime: i64,
+}
+
+impl Default for TokenPolicy {
+    fn default() -> Self {
+        Self {
+            authorization_code_lifetime: default_authorization_code_lifetime(),
+            id_token_lifetime: default_token_lifetime(),
+            access_token_lifetime: default_token_lifetime(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -201,6 +250,18 @@ impl Snapshot {
     pub fn default_issuer(&self) -> Option<&Issuer> {
         self.configuration.issuers.first()
     }
+
+    pub fn user_by_identifier(&self, identifier: &str) -> Option<&User> {
+        let normalized = identifier.trim().to_lowercase();
+        self.configuration
+            .users
+            .iter()
+            .find(|user| user.identifier.trim().to_lowercase() == normalized)
+    }
+
+    pub fn user(&self, id: &str) -> Option<&User> {
+        self.configuration.users.iter().find(|user| user.id == id)
+    }
 }
 
 fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError> {
@@ -247,6 +308,14 @@ fn default_product_name() -> String {
 
 fn default_primary_color() -> String {
     "#176b70".to_owned()
+}
+
+fn default_authorization_code_lifetime() -> i64 {
+    60
+}
+
+fn default_token_lifetime() -> i64 {
+    300
 }
 
 #[cfg(test)]
