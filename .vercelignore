@@ -1,0 +1,10 @@
+target/**
+_build/**
+deps/**
+cover/**
+test/**
+*.db
+*.db-*
+*_signing_keys.bin
+*_signing_keys.bin.tmp
+

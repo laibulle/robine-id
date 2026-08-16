@@ -1,0 +1,41 @@
+[package]
+name = "robine-id-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+name = "robine_id"
+path = "src/lib.rs"
+
+[[bin]]
+name = "robine-id"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "vercel"
+path = "api/index.rs"
+
+[dependencies]
+actix-web = "4.11"
+askama = "0.14"
+hex = "0.4"
+http-body-util = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+vercel_runtime = { version = "2.4", features = ["actix"] }
+
+[dev-dependencies]
+actix-http = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+strip = true

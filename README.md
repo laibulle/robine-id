@@ -91,6 +91,36 @@ the badge above.
 
 Then open <http://localhost:4001>.
 
+## Rust migration preview
+
+The replacement runtime is being introduced alongside Phoenix so protocol behaviour can be
+migrated and verified incrementally. It uses Actix Web for both the conventional HTTP server and
+the Vercel Function entrypoint, with Askama for server-rendered HTML.
+
+Run the Rust server against the existing JSON configuration:
+
+```sh
+cargo run --bin robine-id
+```
+
+It listens on `127.0.0.1:4001` by default. `HOST`, `PORT`, `ROBINE_ID_CONFIG`, and
+`ROBINE_ID_APPLICATIONS_DIR` can override those defaults. The initial slice implements the home
+and sign-in pages, health endpoints, provider discovery, declarative application loading, and the
+front-door validation for Authorization Code with PKCE requests.
+
+Run the Rust quality gate with:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
+
+The `api/index.rs` binary and `vercel.json` expose the same Actix routes as one Vercel Function.
+Configuration files are immutable for a deployment; stateful protocol data such as authorization
+codes, sessions, tokens, rate limits, and signing keys will move to PostgreSQL before the Rust
+runtime replaces Phoenix in production.
+
 The checked-in development configuration contains one public client and one development identity:
 
 - client ID: `development-client`

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ product_name }}</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="landing-shell" style="--auth-primary: {{ primary_color }}">
+      <nav class="landing-nav" aria-label="Primary navigation">
+        <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
+          <img src="/images/brand/robine-mark.png" alt="" class="brand-logo">
+          <span>Robine <span class="product-suffix">ID</span></span>
+        </a>
+        <div class="landing-nav-actions">
+          <span class="status-pill is-ready"><span aria-hidden="true"></span>Rust runtime ready</span>
+        </div>
+      </nav>
+
+      <section class="landing-hero" aria-labelledby="hero-title">
+        <p class="eyebrow">Identity, thoughtfully delivered</p>
+        <h1 id="hero-title">A secure sign-in experience people will enjoy using.</h1>
+        <p class="landing-lead">
+          {{ product_name }} is moving to a portable Rust runtime, with standards-oriented OIDC and configuration you can version with confidence.
+        </p>
+        <div class="landing-actions">
+          <a class="primary-link" href="/{{ issuer_id }}/.well-known/openid-configuration">Open discovery document</a>
+          <a class="secondary-link" href="/health/ready">Check readiness</a>
+        </div>
+      </section>
+
+      <section class="feature-grid" aria-label="Product principles">
+        <article><span class="feature-number">01</span><h2>Portable by design</h2><p>One Actix application for a conventional server and Vercel Functions.</p></article>
+        <article><span class="feature-number">02</span><h2>Server rendered</h2><p>Askama templates keep authentication fast, accessible, and JavaScript optional.</p></article>
+        <article><span class="feature-number">03</span><h2>Migration friendly</h2><p>The existing declarative JSON configuration remains the source of truth.</p></article>
+      </section>
+
+      <footer class="landing-footer">
+        <span>Revision <code>{{ revision }}</code></span>
+        <span>Built with Rust + Actix + Askama</span>
+      </footer>
+    </main>
+  </body>
+</html>
+

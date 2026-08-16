@@ -35,6 +35,9 @@ robine_id-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Rust build artifacts.
+/target/
+
 # Local release secrets.
 /.env.release
 

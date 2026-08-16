@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Authorization error · {{ product_name }}</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="auth-shell" style="--auth-primary: {{ primary_color }}">
+      <section class="auth-card" aria-labelledby="error-title">
+        <div class="error-mark" aria-hidden="true">!</div>
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="error-title">Authorization request rejected</h1>
+        <div class="error-summary standalone-error" role="alert">{{ message }}</div>
+        <a class="primary-link error-action" href="/">Return home</a>
+      </section>
+    </main>
+  </body>
+</html>
+
