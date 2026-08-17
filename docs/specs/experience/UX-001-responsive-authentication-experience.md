@@ -16,10 +16,15 @@ Robine ID provides a polished, fast, accessible authentication experience across
 - Validation MUST be shown near the relevant field and summarized accessibly without clearing valid user input.
 - Password fields MUST support reveal/hide controls and password-manager-compatible autocomplete metadata.
 - Authentication pages MUST remain functional without client-side JavaScript unless a configured authentication method inherently requires it.
+- A form-post authorization handoff MUST expose a visible labeled fallback button while also
+  submitting automatically when the same-origin bundled script executes.
 - The UI MUST avoid revealing whether an account exists except where an explicitly configured flow requires disclosure.
 - User-visible protocol failures MUST provide a safe recovery action and a correlation identifier.
 - Login inputs MUST use stable labels and `autocomplete="username"` and `autocomplete="current-password"` hints.
 - Sensitive password values MUST never be rendered back after a failed submission.
+- Overlong or empty credential values MUST use the same generic invalid-credential presentation;
+  an overlong identifier MUST NOT be reflected back into the page.
+- A valid OIDC `login_hint` SHOULD prefill the identifier without changing generic error behavior.
 - Error summaries MUST use an announced alert role. HTTP status MUST remain meaningful independently of visual content.
 - Consent MUST identify the client and explain every requested scope in plain language.
 - Destructive or denying actions MUST be visually distinguishable from the primary approving action.

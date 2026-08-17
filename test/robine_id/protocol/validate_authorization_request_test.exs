@@ -23,6 +23,7 @@ defmodule RobineId.Protocol.ValidateAuthorizationRequestTest do
         "id" => "browser",
         "type" => "public",
         "redirect_uris" => ["https://app.example.test/callback"],
+        "resources" => ["https://api.example.test/orders"],
         "scopes" => ["openid", "profile"]
       })
 
@@ -36,6 +37,20 @@ defmodule RobineId.Protocol.ValidateAuthorizationRequestTest do
 
     assert request.scope == ["openid", "profile"]
     assert request.code_challenge == @challenge
+  end
+
+  test "accepts only a resource registered by the client" do
+    params = Map.put(@params, "resource", "https://api.example.test/orders")
+
+    assert {:ok, %AuthorizationRequest{resource: "https://api.example.test/orders"}} =
+             RobineId.Protocol.validate_authorization_request("main", params, MemoryRepository)
+
+    assert {:error, {:invalid_target, _message}} =
+             RobineId.Protocol.validate_authorization_request(
+               "main",
+               Map.put(@params, "resource", "https://other.example.test/orders"),
+               MemoryRepository
+             )
   end
 
   test "requires exact redirect URI matching" do

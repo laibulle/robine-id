@@ -17,6 +17,20 @@ Robine ID is a configurable, idempotent OpenID Connect provider whose production
 - [OIDC-003 — Token and Key Management](protocol/OIDC-003-token-and-key-management.md)
 - [OIDC-004 — UserInfo](protocol/OIDC-004-userinfo.md)
 - [OIDC-005 — RP-Initiated Logout](protocol/OIDC-005-rp-initiated-logout.md)
+- [OIDC-006 — Offline Access and Refresh Tokens](protocol/OIDC-006-offline-access.md)
+- [OIDC-007 — Pushed Authorization Requests](protocol/OIDC-007-pushed-authorization-requests.md)
+- [OIDC-008 — Form Post Response Mode](protocol/OIDC-008-form-post-response-mode.md)
+- [OIDC-009 — Signed Authorization Request Objects](protocol/OIDC-009-signed-authorization-request-objects.md)
+- [OIDC-010 — JWT-Secured Authorization Response Mode](protocol/OIDC-010-jarm.md)
+- [OIDC-011 — Claims Parameter](protocol/OIDC-011-claims-parameter.md)
+- [OAUTH-001 — Token Introspection and Revocation](protocol/OAUTH-001-token-status.md)
+- [OAUTH-002 — Client Credentials Grant](protocol/OAUTH-002-client-credentials.md)
+- [OAUTH-003 — Resource Indicators](protocol/OAUTH-003-resource-indicators.md)
+- [OAUTH-004 — JWT Bearer Client Authentication](protocol/OAUTH-004-private-key-jwt.md)
+- [OAUTH-005 — Demonstrating Proof of Possession](protocol/OAUTH-005-dpop.md)
+- [OAUTH-006 — OAuth 2.0 Token Exchange](protocol/OAUTH-006-token-exchange.md)
+- [OAUTH-007 — JWT Access Token Profile](protocol/OAUTH-007-jwt-access-tokens.md)
+- [OAUTH-008 — Device Authorization Grant](protocol/OAUTH-008-device-authorization.md)
 - [APPL-001 — Declarative Application Registration](applications/APPL-001-declarative-application-registration.md)
 - [CONF-001 — File-Based Configuration](configuration/CONF-001-file-based-configuration.md)
 - [CONF-002 — Atomic and Idempotent Reconciliation](configuration/CONF-002-atomic-idempotent-reconciliation.md)
@@ -24,17 +38,35 @@ Robine ID is a configurable, idempotent OpenID Connect provider whose production
 - [UX-002 — Configurable Branding and Content](experience/UX-002-configurable-branding-and-content.md)
 - [IDEN-001 — Local Identities and Claims](identity/IDEN-001-local-identities-and-claims.md)
 - [SECU-001 — Authentication Session Security](security/SECU-001-authentication-session-security.md)
+- [SECU-002 — TOTP Multi-Factor Authentication](security/SECU-002-totp-multi-factor-authentication.md)
 - [OPS-001 — Observability and Health](operations/OPS-001-observability-and-health.md)
 - [OPS-002 — Production Deployment](operations/OPS-002-production-deployment.md)
 - [OPS-003 — Embedded Provider](operations/OPS-003-embedded-provider.md)
 
 ## Production scope
 
-The production runtime is a file-configured Rust OpenID Provider for trusted operators. It supports local password identities, Authorization Code Flow with mandatory PKCE S256 for public clients, public and `client_secret_basic`/`client_secret_post` confidential clients, signed ID tokens, opaque bearer access tokens, UserInfo, consent, and RP-initiated logout.
+The production runtime is a file-configured Rust OpenID Provider for trusted operators. It supports
+local password identities, Authorization Code Flow with mandatory PKCE S256 for public clients,
+public and `client_secret_basic`/`client_secret_post`/`private_key_jwt` confidential clients, signed ID tokens,
+bearer or DPoP sender-constrained opaque or RFC 9068 JWT access tokens, rotating refresh tokens for consented offline access, UserInfo, consent, and
+RP-initiated logout. Clients may push validated authorization requests into PostgreSQL before the
+browser redirect and use a short-lived single-use PAR reference. Confidential backend services can
+also obtain short-lived issuer-formatted tokens through the Client Credentials Grant without creating an end-user session.
+An explicitly enabled confidential client can exchange its own active access token for a
+downscoped, shorter-lived token aimed at another registered resource.
+Browser clients may receive authorization results through query redirects, hardened auto-submitted
+forms, or audience-bound RS256 JARM responses over either transport.
+CLI, television, and input-constrained clients may use the Device Authorization Grant with a
+rate-limited Askama verification journey and PostgreSQL-coordinated polling across instances.
 
-The following are explicitly outside the current scope: dynamic client registration, refresh tokens, implicit and hybrid flows, device authorization, resource-owner password grants, federation, social login, MFA, account recovery, self-service enrollment, an administration UI, token introspection, and token revocation.
+The following are explicitly outside the current scope: dynamic client registration, implicit and
+hybrid flows, resource-owner password grants,
+federation, social login, self-service MFA enrollment or recovery, account recovery, and an administration UI.
 
-Authorization codes, access-token grants, rate-limit counters, authenticated sessions, consent/logout transactions, and encrypted signing keys are persisted in PostgreSQL. Atomic consumption and shared storage allow conventional Actix and Vercel instances to coordinate through the same database.
+Authorization codes, access/refresh-token grants, rate-limit counters, authenticated sessions,
+consent/logout transactions, and encrypted signing keys are persisted in PostgreSQL. Atomic
+consumption and shared storage allow conventional Actix and Vercel instances to coordinate through
+the same database.
 
 ## Domains
 
@@ -58,19 +90,34 @@ Authorization codes, access-token grants, rate-limit counters, authenticated ses
 
 | Specification | Evidence |
 | --- | --- |
-| OIDC-001 | Rust web/protocol tests plus `discover_provider_test.exs`, `discovery_controller_test.exs` |
-| OIDC-002 | `validate_authorization_request_test.exs`, `authorization_code_flow_test.exs`, `authorization_controller_test.exs` |
-| OIDC-003 | Rust token/PostgreSQL integration tests plus `token_and_key_management_test.exs`, `jwks_controller_test.exs` |
-| OIDC-004 | `user_info_controller_test.exs`, `authorization_code_flow_test.exs` |
-| OIDC-005 | `logout_controller_test.exs`, `security_test.exs` |
-| APPL-001 | `clients_test.exs`, `configuration_test.exs` |
-| CONF-001 | `configuration_test.exs` and the `robine_id.config.*` delivery gates |
-| CONF-002 | `configuration_test.exs`, `configuration/memory_store_test.exs` |
-| UX-001 | `authorization_controller_test.exs`, `logout_controller_test.exs`, `page_controller_test.exs` |
-| UX-002 | `experience_test.exs`, localized authorization controller tests |
-| IDEN-001 | `identity_test.exs`, authorization controller tests |
-| SECU-001 | `security_test.exs`, authorization and logout controller tests |
-| OPS-001 | `health_controller_test.exs` plus the real-server smoke gate |
+| OIDC-001 | Rust discovery/protocol tests and `make release-smoke` |
+| OIDC-002 | Rust protocol/web tests, PostgreSQL atomic-consumption test, and the two-instance smoke journey |
+| OIDC-003 | Rust token/PostgreSQL tests plus rotation and restore checks in `make release-smoke` |
+| OIDC-004 | Rust bearer/UserInfo tests and cross-instance UserInfo in `make release-smoke` |
+| OIDC-005 | Rust logout validation plus cross-instance logout in `make release-smoke` |
+| OIDC-006 | Rust protocol/PostgreSQL tests plus cross-instance rotation, restore, and replay detection in `make release-smoke` |
+| OIDC-007 | Rust protocol/PostgreSQL tests plus cross-instance PAR creation, consumption, and replay rejection in `make release-smoke` |
+| OIDC-008 | Rust protocol/Askama/PostgreSQL/Vercel tests plus cross-instance consent, form delivery, and code exchange in `make release-smoke` |
+| OIDC-009 | Rust JWT/merge/PostgreSQL tests plus direct, conflicting, replayed, PAR, and cross-instance checks in `make release-smoke` |
+| OIDC-010 | Rust signing/discovery tests plus signed query success, signed form error, cross-instance code exchange, and JWKS checks in `make release-smoke` |
+| OIDC-011 | Rust parser, policy, GET/POST/PAR/JAR propagation tests plus essential MFA enforcement in `make release-smoke` |
+| OAUTH-001 | Rust configuration/PostgreSQL tests plus cross-instance introspection and revocation in `make release-smoke` |
+| OAUTH-002 | Rust configuration/PostgreSQL/Vercel tests plus cross-instance issuance, introspection, UserInfo rejection, and revocation in `make release-smoke` |
+| OAUTH-003 | Rust protocol/configuration/PostgreSQL tests plus cross-instance audience issuance, introspection, target rejection, and code exchange in `make release-smoke` |
+| OAUTH-004 | Rust JWT/configuration/PostgreSQL tests plus cross-instance PAR, token, introspection, revocation, wrong-audience, and replay checks in `make release-smoke` |
+| OAUTH-005 | Rust proof/discovery/PostgreSQL/Vercel tests plus bound code, token, UserInfo, refresh, introspection, and cross-instance replay checks in `make release-smoke` |
+| OAUTH-006 | Rust configuration/policy/PostgreSQL tests plus cross-instance downscoping, target, introspection, and rejection checks in `make release-smoke` |
+| OAUTH-007 | Rust signing/discovery tests, PostgreSQL offline-verification test, and opaque/JWT cross-instance checks in `make release-smoke` |
+| OAUTH-008 | Rust configuration/discovery/Askama tests, PostgreSQL state-machine test, and cross-instance approval, denial, polling, refresh, UserInfo, and introspection in `make release-smoke` |
+| APPL-001 | Rust strict configuration and client-authentication tests |
+| CONF-001 | Rust configuration tests and `make config-*` delivery gates |
+| CONF-002 | Rust semantic fingerprint, preview, reload, and atomic snapshot tests |
+| UX-001 | Rust Askama/web tests and the manual browser/accessibility release checklist |
+| UX-002 | Rust branding, escaping, locale-fallback, and rendered-login tests |
+| IDEN-001 | Rust configuration, bcrypt authentication, claim mapping, and UserInfo tests |
+| SECU-001 | Rust web/PostgreSQL tests and multi-instance session/replay checks in `make release-smoke` |
+| SECU-002 | RFC 6238 vectors, Rust configuration/Askama/token tests, PostgreSQL challenge/counter tests, and Authorization Code plus Device Flow journeys in `make release-smoke` |
+| OPS-001 | Rust health/metrics tests, JSON operational events, and the real-server smoke gate |
 | OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), release build, readiness, and real-client manual gates |
 | OPS-003 | retained Phoenix compatibility only: `runtime_test.exs` and embedded-host tests |
 

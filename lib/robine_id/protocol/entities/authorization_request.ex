@@ -11,7 +11,7 @@ defmodule RobineId.Protocol.Entities.AuthorizationRequest do
     :code_challenge,
     :code_challenge_method
   ]
-  defstruct @enforce_keys ++ [locale: nil]
+  defstruct @enforce_keys ++ [locale: nil, resource: nil]
 
   @type t :: %__MODULE__{}
 end

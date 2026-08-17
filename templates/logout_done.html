@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ messages.locale }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Signed out · {{ product_name }}</title>
+    <title>{{ messages.signed_out_title }} · {{ product_name }}</title>
     {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
   </head>
@@ -12,9 +12,9 @@
       <section class="auth-card" aria-labelledby="signed-out-title">
         {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<div class="success-mark" aria-hidden="true">✓</div>{% endif %}
         <p class="eyebrow">{{ product_name }}</p>
-        <h1 id="signed-out-title">You're signed out</h1>
-        <p class="auth-intro">Your session on this device has ended safely.</p>
-        <a class="primary-link full-width" href="/">Return home</a>
+        <h1 id="signed-out-title">{{ messages.signed_out_title }}</h1>
+        <p class="auth-intro">{{ messages.signed_out_intro }}</p>
+        <a id="signed-out-home" class="primary-link full-width" href="/">{{ messages.return_home }}</a>
       </section>
     </main>
   </body>

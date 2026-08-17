@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "backend-service",
+  "name": "Backend Service",
+  "type": "confidential",
+  "redirect_uris": [],
+  "resources": ["https://api.example.com"],
+  "scopes": ["service.read"],
+  "grant_types": ["client_credentials"],
+  "authentication_method": "client_secret_basic",
+  "secret_reference": {
+    "provider": "env",
+    "key": "BACKEND_SERVICE_CLIENT_SECRET"
+  },
+  "introspection_allowed": false
+}

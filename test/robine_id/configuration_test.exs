@@ -59,10 +59,100 @@ defmodule RobineId.ConfigurationTest do
     assert Enum.any?(errors, &String.contains?(&1, "unknown_policy"))
   end
 
+  test "accepts and bounds Rust PAR token policy compatibility fields" do
+    [issuer] = @valid["issuers"]
+
+    policy = %{
+      "browser_authorization_lifetime" => 600,
+      "pushed_authorization_request_lifetime" => 90,
+      "pushed_authorization_request_limit" => 120,
+      "pushed_authorization_request_window" => 60,
+      "device_code_lifetime" => 600,
+      "device_poll_interval" => 5,
+      "require_pushed_authorization_requests" => true
+    }
+
+    assert {:ok, %Snapshot{}} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", policy)]})
+
+    invalid = Map.put(policy, "pushed_authorization_request_lifetime", 9)
+
+    assert {:error, errors} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", invalid)]})
+
+    assert Enum.any?(errors, &String.contains?(&1, "must be between 10 and 600"))
+
+    invalid = Map.put(policy, "browser_authorization_lifetime", 59)
+
+    assert {:error, errors} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", invalid)]})
+
+    assert Enum.any?(errors, &String.contains?(&1, "must be between 60 and 3600"))
+
+    invalid = Map.put(policy, "require_pushed_authorization_requests", "yes")
+
+    assert {:error, errors} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", invalid)]})
+
+    assert Enum.any?(errors, &String.contains?(&1, "must be a boolean"))
+
+    invalid = Map.put(policy, "device_code_lifetime", 299)
+
+    assert {:error, errors} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", invalid)]})
+
+    assert Enum.any?(errors, &String.contains?(&1, "must be between 300 and 1800"))
+
+    invalid = Map.put(policy, "device_poll_interval", 4)
+
+    assert {:error, errors} =
+             Snapshot.new(%{@valid | "issuers" => [Map.put(issuer, "token_policy", invalid)]})
+
+    assert Enum.any?(errors, &String.contains?(&1, "must be between 5 and 60"))
+  end
+
+  test "accepts redirectless device clients but not redirectless browser clients" do
+    grant = "urn:ietf:params:oauth:grant-type:device_code"
+
+    device = %{
+      "id" => "television",
+      "type" => "public",
+      "redirect_uris" => [],
+      "scopes" => ["openid"],
+      "grant_types" => [grant]
+    }
+
+    assert {:ok, %Snapshot{}} = Snapshot.new(%{@valid | "clients" => [device]})
+
+    browser = %{device | "grant_types" => ["authorization_code"]}
+    assert {:error, errors} = Snapshot.new(%{@valid | "clients" => [browser]})
+    assert Enum.any?(errors, &String.contains?(&1, "requires a redirect URI"))
+  end
+
+  test "accepts and validates per-client mandatory PAR compatibility" do
+    [client] = @valid["clients"]
+
+    assert {:ok, %Snapshot{}} =
+             Snapshot.new(%{
+               @valid
+               | "clients" => [Map.put(client, "require_pushed_authorization_requests", true)]
+             })
+
+    invalid =
+      client
+      |> Map.put("grant_types", ["refresh_token"])
+      |> Map.put("require_pushed_authorization_requests", true)
+
+    assert {:error, errors} = Snapshot.new(%{@valid | "clients" => [invalid]})
+    assert Enum.any?(errors, &String.contains?(&1, "requires the authorization_code grant"))
+  end
+
   test "rejects mappings for protocol-reserved claims" do
-    data = Map.put(@valid, "claims", %{"iss" => %{"source" => "email", "scope" => "email"}})
-    assert {:error, errors} = Snapshot.new(data)
-    assert Enum.any?(errors, &String.contains?(&1, "reserved by OpenID Connect"))
+    for claim <- ~w(iss auth_time at_hash azp) do
+      data = Map.put(@valid, "claims", %{claim => %{"source" => "email", "scope" => "email"}})
+      assert {:error, errors} = Snapshot.new(data)
+      assert Enum.any?(errors, &String.contains?(&1, "reserved by OpenID Connect"))
+    end
   end
 
   test "preview classifies stable resource operations without mutating state" do

@@ -125,6 +125,12 @@ body {
   font-family: var(--auth-font, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--auth-primary) 45%, transparent);
+  outline-offset: 3px;
+}
+
 .auth-shell {
   min-height: 100vh;
   display: grid;
@@ -146,22 +152,8 @@ body {
   backdrop-filter: blur(16px);
 }
 
-.brand-mark {
-  display: grid;
-  width: 3rem;
-  height: 3rem;
-  place-items: center;
-  border-radius: 1rem;
-  color: white;
-  background: linear-gradient(145deg, #3868ee, #183dba);
-  box-shadow: 0 0.6rem 1.2rem rgba(40, 85, 217, 0.24);
-  font-size: 1.35rem;
-  font-weight: 800;
-}
-
 .brand-logo { display: block; width: 2.65rem; height: 2.65rem; flex: none; object-fit: contain; }
 .auth-brand-logo { display: block; width: 3.5rem; height: 3.5rem; object-fit: contain; }
-.product-suffix { color: color-mix(in oklab, var(--auth-ink) 38%, transparent); font-weight: 600; }
 .success-mark { display: grid; width: 3rem; height: 3rem; place-items: center; border-radius: 1rem; color: #fffdf6; background: var(--auth-primary); font-size: 1.25rem; font-weight: 900; }
 
 .configured-logo { display: block; width: auto; max-width: min(100%, 12rem); height: 3rem; object-fit: contain; }
@@ -211,6 +203,12 @@ body {
 }
 
 .auth-form input:focus { border-color: var(--auth-primary); box-shadow: 0 0 0 3px rgba(40, 85, 217, 0.1); }
+.auth-form input[aria-invalid="true"] { border-color: var(--auth-error); }
+#totp_code {
+  font: 800 1.35rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.22em;
+  text-align: center;
+}
 .password-field { position: relative; }
 .password-field input { padding-right: 4.5rem; }
 
@@ -253,6 +251,11 @@ body {
   font-size: 0.88rem;
 }
 
+.error-summary:focus-visible {
+  outline: 3px solid rgba(121, 20, 33, 0.28);
+  outline-offset: 3px;
+}
+
 .error-mark {
   display: grid;
   width: 3rem;
@@ -266,8 +269,6 @@ body {
 }
 
 .standalone-error { margin-top: 1.5rem; }
-.correlation-reference { color: var(--auth-muted); font-size: 0.82rem; }
-.correlation-reference code { color: var(--auth-ink); }
 .error-action { display: inline-block; margin-top: 0.5rem; }
 
 .consent-list {
@@ -283,6 +284,24 @@ body {
 .consent-actions { display: grid; gap: 0.65rem; }
 .consent-actions .primary-action { margin-top: 0; }
 .full-width { width: 100%; }
+
+.device-code {
+  margin: 0 0 1.5rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--auth-border);
+  border-radius: 0.8rem;
+  color: var(--auth-ink);
+  background: #f5f7fb;
+  font: 850 clamp(1.4rem, 8vw, 2rem) ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+.device-warning {
+  border-left-color: #d28a18;
+  color: #71490b;
+  background: #fff7e8;
+}
 
 .secondary-action {
   min-height: 3rem;
@@ -300,7 +319,9 @@ body {
 }
 
 @media (forced-colors: active) {
-  .auth-card, .auth-form input, .primary-action { border: 1px solid CanvasText; }
+  .auth-card, .auth-form input, .primary-action, .secondary-action, .reveal-password,
+  .primary-link, .secondary-link { border: 1px solid ButtonText; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid Highlight; }
 }
 
 .landing-shell {
@@ -316,7 +337,6 @@ body {
 .landing-nav, .landing-hero, .feature-grid, .landing-footer { width: min(100%, 72rem); margin-inline: auto; }
 .landing-nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .landing-brand { display: flex; align-items: center; gap: 0.8rem; color: var(--auth-ink); font-weight: 800; text-decoration: none; }
-.landing-brand .brand-mark { width: 2.5rem; height: 2.5rem; border-radius: 0.8rem; font-size: 1rem; }
 .landing-nav-actions { display: flex; align-items: center; gap: 1rem; }
 .nav-text-link { color: var(--auth-muted); font-size: 0.86rem; font-weight: 700; text-decoration: none; transition: color 140ms ease; }
 .nav-text-link:hover { color: var(--auth-primary); }

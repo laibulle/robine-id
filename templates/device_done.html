@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="{{ messages.locale }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% if approved %}{{ messages.device_approved_title }}{% else %}{{ messages.device_denied_title }}{% endif %} · {{ product_name }}</title>
+    {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="auth-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
+      <section class="auth-card" aria-labelledby="device-done-title">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">{% endif %}
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="device-done-title">{% if approved %}{{ messages.device_approved_title }}{% else %}{{ messages.device_denied_title }}{% endif %}</h1>
+        <p class="auth-intro">{% if approved %}{{ messages.device_approved_intro }}{% else %}{{ messages.device_denied_intro }}{% endif %}</p>
+      </section>
+    </main>
+  </body>
+</html>

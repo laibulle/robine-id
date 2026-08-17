@@ -12,6 +12,7 @@ defmodule RobineId.Protocol.UseCases.ValidateAuthorizationRequest do
          :ok <- nonce(client, params["nonce"]),
          :ok <- grant_type(client.grant_types),
          :ok <- redirect_uri(params["redirect_uri"], client.redirect_uris),
+         :ok <- resource(params["resource"], client.resources),
          {:ok, scopes} <- scopes(params["scope"], client.scopes),
          :ok <- pkce(client, params["code_challenge"], params["code_challenge_method"]) do
       {:ok,
@@ -24,7 +25,8 @@ defmodule RobineId.Protocol.UseCases.ValidateAuthorizationRequest do
          nonce: params["nonce"],
          code_challenge: params["code_challenge"],
          code_challenge_method: "S256",
-         locale: requested_locale(params["ui_locales"])
+         locale: requested_locale(params["ui_locales"]),
+         resource: params["resource"]
        }}
     end
   end
@@ -51,6 +53,14 @@ defmodule RobineId.Protocol.UseCases.ValidateAuthorizationRequest do
     if uri in allowed,
       do: :ok,
       else: {:error, {:invalid_request, "redirect_uri is not registered"}}
+  end
+
+  defp resource(nil, _allowed), do: :ok
+
+  defp resource(resource, allowed) do
+    if resource in allowed,
+      do: :ok,
+      else: {:error, {:invalid_target, "resource is not registered"}}
   end
 
   defp grant_type(grants) do

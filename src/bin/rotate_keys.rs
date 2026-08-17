@@ -1,4 +1,4 @@
-use robine_id::Application;
+use robine_id::{Application, initialize_tracing};
 use std::{env, io};
 
 #[tokio::main]
@@ -23,7 +23,8 @@ async fn main() -> io::Result<()> {
         ));
     }
 
-    let application = Application::load().map_err(io::Error::other)?;
+    let application = Application::load().map_err(|error| io::Error::other(error.to_string()))?;
+    initialize_tracing(&application);
     application.migrate().await.map_err(io::Error::other)?;
     let snapshot = application.snapshot();
     let issuer = snapshot
@@ -32,10 +33,26 @@ async fn main() -> io::Result<()> {
     let database = application
         .database()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "DATABASE_URL is required"))?;
-    let (key, changed) = database
-        .rotate_signing_key(issuer.url.trim_end_matches('/'), &rotation_id)
+    let (key, changed) = match database
+        .rotate_signing_key(
+            issuer.url.trim_end_matches('/'),
+            &rotation_id,
+            issuer.signing_key_retention_seconds(),
+        )
         .await
-        .map_err(io::Error::other)?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(
+                event = "signing_key_rotation",
+                outcome = "failed",
+                issuer_id,
+                reason = "rotation_failed",
+                "signing key rotation failed"
+            );
+            return Err(io::Error::other(error));
+        }
+    };
     let outcome = if changed { "rotated" } else { "unchanged" };
     println!("{outcome} issuer {issuer_id} at key {}", key.kid);
     Ok(())

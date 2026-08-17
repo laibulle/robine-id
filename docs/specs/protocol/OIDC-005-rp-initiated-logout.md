@@ -20,6 +20,8 @@ Robine ID ends the local authenticated session and optionally returns the browse
 - A supplied `state` MUST be appended unchanged only after the return URI is trusted.
 - Completion MUST revoke the authenticated session registration, clear the browser session, and drop the session cookie.
 - An invalid return request MUST fail locally and MUST NOT redirect to the supplied URI.
+- Empty optional logout parameters MUST be treated as omitted. ID-token hints MUST be limited to
+  16 KiB, redirect URIs to 4 KiB, and state to 1 KiB before key or database work begins.
 
 ## Acceptance Criteria
 
@@ -31,4 +33,6 @@ Robine ID ends the local authenticated session and optionally returns the browse
 
 ## Non-Goals
 
-Back-channel logout, front-channel logout notifications, global logout across multiple providers, and token revocation are outside the MVP.
+Back-channel logout, front-channel logout notifications, and global logout across multiple
+providers are outside the MVP. Access and refresh credentials can be revoked through the separate
+OAuth revocation endpoint; browser logout does not implicitly revoke them.

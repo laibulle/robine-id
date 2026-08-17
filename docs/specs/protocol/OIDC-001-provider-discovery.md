@@ -14,20 +14,67 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 - The response MUST contain the issuer, authorization endpoint, token endpoint, user-info endpoint, JWKS URI, supported response types, supported subject types, supported signing algorithms, supported scopes, and supported claims.
 - Every advertised capability MUST be enabled and usable in the active configuration.
 - The advertised issuer MUST exactly match the issuer used in issued tokens.
-- Discovery responses MUST use `application/json` and MAY be cached using configurable cache headers.
+- Discovery responses MUST use `application/json`, expose a representation ETag, and permit
+  browser and shared-CDN caching for at most five minutes. A matching `If-None-Match`, including a
+  weak validator, MUST return HTTP 304 without a body.
 - Secrets and internal-only configuration MUST never appear in discovery metadata.
 - Discovery MUST be available at `GET /:issuer_id/.well-known/openid-configuration`.
+- OAuth Authorization Server Metadata MUST expose the same truthful document at the RFC 8414 path
+  `GET /.well-known/oauth-authorization-server/:issuer_id`; the issuer-suffix compatibility path
+  MAY also be served.
+- `GET /.well-known/webfinger` MUST return an RFC 7033 JRD for URL and `acct:` resources whose
+  authority maps unambiguously to a configured issuer. The local account part MUST NOT be checked,
+  so the response cannot reveal whether a user exists.
+- WebFinger MUST filter unrelated `rel` values, support browser CORS, bound reflected inputs, and
+  return the OpenID issuer relationship with the exact configured issuer URL.
 - Endpoint URLs MUST be derived from the configured issuer URL after removing a trailing slash.
-- The MVP MUST advertise only `code`, `authorization_code`, public subjects, `RS256`, PKCE `S256`, and token endpoint authentication methods `none`, `client_secret_basic`, and `client_secret_post`.
+- The provider MUST advertise only `code`, configured `authorization_code`/`refresh_token`/`client_credentials`/token-exchange grants,
+  public subjects, the password authentication context, `RS256`, PKCE `S256`, and token endpoint authentication methods `none`,
+  `client_secret_basic`, `client_secret_post`, and `private_key_jwt`.
+- Because `private_key_jwt` is advertised, token, introspection, and revocation authentication
+  metadata MUST also advertise `RS256` through their corresponding
+  `*_auth_signing_alg_values_supported` members.
+- The provider MUST advertise query and form-post authorization responses and
+  `authorization_response_iss_parameter_supported: true`.
+- Signed RS256 JWT request objects MUST be advertised through `request_parameter_supported` and
+  `request_object_signing_alg_values_supported`. The `claims` request parameter remains unsupported.
+- JARM MUST advertise `jwt`, `query.jwt`, and `form_post.jwt` response modes plus RS256 through
+  `authorization_signing_alg_values_supported`.
+  PAR request URIs MUST be advertised as supported, together with the pushed
+  authorization request endpoint and the fact that PAR is optional. Supported user-interface
+  locales MUST reflect resolved issuer branding.
 - The discovery document MUST advertise the end-session endpoint.
+- The discovery document MUST link `service_documentation` to the routed `/docs` page and SHOULD
+  expose configured privacy and terms links as `op_policy_uri` and `op_tos_uri`.
+- The discovery document MUST advertise protected introspection and client-bound revocation
+  endpoints plus the client-authentication methods each endpoint supports.
 - Scope metadata MUST use the issuer's configured scopes, falling back to `openid`, `profile`, and `email` when omitted.
 - Unknown issuers MUST return HTTP 404 with an `invalid_request` response and MUST NOT enumerate valid issuer identifiers.
 
 ## Response Contract
 
-The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, `jwks_uri`, `end_session_endpoint`, `response_types_supported`, `grant_types_supported`, `subject_types_supported`, `id_token_signing_alg_values_supported`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`, `scopes_supported`, and `claims_supported`.
+The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`,
+`introspection_endpoint`, `revocation_endpoint`, `userinfo_endpoint`, `jwks_uri`,
+`end_session_endpoint`, `response_types_supported`, `response_modes_supported`, `grant_types_supported`,
+`subject_types_supported`, `id_token_signing_alg_values_supported`,
+`acr_values_supported`,
+`code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`,
+`token_endpoint_auth_signing_alg_values_supported`,
+`introspection_endpoint_auth_methods_supported`,
+`introspection_endpoint_auth_signing_alg_values_supported`,
+`revocation_endpoint_auth_methods_supported`,
+`revocation_endpoint_auth_signing_alg_values_supported`, `service_documentation`, optional
+`op_policy_uri`, optional `op_tos_uri`,
+`scopes_supported`, `claims_supported`, `ui_locales_supported`,
+`claims_parameter_supported`, `request_parameter_supported`,
+`request_object_signing_alg_values_supported`,
+`authorization_signing_alg_values_supported`,
+`request_uri_parameter_supported`, `pushed_authorization_request_endpoint`,
+`require_pushed_authorization_requests`, and `authorization_response_iss_parameter_supported`.
 
 Discovery metadata is generated from the active configuration on each request. Applying a new active revision therefore changes subsequent discovery responses without recompiling the application.
+`claims_parameter_supported` is `true`; OIDC-011 defines the corresponding bounded request and
+essential-claim behavior.
 
 ## Acceptance Criteria
 
@@ -35,8 +82,20 @@ Discovery metadata is generated from the active configuration on each request. A
 - Disabling an optional capability removes it from discovery metadata after configuration is applied.
 - Requests for an unknown issuer return a non-success response without leaking configured issuer names.
 - Every URL in discovery corresponds to a routed endpoint and uses the exact configured issuer origin and path.
+- WebFinger returns the same issuer link for existing-looking and unknown account local parts on a
+  configured authority, and no issuer for an unrelated authority.
 - The response contains no password hash, secret reference, storage path, signing private key, or user record.
+- Unchanged metadata returns HTTP 304 for its ETag, while a configuration change affecting the
+  selected representation produces a different ETag and full response.
 
 ## Non-Goals
 
-WebFinger discovery and capability negotiation beyond the fixed MVP feature set are not included.
+Capability negotiation beyond the fixed implemented feature set is not included.
+
+## Standards
+
+- OpenID Connect Discovery 1.0.
+- RFC 7033, WebFinger.
+- RFC 8414, OAuth 2.0 Authorization Server Metadata.
+- RFC 9207, OAuth 2.0 Authorization Server Issuer Identification.
+- RFC 9126, OAuth 2.0 Pushed Authorization Requests.

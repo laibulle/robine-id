@@ -35,14 +35,16 @@
           <section id="overview" class="docs-hero">
             <p class="eyebrow">{{ product_name }} documentation</p>
             <h1>Integrate OpenID Connect with confidence.</h1>
-            <p>An Actix OpenID Provider with server-rendered authentication, PKCE, RS256, persistent sessions, key rotation, and declarative configuration.</p>
-            <div class="docs-badges" aria-label="Supported capabilities"><span>OpenID Connect</span><span>OAuth 2.0</span><span>PKCE S256</span><span>RS256</span></div>
+            <p>An Actix OpenID Provider with server-rendered authentication, optional per-user TOTP MFA, PKCE, optional or mandatory pushed authorization requests, device authorization, opaque server-side login continuations, machine-to-machine tokens, downscoped token exchange, rotating offline access, RS256, persistent sessions, automatic key rotation, and declarative configuration.</p>
+            <div class="docs-badges" aria-label="Supported capabilities"><span>OpenID Connect</span><span>OAuth 2.0</span><span>PKCE S256</span><span>TOTP MFA</span><span>PAR</span><span>Device Flow</span><span>Signed Request Objects</span><span>JARM</span><span>DPoP</span><span>Form Post</span><span>Client Credentials</span><span>Token Exchange</span><span>JWT Access Tokens</span><span>Resource Indicators</span><span>Private Key JWT</span><span>Refresh rotation</span><span>RS256</span></div>
           </section>
 
           <section id="quick-start" class="docs-section">
             <div class="docs-heading"><span>01</span><div><p>Start here</p><h2>Quick start</h2></div></div>
             <p>Read discovery first. It is the canonical source for endpoints, supported scopes, signing algorithms, and client authentication methods.</p>
-            <div class="code-panel"><div class="code-panel-label">Provider discovery</div><pre><code>GET /{{ issuer_id }}/.well-known/openid-configuration</code></pre></div>
+            <div class="code-panel"><div class="code-panel-label">Provider discovery</div><pre><code>GET /{{ issuer_id }}/.well-known/openid-configuration
+GET /.well-known/oauth-authorization-server/{{ issuer_id }}
+GET /.well-known/webfinger?resource=…</code></pre></div>
             <div class="docs-callout"><strong>Issuer matching is exact.</strong><span>Keep the issuer path returned by discovery.</span></div>
           </section>
 
@@ -50,15 +52,25 @@
             <div class="docs-heading"><span>02</span><div><p>Protocol</p><h2>Authorization Code with PKCE</h2></div></div>
             <ol class="flow-list">
               <li><span>1</span><div><strong>Create a verifier</strong><p>Generate a high-entropy verifier and its S256 challenge.</p></div></li>
-              <li><span>2</span><div><strong>Authorize</strong><p>Send the browser with an exact redirect URI, state, scopes, nonce when required, and the challenge.</p></div></li>
+              <li><span>2</span><div><strong>Push, then authorize</strong><p>Optionally POST the request to PAR, then send its short-lived reference through the browser. Direct requests remain supported.</p></div></li>
               <li><span>3</span><div><strong>Exchange once</strong><p>POST the short-lived code and original verifier to the token endpoint.</p></div></li>
               <li><span>4</span><div><strong>Validate</strong><p>Verify the ID token signature, issuer, audience, expiry, and nonce.</p></div></li>
+              <li><span>5</span><div><strong>Refresh safely</strong><p>Request offline access only when needed, persist the refresh token securely, and replace it after every use.</p></div></li>
             </ol>
+            <div class="docs-callout"><strong>Protect the authorization response.</strong><span>Use <code>response_mode=query.jwt</code> or <code>form_post.jwt</code> to receive one audience-bound RS256 JARM response. Unsigned <code>form_post</code> remains available when URL exposure is the only concern.</span></div>
+            <div class="docs-callout"><strong>Bind tokens to the client key.</strong><span>Send an ES256 or RS256 <code>DPoP</code> proof to the token endpoint. Bound UserInfo calls use the <code>DPoP</code> authorization scheme and a fresh proof containing <code>ath</code>; replay is rejected across instances. Operators can require server-provided nonces with <code>dpop_nonce_required</code>.</span></div>
             <div class="code-panel"><div class="code-panel-label">Endpoints</div><pre><code>GET  /{{ issuer_id }}/authorize
+POST /{{ issuer_id }}/par
+POST /{{ issuer_id }}/device_authorization
+GET  /{{ issuer_id }}/device
 POST /{{ issuer_id }}/token
+POST /{{ issuer_id }}/introspect
+POST /{{ issuer_id }}/revoke
 GET  /{{ issuer_id }}/userinfo
 GET  /{{ issuer_id }}/jwks.json
 GET  /{{ issuer_id }}/logout</code></pre></div>
+            <div class="docs-callout"><strong>Backend service?</strong><span>Authenticate a confidential client at the same token endpoint with <code>grant_type=client_credentials</code>. An explicitly enabled client can exchange its own token for a shorter-lived, downscoped token aimed at another registered resource. Service tokens are introspectable and revocable, but never expose UserInfo.</span></div>
+            <div class="docs-callout"><strong>CLI or television?</strong><span>Enable the Device Authorization Grant, display the returned user code and verification URI, then respect the server-provided polling interval. The browser confirmation is session-aware and the final access, ID, and optional rotating refresh tokens can be consumed through another instance.</span></div>
           </section>
 
           <section id="configuration" class="docs-section">
@@ -69,6 +81,7 @@ GET  /{{ issuer_id }}/logout</code></pre></div>
               <article><h3>Serverless</h3><p>Inject immutable JSON directly for Vercel deployments.</p><code>ROBINE_ID_CONFIG_JSON</code></article>
               <article><h3>Safe activation</h3><p>A complete valid candidate activates atomically; invalid edits leave the prior revision active.</p><code>make config-preview</code></article>
             </div>
+            <div class="docs-callout"><strong>Require a second factor per user or application.</strong><span>Add <code>totp</code> to <code>authentication.methods</code> and set a user's <code>totp_secret_reference</code> to an environment secret containing an unpadded Base32 key. Set an interactive application's <code>required_acr</code> to <code>urn:robine-id:acr:password+totp</code> to reject password-only accounts and sessions. Clients may send <code>acr_values</code> as a voluntary preference or an essential <code>acr</code> constraint through the OIDC <code>claims</code> parameter. Accepted time steps cannot be replayed across instances.</span></div>
           </section>
 
           <section id="operations" class="docs-section docs-section-last">
@@ -79,6 +92,10 @@ GET  /{{ issuer_id }}/logout</code></pre></div>
               <div class="endpoint-row" role="row"><code>/health/ready</code><span>Configuration and PostgreSQL readiness</span></div>
               <div class="endpoint-row" role="row"><code>/metrics</code><span>Bounded Prometheus operational metrics</span></div>
               <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/jwks.json</code><span>Current and retained public verification keys</span></div>
+              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/par</code><span>Validated single-use pushed authorization requests</span></div>
+              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/device_authorization</code><span>Input-constrained client authorization</span></div>
+              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/introspect</code><span>Authenticated access-token status</span></div>
+              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/revoke</code><span>Client-bound access-token revocation</span></div>
             </div>
             <div class="docs-callout docs-callout-warning"><strong>Back up PostgreSQL and encryption material together.</strong><span>Encrypted signing keys cannot be recovered without their matching encryption secret.</span></div>
           </section>

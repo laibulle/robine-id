@@ -8,7 +8,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
 
   @root_fields ~w(schema_version issuers clients users claims branding reconciliation authentication storage telemetry)
   @issuer_fields ~w(id url scopes token_policy claim_mappings branding)
-  @client_fields ~w(id name type redirect_uris post_logout_redirect_uris scopes grant_types authentication_method pkce_required nonce_required secret_reference consent_required branding)
+  @client_fields ~w(id name type redirect_uris post_logout_redirect_uris resources scopes grant_types authentication_method pkce_required nonce_required secret_reference jwks consent_required introspection_allowed require_pushed_authorization_requests branding)
   @user_fields ~w(id identifier password_hash name email claims)
   @branding_fields ~w(product_name logo favicon primary_color font_family support_url privacy_url terms_url default_locale locales messages)
 
@@ -73,21 +73,68 @@ defmodule RobineId.Configuration.Entities.Snapshot do
   defp validate_token_policy(errors, nil, _issuer_id), do: errors
 
   defp validate_token_policy(errors, policy, issuer_id) when is_map(policy) do
-    allowed = ~w(authorization_code_lifetime id_token_lifetime access_token_lifetime clock_skew)
+    numeric_fields =
+      ~w(authorization_code_lifetime browser_authorization_lifetime pushed_authorization_request_lifetime pushed_authorization_request_limit pushed_authorization_request_window device_code_lifetime device_poll_interval id_token_lifetime access_token_lifetime refresh_token_lifetime clock_skew dpop_nonce_lifetime signing_key_rotation_interval)
+
+    boolean_fields = ~w(require_pushed_authorization_requests dpop_nonce_required)
+    string_fields = ~w(access_token_format)
+    allowed = numeric_fields ++ boolean_fields ++ string_fields
+
     errors = unknown_fields(errors, policy, allowed, "issuer #{inspect(issuer_id)} token_policy")
 
-    Enum.reduce(allowed, errors, fn field, acc ->
-      case policy[field] do
-        nil ->
-          acc
+    errors =
+      Enum.reduce(numeric_fields, errors, fn field, acc ->
+        {minimum, maximum} =
+          case field do
+            "browser_authorization_lifetime" -> {60, 3_600}
+            "pushed_authorization_request_lifetime" -> {10, 600}
+            "pushed_authorization_request_limit" -> {1, 10_000}
+            "pushed_authorization_request_window" -> {1, 86_400}
+            "device_code_lifetime" -> {300, 1_800}
+            "device_poll_interval" -> {5, 60}
+            "refresh_token_lifetime" -> {60, 31_536_000}
+            "dpop_nonce_lifetime" -> {30, 3_600}
+            "signing_key_rotation_interval" -> {3_600, 31_536_000}
+            _ -> {1, 86_400}
+          end
 
-        value when is_integer(value) and value > 0 and value <= 86_400 ->
-          acc
+        case policy[field] do
+          nil ->
+            acc
 
-        _ ->
-          ["issuer #{inspect(issuer_id)} token_policy #{field} must be between 1 and 86400" | acc]
-      end
-    end)
+          value when is_integer(value) and value >= minimum and value <= maximum ->
+            acc
+
+          _ ->
+            [
+              "issuer #{inspect(issuer_id)} token_policy #{field} must be between #{minimum} and #{maximum}"
+              | acc
+            ]
+        end
+      end)
+
+    errors =
+      Enum.reduce(boolean_fields, errors, fn field, acc ->
+        case policy[field] do
+          nil -> acc
+          value when is_boolean(value) -> acc
+          _ -> ["issuer #{inspect(issuer_id)} token_policy #{field} must be a boolean" | acc]
+        end
+      end)
+
+    case policy["access_token_format"] do
+      nil ->
+        errors
+
+      value when value in ["opaque", "jwt"] ->
+        errors
+
+      _ ->
+        [
+          "issuer #{inspect(issuer_id)} token_policy access_token_format must be opaque or jwt"
+          | errors
+        ]
+    end
   end
 
   defp validate_token_policy(errors, _policy, issuer_id),
@@ -102,7 +149,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
   defp validate_clients(errors, _), do: ["clients must be a list" | errors]
 
   defp validate_client(%{"id" => id, "redirect_uris" => uris} = data)
-       when is_binary(id) and is_list(uris) and uris != [] do
+       when is_binary(id) and is_list(uris) do
     errors =
       data
       |> unknown_field_errors(@client_fields, "client #{inspect(id)}")
@@ -111,6 +158,10 @@ defmodule RobineId.Configuration.Entities.Snapshot do
     all_redirects = uris ++ (data["post_logout_redirect_uris"] || [])
 
     cond do
+      "authorization_code" in Map.get(data, "grant_types", ["authorization_code"]) and
+          uris == [] ->
+        ["client #{inspect(id)} requires a redirect URI for authorization_code" | errors]
+
       not Enum.all?(all_redirects, &valid_redirect_uri?/1) ->
         ["client #{inspect(id)} contains an invalid redirect URI" | errors]
 
@@ -123,7 +174,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
     end
   end
 
-  defp validate_client(_), do: ["every client requires a string id and non-empty redirect_uris"]
+  defp validate_client(_), do: ["every client requires a string id and redirect_uris list"]
 
   defp validate_users(errors, %{"users" => users}) when is_list(users) do
     errors
@@ -195,7 +246,8 @@ defmodule RobineId.Configuration.Entities.Snapshot do
   defp validate_claim_mappings(errors, %{"claims" => mappings}) when is_map(mappings) do
     Enum.reduce(mappings, errors, fn {claim, mapping}, acc ->
       case {claim, mapping} do
-        {reserved, _mapping} when reserved in ~w(iss sub aud iat exp nonce) ->
+        {reserved, _mapping}
+        when reserved in ~w(iss sub aud iat exp nbf jti nonce auth_time at_hash c_hash acr amr azp client_id scope cnf) ->
           ["claim #{inspect(claim)} is reserved by OpenID Connect" | acc]
 
         {_claim, %{"source" => source, "scope" => scope}}

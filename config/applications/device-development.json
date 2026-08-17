@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "rust-device-development-client",
+  "name": "Rust Device Development Client",
+  "type": "public",
+  "redirect_uris": [],
+  "post_logout_redirect_uris": [],
+  "scopes": ["openid", "profile", "email"],
+  "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true
+}

@@ -1,6 +1,11 @@
 use crate::{
     Application,
-    database::{AccessGrant, Database, PendingAuthorization},
+    configuration::DEVICE_CODE_GRANT,
+    database::{
+        AccessGrant, Database, DeviceAuthorization, DevicePoll, PendingAuthorization, RefreshGrant,
+        RefreshRotation, SigningKey,
+    },
+    metrics::{DeviceAuthorizationOutcome, MfaOutcome},
     protocol::{AuthorizationGrant, AuthorizationRequest, DiscoveryDocument},
     tokens,
 };
@@ -12,24 +17,54 @@ use actix_web::{
 };
 use askama::Template;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
-use serde::Deserialize;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const APP_CSS: &str = include_str!("../assets/css/app.css");
 const BRAND_MARK: &[u8] = include_bytes!("../priv/static/images/brand/robine-mark.png");
+const MAX_AUTHORIZATION_QUERY_BYTES: usize = 16 * 1024;
+const MAX_IDENTIFIER_BYTES: usize = 320;
+const MAX_BCRYPT_PASSWORD_BYTES: usize = 72;
+const MAX_LOGOUT_HINT_BYTES: usize = 16 * 1024;
+const MAX_ACCESS_TOKEN_BYTES: usize = 12 * 1024;
+const PUSHED_REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
+const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+pub const SECURITY_HEADERS: &[(&str, &str)] = &[
+    ("x-content-type-options", "nosniff"),
+    ("x-frame-options", "DENY"),
+    (
+        "content-security-policy",
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    ),
+    (
+        "strict-transport-security",
+        "max-age=31536000; includeSubDomains",
+    ),
+    ("referrer-policy", "no-referrer"),
+    (
+        "permissions-policy",
+        "camera=(), microphone=(), geolocation=()",
+    ),
+    ("x-permitted-cross-domain-policies", "none"),
+    ("x-robots-tag", "noindex, nofollow, noarchive"),
+];
 const APP_JS: &str = r#"document.addEventListener("click", event => {
   const toggle = event.target.closest("[data-password-toggle]");
   if (!toggle) return;
   const input = toggle.parentElement.querySelector("input");
   const revealing = input.type === "password";
   input.type = revealing ? "text" : "password";
-  toggle.textContent = revealing ? "Hide" : "Show";
-  toggle.setAttribute("aria-label", revealing ? "Hide password" : "Show password");
+  const label = revealing ? toggle.dataset.hideLabel : toggle.dataset.showLabel;
+  toggle.textContent = label;
+  toggle.setAttribute("aria-label", label);
 });
 const errorSummary = document.querySelector("[data-error-summary]");
-if (errorSummary) errorSummary.focus();"#;
+if (errorSummary) errorSummary.focus();
+const autoSubmitForm = document.querySelector("[data-auto-submit]");
+if (autoSubmitForm) window.requestAnimationFrame(() => autoSubmitForm.submit());"#;
 
 #[derive(Template)]
 #[template(path = "home.html")]
@@ -61,9 +96,31 @@ struct LoginTemplate<'a> {
     primary_color: &'a str,
     issuer_id: &'a str,
     client_name: &'a str,
-    request: &'a AuthorizationRequest,
+    transaction: &'a str,
     csrf_token: &'a str,
     identifier: &'a str,
+    has_error: bool,
+    error: Option<&'a str>,
+    messages: &'a crate::configuration::UiMessages,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+    support_url: Option<&'a str>,
+    privacy_url: Option<&'a str>,
+    terms_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "totp.html")]
+struct TotpTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    client_name: &'a str,
+    transaction: &'a str,
+    form_action: &'a str,
+    transaction_field: &'a str,
+    action_value: Option<&'a str>,
+    csrf_token: &'a str,
     has_error: bool,
     error: Option<&'a str>,
     messages: &'a crate::configuration::UiMessages,
@@ -82,6 +139,19 @@ struct ProtocolErrorTemplate<'a> {
     primary_color: &'a str,
     message: &'a str,
     request_id: &'a str,
+    messages: &'a crate::configuration::UiMessages,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "form_post.html")]
+struct FormPostTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    redirect_uri: &'a str,
+    parameters: &'a [(&'a str, &'a str)],
     logo: Option<&'a str>,
     favicon: Option<&'a str>,
     font_family: Option<&'a str>,
@@ -107,6 +177,58 @@ struct ConsentTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "device_code.html")]
+struct DeviceCodeTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    issuer_id: &'a str,
+    user_code: &'a str,
+    csrf_token: &'a str,
+    has_error: bool,
+    error: Option<&'a str>,
+    messages: &'a crate::configuration::UiMessages,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+    support_url: Option<&'a str>,
+    privacy_url: Option<&'a str>,
+    terms_url: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "device_confirm.html")]
+struct DeviceConfirmTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    issuer_id: &'a str,
+    client_name: &'a str,
+    user_code: &'a str,
+    scopes: &'a [String],
+    transaction: &'a str,
+    csrf_token: &'a str,
+    authenticated: bool,
+    identifier: &'a str,
+    has_error: bool,
+    error: Option<&'a str>,
+    messages: &'a crate::configuration::UiMessages,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "device_done.html")]
+struct DeviceDoneTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    approved: bool,
+    messages: &'a crate::configuration::UiMessages,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+}
+
+#[derive(Template)]
 #[template(path = "logout.html")]
 struct LogoutTemplate<'a> {
     product_name: &'a str,
@@ -114,6 +236,7 @@ struct LogoutTemplate<'a> {
     issuer_id: &'a str,
     transaction: &'a str,
     csrf_token: &'a str,
+    messages: &'a crate::configuration::UiMessages,
     logo: Option<&'a str>,
     favicon: Option<&'a str>,
     font_family: Option<&'a str>,
@@ -124,6 +247,7 @@ struct LogoutTemplate<'a> {
 struct LogoutDoneTemplate<'a> {
     product_name: &'a str,
     primary_color: &'a str,
+    messages: &'a crate::configuration::UiMessages,
     logo: Option<&'a str>,
     favicon: Option<&'a str>,
     font_family: Option<&'a str>,
@@ -131,11 +255,19 @@ struct LogoutDoneTemplate<'a> {
 
 pub fn configure(configuration: &mut web::ServiceConfig) {
     configuration
+        .app_data(
+            web::FormConfig::default()
+                .limit(16 * 1024)
+                .error_handler(form_rejection),
+        )
+        .app_data(web::PayloadConfig::new(16 * 1024))
+        .app_data(web::QueryConfig::default().error_handler(query_rejection))
         .route("/", web::get().to(home))
         .route("/docs", web::get().to(docs))
         .route("/health/live", web::get().to(live))
         .route("/health/ready", web::get().to(ready))
         .route("/metrics", web::get().to(metrics))
+        .route("/.well-known/webfinger", web::get().to(webfinger))
         .route("/assets/app.css", web::get().to(css))
         .route("/assets/app.js", web::get().to(js))
         .route("/images/brand/robine-mark.png", web::get().to(brand_mark))
@@ -143,41 +275,310 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
             "/{issuer_id}/.well-known/openid-configuration",
             web::get().to(discovery),
         )
+        .route(
+            "/.well-known/oauth-authorization-server/{issuer_id}",
+            web::get().to(discovery),
+        )
+        .route(
+            "/{issuer_id}/.well-known/oauth-authorization-server",
+            web::get().to(discovery),
+        )
         .route("/{issuer_id}/jwks.json", web::get().to(jwks))
         .route("/{issuer_id}/authorize", web::get().to(authorize))
-        .route("/{issuer_id}/authorize", web::post().to(authenticate))
+        .route("/{issuer_id}/authorize", web::post().to(authorize_post))
         .route("/{issuer_id}/authorize/consent", web::post().to(consent))
+        .route("/{issuer_id}/par", web::post().to(push_authorization))
+        .route(
+            "/{issuer_id}/device_authorization",
+            web::post().to(device_authorization),
+        )
+        .route("/{issuer_id}/device", web::get().to(device_verification))
+        .route("/{issuer_id}/device", web::post().to(device_interaction))
+        .route(
+            "/{issuer_id}/par",
+            web::method(actix_web::http::Method::OPTIONS).to(token_options),
+        )
         .route("/{issuer_id}/token", web::post().to(exchange_token))
+        .route(
+            "/{issuer_id}/token",
+            web::method(actix_web::http::Method::OPTIONS).to(token_options),
+        )
+        .route("/{issuer_id}/introspect", web::post().to(introspect_token))
+        .route("/{issuer_id}/revoke", web::post().to(revoke_token))
         .route("/{issuer_id}/userinfo", web::get().to(user_info))
+        .route("/{issuer_id}/userinfo", web::post().to(user_info))
+        .route(
+            "/{issuer_id}/userinfo",
+            web::method(actix_web::http::Method::OPTIONS).to(user_info_options),
+        )
         .route("/{issuer_id}/logout", web::get().to(logout_confirmation))
         .route("/{issuer_id}/logout", web::post().to(logout))
         .default_service(web::to(not_found));
 }
 
+fn form_rejection(
+    error: actix_web::error::UrlencodedError,
+    request: &HttpRequest,
+) -> actix_web::Error {
+    tracing::warn!(
+        event = "request_rejection",
+        outcome = "rejected",
+        reason = "malformed_form",
+        "request form rejected"
+    );
+    let mut response = if [
+        "/par",
+        "/device_authorization",
+        "/token",
+        "/introspect",
+        "/revoke",
+    ]
+    .iter()
+    .any(|suffix| request.path().ends_with(suffix))
+    {
+        oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "the OAuth request is incomplete or malformed",
+        )
+    } else {
+        browser_request_rejection(request, "The submitted form is incomplete or malformed")
+    };
+    if (request.path().ends_with("/token") || request.path().ends_with("/par"))
+        && let Some(application) = request.app_data::<web::Data<Application>>()
+    {
+        add_token_cors(&mut response, request, &application.snapshot(), None);
+    }
+    actix_web::error::InternalError::from_response(error, response).into()
+}
+
+fn query_rejection(
+    error: actix_web::error::QueryPayloadError,
+    request: &HttpRequest,
+) -> actix_web::Error {
+    tracing::warn!(
+        event = "request_rejection",
+        outcome = "rejected",
+        reason = "malformed_query",
+        "request query rejected"
+    );
+    let response = browser_request_rejection(request, "The request is incomplete or malformed");
+    actix_web::error::InternalError::from_response(error, response).into()
+}
+
+fn browser_request_rejection(request: &HttpRequest, message: &str) -> HttpResponse {
+    let application = request.app_data::<web::Data<Application>>();
+    let issuer_id = request.match_info().get("issuer_id");
+    let branding = application
+        .map(|application| application.snapshot().branding(issuer_id, None))
+        .unwrap_or_default();
+    protocol_error(&branding, message, &correlation_id(request))
+}
+
 #[derive(Deserialize)]
-struct LoginForm {
+struct AuthorizationPostForm {
+    #[serde(default)]
     response_type: String,
+    #[serde(default)]
     client_id: String,
+    #[serde(default)]
     redirect_uri: String,
+    #[serde(default)]
     scope: String,
+    #[serde(default)]
     state: String,
-    nonce: String,
+    nonce: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     ui_locales: Option<String>,
-    csrf_token: String,
-    identifier: String,
-    password: String,
+    prompt: Option<String>,
+    max_age: Option<String>,
+    response_mode: Option<String>,
+    resource: Option<String>,
+    #[serde(rename = "request")]
+    request_object: Option<String>,
+    request_uri: Option<String>,
+    login_hint: Option<String>,
+    acr_values: Option<String>,
+    claims: Option<String>,
+    dpop_jkt: Option<String>,
+    transaction: Option<String>,
+    csrf_token: Option<String>,
+    identifier: Option<String>,
+    password: Option<String>,
+    mfa_transaction: Option<String>,
+    totp_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WebFingerQuery {
+    resource: String,
+    #[serde(default)]
+    rel: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TokenForm {
     grant_type: String,
-    code: String,
+    code: Option<String>,
+    refresh_token: Option<String>,
+    device_code: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
-    redirect_uri: String,
+    client_assertion_type: Option<String>,
+    client_assertion: Option<String>,
+    redirect_uri: Option<String>,
     code_verifier: Option<String>,
+    scope: Option<String>,
+    resource: Option<String>,
+    audience: Option<String>,
+    subject_token: Option<String>,
+    subject_token_type: Option<String>,
+    requested_token_type: Option<String>,
+    actor_token: Option<String>,
+    actor_token_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceAuthorizationForm {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    client_assertion_type: Option<String>,
+    client_assertion: Option<String>,
+    scope: Option<String>,
+    resource: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceVerificationQuery {
+    #[serde(default)]
+    user_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceInteractionForm {
+    action: String,
+    csrf_token: String,
+    #[serde(default)]
+    user_code: Option<String>,
+    #[serde(default)]
+    transaction: Option<String>,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    mfa_transaction: Option<String>,
+    #[serde(default)]
+    totp_code: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DeviceTotpPayload {
+    device_transaction: String,
+    decision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizationReferenceRequest {
+    client_id: String,
+    request_uri: String,
+}
+
+#[derive(Deserialize)]
+struct PushedAuthorizationForm {
+    #[serde(default)]
+    response_type: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    nonce: String,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    #[serde(default)]
+    ui_locales: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    max_age: Option<String>,
+    #[serde(default)]
+    response_mode: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default, rename = "request")]
+    request_object: Option<String>,
+    #[serde(default)]
+    request_uri: Option<String>,
+    #[serde(default)]
+    login_hint: Option<String>,
+    #[serde(default)]
+    acr_values: Option<String>,
+    #[serde(default)]
+    claims: Option<String>,
+    #[serde(default)]
+    dpop_jkt: Option<String>,
+    client_secret: Option<String>,
+    client_assertion_type: Option<String>,
+    client_assertion: Option<String>,
+}
+
+impl PushedAuthorizationForm {
+    fn into_request(
+        self,
+    ) -> (
+        AuthorizationRequest,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
+        (
+            AuthorizationRequest {
+                response_type: self.response_type,
+                client_id: self.client_id,
+                redirect_uri: self.redirect_uri,
+                scope: self.scope,
+                state: self.state,
+                nonce: self.nonce,
+                code_challenge: self.code_challenge,
+                code_challenge_method: self.code_challenge_method,
+                ui_locales: self.ui_locales,
+                prompt: self.prompt,
+                max_age: self.max_age,
+                response_mode: self.response_mode,
+                resource: self.resource,
+                request_object: self.request_object,
+                request_uri: self.request_uri,
+                login_hint: self.login_hint,
+                acr_values: self.acr_values,
+                claims: self.claims,
+                dpop_jkt: self.dpop_jkt,
+            }
+            .normalize_empty_optional_parameters(),
+            self.client_secret,
+            self.client_assertion_type,
+            self.client_assertion,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+struct TokenStatusForm {
+    token: String,
+    #[serde(default)]
+    token_type_hint: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    client_assertion_type: Option<String>,
+    client_assertion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -210,34 +611,21 @@ pub fn secure<B>(response: &mut HttpResponse<B>) {
             request_id,
         );
     }
-    headers.insert(
-        actix_web::http::header::X_CONTENT_TYPE_OPTIONS,
-        actix_web::http::header::HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        actix_web::http::header::X_FRAME_OPTIONS,
-        actix_web::http::header::HeaderValue::from_static("DENY"),
-    );
-    headers.insert(
-        actix_web::http::header::CONTENT_SECURITY_POLICY,
-        actix_web::http::header::HeaderValue::from_static(
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-        ),
-    );
-    headers.insert(
-        actix_web::http::header::STRICT_TRANSPORT_SECURITY,
-        actix_web::http::header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-    );
-    headers.insert(
-        actix_web::http::header::REFERRER_POLICY,
-        actix_web::http::header::HeaderValue::from_static("no-referrer"),
-    );
-    headers.insert(
-        actix_web::http::header::HeaderName::from_static("permissions-policy"),
-        actix_web::http::header::HeaderValue::from_static(
-            "camera=(), microphone=(), geolocation=()",
-        ),
-    );
+    for &(name, value) in SECURITY_HEADERS {
+        if name == "content-security-policy" && headers.contains_key(name) {
+            continue;
+        }
+        headers.insert(
+            actix_web::http::header::HeaderName::from_static(name),
+            actix_web::http::header::HeaderValue::from_static(value),
+        );
+    }
+    if !headers.contains_key("cross-origin-resource-policy") {
+        headers.insert(
+            actix_web::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+            actix_web::http::header::HeaderValue::from_static("same-origin"),
+        );
+    }
 }
 
 pub fn correlation_id(request: &HttpRequest) -> String {
@@ -271,7 +659,8 @@ pub fn set_correlation_id<B>(response: &mut HttpResponse<B>, request_id: &str) {
     }
 }
 
-async fn home(application: web::Data<Application>) -> impl Responder {
+async fn home(request: HttpRequest, application: web::Data<Application>) -> impl Responder {
+    let clear_session = invalid_existing_session(&request, &application).await;
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.default_issuer() else {
         return json_response(
@@ -280,7 +669,7 @@ async fn home(application: web::Data<Application>) -> impl Responder {
         );
     };
     let branding = snapshot.branding(Some(&issuer.id), None);
-    html_response(
+    let mut response = html_response(
         StatusCode::OK,
         HomeTemplate {
             product_name: &branding.product_name,
@@ -292,10 +681,15 @@ async fn home(application: web::Data<Application>) -> impl Responder {
             font_family: branding.font_family.as_deref(),
         }
         .render(),
-    )
+    );
+    if clear_session {
+        remove_session_cookie(&mut response, &request);
+    }
+    response
 }
 
-async fn docs(application: web::Data<Application>) -> impl Responder {
+async fn docs(request: HttpRequest, application: web::Data<Application>) -> impl Responder {
+    let clear_session = invalid_existing_session(&request, &application).await;
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.default_issuer() else {
         return json_response(
@@ -304,7 +698,7 @@ async fn docs(application: web::Data<Application>) -> impl Responder {
         );
     };
     let branding = snapshot.branding(Some(&issuer.id), None);
-    html_response(
+    let mut response = html_response(
         StatusCode::OK,
         DocsTemplate {
             product_name: &branding.product_name,
@@ -315,7 +709,11 @@ async fn docs(application: web::Data<Application>) -> impl Responder {
             font_family: branding.font_family.as_deref(),
         }
         .render(),
-    )
+    );
+    if clear_session {
+        remove_session_cookie(&mut response, &request);
+    }
+    response
 }
 
 async fn live() -> impl Responder {
@@ -323,22 +721,52 @@ async fn live() -> impl Responder {
 }
 
 async fn ready(application: web::Data<Application>) -> impl Responder {
-    match application.database() {
-        Some(database) if database.healthy().await => json_response(
+    let (ready, reason) = if !application.accepting_traffic() {
+        (false, "draining")
+    } else {
+        match application.database() {
+            Some(database) if database.healthy().await => (true, "ready"),
+            Some(_) => (false, "database_unavailable"),
+            None => (false, "database_not_configured"),
+        }
+    };
+    if application.metrics().readiness_changed(ready) {
+        if ready {
+            tracing::info!(
+                event = "readiness",
+                outcome = "ready",
+                "service became ready"
+            );
+        } else {
+            tracing::warn!(
+                event = "readiness",
+                outcome = "not_ready",
+                reason,
+                "service is not ready"
+            );
+        }
+    }
+    if ready {
+        json_response(
             StatusCode::OK,
             json!({"status": "ready", "revision": application.snapshot().revision}),
-        ),
-        _ => json_response(
+        )
+    } else {
+        json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"status": "not_ready"}),
-        ),
+        )
     }
 }
 
 async fn metrics(application: web::Data<Application>) -> impl Responder {
-    let ready = match application.database() {
-        Some(database) => database.healthy().await,
-        None => false,
+    let ready = if application.accepting_traffic() {
+        match application.database() {
+            Some(database) => database.healthy().await,
+            None => false,
+        }
+    } else {
+        false
     };
     HttpResponse::Ok()
         .insert_header((
@@ -353,19 +781,120 @@ async fn metrics(application: web::Data<Application>) -> impl Responder {
         )
 }
 
-async fn discovery(path: web::Path<String>, application: web::Data<Application>) -> impl Responder {
+async fn discovery(
+    path: web::Path<String>,
+    request: HttpRequest,
+    application: web::Data<Application>,
+) -> impl Responder {
     let snapshot = application.snapshot();
     match DiscoveryDocument::build(&snapshot, &path.into_inner()) {
-        Some(document) => {
-            let mut response = json_response(StatusCode::OK, json!(document));
-            response.headers_mut().insert(
-                actix_web::http::header::CACHE_CONTROL,
-                actix_web::http::header::HeaderValue::from_static("public, max-age=300"),
-            );
-            response
-        }
-        None => json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"})),
+        Some(document) => cacheable_json_response(&request, json!(document)),
+        None => oauth_error(StatusCode::NOT_FOUND, "invalid_request", "unknown issuer"),
     }
+}
+
+const OIDC_ISSUER_REL: &str = "http://openid.net/specs/connect/1.0/issuer";
+
+async fn webfinger(
+    query: web::Query<WebFingerQuery>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let query = query.into_inner();
+    if query.resource.is_empty()
+        || query.resource.len() > 2_048
+        || query.rel.as_deref().is_some_and(|rel| rel.len() > 512)
+    {
+        return webfinger_response(
+            StatusCode::BAD_REQUEST,
+            json!({"subject": query.resource, "links": []}),
+        );
+    }
+
+    let snapshot = application.snapshot();
+    let Some(issuer) = webfinger_issuer(&snapshot, &query.resource) else {
+        return webfinger_response(
+            StatusCode::NOT_FOUND,
+            json!({"subject": query.resource, "links": []}),
+        );
+    };
+    let links = if query
+        .rel
+        .as_deref()
+        .is_none_or(|rel| rel == OIDC_ISSUER_REL)
+    {
+        vec![json!({"rel": OIDC_ISSUER_REL, "href": issuer})]
+    } else {
+        vec![]
+    };
+    webfinger_response(
+        StatusCode::OK,
+        json!({"subject": query.resource, "links": links}),
+    )
+}
+
+fn webfinger_issuer(snapshot: &crate::configuration::Snapshot, resource: &str) -> Option<String> {
+    let parsed_resource = if let Some(account) = resource.strip_prefix("acct:") {
+        let authority = account.rsplit_once('@')?.1;
+        if authority.contains(['/', '?', '#']) {
+            return None;
+        }
+        url::Url::parse(&format!("https://{authority}/")).ok()?
+    } else {
+        url::Url::parse(resource).ok()?
+    };
+    let authority = url_authority(&parsed_resource)?;
+    let candidates = snapshot
+        .configuration
+        .issuers
+        .iter()
+        .filter_map(|issuer| {
+            let issuer_url = url::Url::parse(issuer.url.trim_end_matches('/')).ok()?;
+            (url_authority(&issuer_url).as_ref() == Some(&authority))
+                .then_some((issuer, issuer_url))
+        })
+        .collect::<Vec<_>>();
+
+    if !resource.starts_with("acct:") {
+        let mut path_matches = candidates
+            .iter()
+            .filter(|(_, issuer_url)| {
+                parsed_resource.path() == issuer_url.path()
+                    || parsed_resource
+                        .path()
+                        .strip_prefix(issuer_url.path().trim_end_matches('/'))
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+            .collect::<Vec<_>>();
+        path_matches.sort_by_key(|(_, issuer_url)| std::cmp::Reverse(issuer_url.path().len()));
+        if let Some((issuer, _)) = path_matches.first() {
+            return Some(issuer.url.trim_end_matches('/').to_owned());
+        }
+    }
+
+    (candidates.len() == 1).then(|| candidates[0].0.url.trim_end_matches('/').to_owned())
+}
+
+fn url_authority(url: &url::Url) -> Option<(String, u16)> {
+    Some((
+        url.host_str()?.to_ascii_lowercase(),
+        url.port_or_known_default()?,
+    ))
+}
+
+fn webfinger_response(status: StatusCode, body: Value) -> HttpResponse {
+    let mut response = HttpResponse::build(status)
+        .content_type("application/jrd+json")
+        .insert_header((
+            actix_web::http::header::CACHE_CONTROL,
+            "public, max-age=300",
+        ))
+        .insert_header((actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"))
+        .body(body.to_string());
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+        actix_web::http::header::HeaderValue::from_static("cross-origin"),
+    );
+    response
 }
 
 async fn authorize(
@@ -374,93 +903,1143 @@ async fn authorize(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
+    let authorization = if request.query_string().len() > MAX_AUTHORIZATION_QUERY_BYTES {
+        Err(AuthorizationInputError::Invalid)
+    } else if authorization_query_contains_request_uri(request.query_string()) {
+        resolve_pushed_authorization(&issuer_id, request.query_string().as_bytes(), &application)
+            .await
+    } else {
+        match serde_urlencoded::from_str::<AuthorizationRequest>(request.query_string())
+            .map(AuthorizationRequest::normalize_empty_optional_parameters)
+            .map_err(|_| AuthorizationInputError::Invalid)
+        {
+            Ok(authorization) => {
+                match resolve_authorization_request_object(&issuer_id, authorization, &application)
+                    .await
+                {
+                    Ok(authorization) => {
+                        enforce_pushed_authorization_policy(&issuer_id, authorization, &application)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    };
+    authorization_input_response(&issuer_id, &request, &application, authorization).await
+}
+
+async fn authorization_input_response(
+    issuer_id: &str,
+    request: &HttpRequest,
+    application: &Application,
+    authorization: Result<AuthorizationRequest, AuthorizationInputError>,
+) -> HttpResponse {
+    match authorization {
+        Ok(authorization) => {
+            authorization_response(issuer_id, request, application, Ok(authorization)).await
+        }
+        Err(AuthorizationInputError::Invalid) => {
+            authorization_response(issuer_id, request, application, Err(())).await
+        }
+        Err(AuthorizationInputError::Unavailable) => oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization request storage is unavailable",
+        ),
+        Err(AuthorizationInputError::InvalidRequestObject(request_object)) => {
+            let snapshot = application.snapshot();
+            let branding = snapshot.branding(Some(issuer_id), Some(&request_object.client_id));
+            authorization_request_error(
+                application.database(),
+                &snapshot,
+                &branding,
+                issuer_id,
+                &request_object,
+                crate::protocol::AuthorizationError::new(
+                    "invalid_request_object",
+                    "The signed authorization request is invalid or has already been used",
+                ),
+                &correlation_id(request),
+            )
+            .await
+        }
+        Err(AuthorizationInputError::PushedAuthorizationRequired(authorization)) => {
+            let snapshot = application.snapshot();
+            let branding = snapshot.branding(Some(issuer_id), Some(&authorization.client_id));
+            authorization_request_error(
+                application.database(),
+                &snapshot,
+                &branding,
+                issuer_id,
+                &authorization,
+                crate::protocol::AuthorizationError::new(
+                    "invalid_request",
+                    "This client must initiate authorization through the pushed authorization request endpoint",
+                ),
+                &correlation_id(request),
+            )
+            .await
+        }
+    }
+}
+
+enum AuthorizationInputError {
+    Invalid,
+    Unavailable,
+    InvalidRequestObject(Box<AuthorizationRequest>),
+    PushedAuthorizationRequired(Box<AuthorizationRequest>),
+}
+
+fn enforce_pushed_authorization_policy(
+    issuer_id: &str,
+    authorization: AuthorizationRequest,
+    application: &Application,
+) -> Result<AuthorizationRequest, AuthorizationInputError> {
+    let snapshot = application.snapshot();
+    let required = snapshot
+        .issuer(issuer_id)
+        .is_some_and(|issuer| issuer.token_policy.require_pushed_authorization_requests)
+        || snapshot
+            .client(&authorization.client_id)
+            .is_some_and(|client| client.require_pushed_authorization_requests);
+    if required {
+        Err(AuthorizationInputError::PushedAuthorizationRequired(
+            Box::new(authorization),
+        ))
+    } else {
+        Ok(authorization)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RequestObjectResolutionError {
+    Invalid,
+    Unavailable,
+}
+
+async fn resolve_authorization_request_object(
+    issuer_id: &str,
+    outer: AuthorizationRequest,
+    application: &Application,
+) -> Result<AuthorizationRequest, AuthorizationInputError> {
+    if outer.request_object.is_none() {
+        return Ok(outer);
+    }
+    let outer_for_error = outer.clone();
+    resolve_authorization_request_object_inner(issuer_id, outer, application)
+        .await
+        .map_err(|error| match error {
+            RequestObjectResolutionError::Invalid => {
+                AuthorizationInputError::InvalidRequestObject(Box::new(outer_for_error))
+            }
+            RequestObjectResolutionError::Unavailable => AuthorizationInputError::Unavailable,
+        })
+}
+
+async fn resolve_authorization_request_object_inner(
+    issuer_id: &str,
+    outer: AuthorizationRequest,
+    application: &Application,
+) -> Result<AuthorizationRequest, RequestObjectResolutionError> {
+    if outer.client_id.is_empty() || outer.client_id.len() > 256 || outer.request_uri.is_some() {
+        return Err(RequestObjectResolutionError::Invalid);
+    }
+    let snapshot = application.snapshot();
+    let issuer = snapshot
+        .issuer(issuer_id)
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let client = snapshot
+        .client(&outer.client_id)
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let jwks = client
+        .jwks
+        .as_ref()
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let request_object = outer
+        .request_object
+        .as_deref()
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let clock_skew = u64::try_from(issuer.token_policy.clock_skew).unwrap_or_default();
+    let verified = crate::tokens::verify_authorization_request_object(
+        request_object,
+        jwks,
+        &client.id,
+        issuer.url.trim_end_matches('/'),
+        clock_skew,
+        Utc::now().timestamp(),
+    )
+    .map_err(|_| RequestObjectResolutionError::Invalid)?;
+    let resolved = merge_signed_authorization_request(&outer, verified.request)
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let replay_expires_at = verified
+        .expires_at
+        .saturating_add(i64::try_from(clock_skew).unwrap_or(i64::MAX));
+    let expires_at = DateTime::<Utc>::from_timestamp(replay_expires_at, 0)
+        .ok_or(RequestObjectResolutionError::Invalid)?;
+    let database = application
+        .database()
+        .ok_or(RequestObjectResolutionError::Unavailable)?;
+    match database
+        .register_request_object(
+            issuer.url.trim_end_matches('/'),
+            &client.id,
+            &verified.jti,
+            expires_at,
+        )
+        .await
+    {
+        Ok(true) => Ok(resolved),
+        Ok(false) => {
+            tracing::warn!(
+                event = "request_object_replay",
+                outcome = "rejected",
+                client_id = %client.id,
+                "authorization request object replay rejected"
+            );
+            Err(RequestObjectResolutionError::Invalid)
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to persist request object replay state");
+            Err(RequestObjectResolutionError::Unavailable)
+        }
+    }
+}
+
+fn merge_signed_authorization_request(
+    outer: &AuthorizationRequest,
+    mut signed: AuthorizationRequest,
+) -> Option<AuthorizationRequest> {
+    let string_matches = |outside: &str, inside: &str| outside.is_empty() || outside == inside;
+    let option_matches =
+        |outside: &Option<String>, inside: &Option<String>| outside.is_none() || outside == inside;
+    let claims_match = |outside: &Option<String>, inside: &Option<String>| {
+        outside.is_none()
+            || outside == inside
+            || outside
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .zip(
+                    inside
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<Value>(value).ok()),
+                )
+                .is_some_and(|(outside, inside)| outside == inside)
+    };
+    if outer.client_id != signed.client_id
+        || !string_matches(&outer.response_type, &signed.response_type)
+        || !string_matches(&outer.redirect_uri, &signed.redirect_uri)
+        || !string_matches(&outer.scope, &signed.scope)
+        || !string_matches(&outer.state, &signed.state)
+        || !string_matches(&outer.nonce, &signed.nonce)
+        || !option_matches(&outer.code_challenge, &signed.code_challenge)
+        || !option_matches(&outer.code_challenge_method, &signed.code_challenge_method)
+        || !option_matches(&outer.ui_locales, &signed.ui_locales)
+        || !option_matches(&outer.prompt, &signed.prompt)
+        || !option_matches(&outer.max_age, &signed.max_age)
+        || !option_matches(&outer.response_mode, &signed.response_mode)
+        || !option_matches(&outer.resource, &signed.resource)
+        || !option_matches(&outer.login_hint, &signed.login_hint)
+        || !option_matches(&outer.acr_values, &signed.acr_values)
+        || !claims_match(&outer.claims, &signed.claims)
+        || !option_matches(&outer.dpop_jkt, &signed.dpop_jkt)
+    {
+        return None;
+    }
+    signed.request_object = None;
+    signed.request_uri = None;
+    Some(signed)
+}
+
+fn authorization_query_contains_request_uri(query: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes())
+        .any(|(key, value)| key == "request_uri" && value.starts_with(PUSHED_REQUEST_URI_PREFIX))
+}
+
+async fn resolve_pushed_authorization(
+    issuer_id: &str,
+    serialized: &[u8],
+    application: &Application,
+) -> Result<AuthorizationRequest, AuthorizationInputError> {
+    let reference = serde_urlencoded::from_bytes::<AuthorizationReferenceRequest>(serialized)
+        .map_err(|_| AuthorizationInputError::Invalid)?;
+    if reference.client_id.is_empty()
+        || reference.client_id.len() > 256
+        || !reference
+            .request_uri
+            .strip_prefix(PUSHED_REQUEST_URI_PREFIX)
+            .is_some_and(valid_opaque_token)
+    {
+        return Err(AuthorizationInputError::Invalid);
+    }
+    let snapshot = application.snapshot();
+    let issuer = snapshot
+        .issuer(issuer_id)
+        .ok_or(AuthorizationInputError::Invalid)?;
+    if snapshot.client(&reference.client_id).is_none() {
+        return Err(AuthorizationInputError::Invalid);
+    }
+    let database = application
+        .database()
+        .ok_or(AuthorizationInputError::Unavailable)?;
+    match database
+        .consume_pushed_authorization(
+            &reference.request_uri,
+            issuer.url.trim_end_matches('/'),
+            &reference.client_id,
+        )
+        .await
+    {
+        Ok(Some(request)) if request.client_id == reference.client_id => Ok(request),
+        Ok(_) => Err(AuthorizationInputError::Invalid),
+        Err(error) => {
+            tracing::error!(%error, "failed to consume pushed authorization request");
+            Err(AuthorizationInputError::Unavailable)
+        }
+    }
+}
+
+async fn push_authorization(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<PushedAuthorizationForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let cors_snapshot = application.snapshot();
+    let cors_request = request.clone();
+    let cors_client_id = form.client_id.clone();
+    let mut response = push_authorization_inner(path, request, form, application).await;
+    add_token_cors(
+        &mut response,
+        &cors_request,
+        &cors_snapshot,
+        Some(cors_client_id.as_str()),
+    );
+    response
+}
+
+async fn push_authorization_inner(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<PushedAuthorizationForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        application.metrics().pushed_authorization(false);
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
+    };
+    let (authorization, client_secret, client_assertion_type, client_assertion) =
+        form.into_inner().into_request();
+    let client = match authenticated_endpoint_client(
+        &snapshot,
+        &request,
+        application.database(),
+        issuer,
+        EndpointClientAuthentication {
+            form_id: Some(&authorization.client_id),
+            form_secret: client_secret.as_deref(),
+            client_assertion_type: client_assertion_type.as_deref(),
+            client_assertion: client_assertion.as_deref(),
+            realm: "par",
+            endpoint_path: "/par",
+        },
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(response) => {
+            application.metrics().pushed_authorization(false);
+            return response;
+        }
+    };
+    let Some(database) = application.database() else {
+        application.metrics().pushed_authorization(false);
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    let dpop = match verified_dpop_endpoint_proof(
+        &request,
+        database,
+        issuer,
+        "/par",
+        "authorization_server",
+        None,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopProofError::Invalid) => {
+            application.metrics().pushed_authorization(false);
+            return invalid_dpop_proof_response("the DPoP proof is invalid or has been replayed");
+        }
+        Err(DpopProofError::NonceRequired(nonce)) => {
+            application.metrics().pushed_authorization(false);
+            return dpop_nonce_response(false, &nonce);
+        }
+        Err(DpopProofError::Unavailable) => {
+            application.metrics().pushed_authorization(false);
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "DPoP replay storage unavailable",
+            );
+        }
+    };
+    let mut authorization =
+        match resolve_authorization_request_object(&issuer_id, authorization, &application).await {
+            Ok(authorization) => authorization,
+            Err(AuthorizationInputError::Unavailable) => {
+                application.metrics().pushed_authorization(false);
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "request object storage unavailable",
+                );
+            }
+            Err(_) => {
+                application.metrics().pushed_authorization(false);
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_object",
+                    "the signed authorization request is invalid or has already been used",
+                );
+            }
+        };
+    if let Err(error) = authorization.validate(&snapshot, &issuer_id) {
+        application.metrics().pushed_authorization(false);
+        return oauth_error(StatusCode::BAD_REQUEST, error.code, error.description);
+    }
+    if let Some(proof) = dpop {
+        if authorization
+            .dpop_jkt
+            .as_deref()
+            .is_some_and(|thumbprint| thumbprint != proof.jkt)
+        {
+            application.metrics().pushed_authorization(false);
+            return invalid_dpop_proof_response(
+                "the DPoP proof does not match the dpop_jkt authorization parameter",
+            );
+        }
+        authorization.dpop_jkt = Some(proof.jkt);
+    }
+    let rate_limit_keys = [
+        format!(
+            "par-network:{}",
+            authentication_remote_address(&request, forwarded_headers_trusted())
+        ),
+        format!("par-client:{issuer_id}:{}", client.id),
+    ];
+    match database
+        .allow_authentication_attempts(
+            &rate_limit_keys,
+            issuer.token_policy.pushed_authorization_request_limit,
+            issuer.token_policy.pushed_authorization_request_window,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            application.metrics().pushed_authorization(false);
+            application.metrics().request_rate_limit_rejection();
+            tracing::warn!(
+                event = "pushed_authorization_request",
+                outcome = "rate_limited",
+                issuer_id,
+                client_id = %client.id,
+                "pushed authorization request rate limit exceeded"
+            );
+            let mut response = oauth_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "temporarily_unavailable",
+                "too many pushed authorization requests",
+            );
+            if let Ok(retry_after) = actix_web::http::header::HeaderValue::from_str(
+                &issuer
+                    .token_policy
+                    .pushed_authorization_request_window
+                    .to_string(),
+            ) {
+                response
+                    .headers_mut()
+                    .insert(actix_web::http::header::RETRY_AFTER, retry_after);
+            }
+            return response;
+        }
+        Err(error) => {
+            application.metrics().pushed_authorization(false);
+            tracing::error!(%error, "failed to apply pushed authorization request rate limit");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "pushed authorization storage failed",
+            );
+        }
+    }
+    let expires_in = issuer.token_policy.pushed_authorization_request_lifetime;
+    match database
+        .issue_pushed_authorization(
+            issuer.url.trim_end_matches('/'),
+            &client.id,
+            &authorization,
+            expires_in,
+        )
+        .await
+    {
+        Ok(request_uri) => {
+            application.metrics().pushed_authorization(true);
+            tracing::info!(
+                event = "pushed_authorization_request",
+                outcome = "created",
+                issuer_id,
+                client_id = %client.id,
+                "pushed authorization request created"
+            );
+            no_store_json_response(
+                StatusCode::CREATED,
+                json!({"request_uri": request_uri, "expires_in": expires_in}),
+            )
+        }
+        Err(error) => {
+            application.metrics().pushed_authorization(false);
+            tracing::error!(%error, "failed to store pushed authorization request");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "pushed authorization storage failed",
+            )
+        }
+    }
+}
+
+async fn authorize_post(
+    path: web::Path<String>,
+    request: HttpRequest,
+    body: web::Bytes,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    if authorization_query_contains_request_uri(std::str::from_utf8(&body).unwrap_or_default()) {
+        let authorization = resolve_pushed_authorization(&issuer_id, &body, &application).await;
+        return authorization_input_response(&issuer_id, &request, &application, authorization)
+            .await;
+    }
+    let Ok(form) = serde_urlencoded::from_bytes::<AuthorizationPostForm>(&body) else {
+        return browser_request_rejection(
+            &request,
+            "The submitted form is incomplete or malformed",
+        );
+    };
+    let AuthorizationPostForm {
+        response_type,
+        client_id,
+        redirect_uri,
+        scope,
+        state,
+        nonce,
+        code_challenge,
+        code_challenge_method,
+        ui_locales,
+        prompt,
+        max_age,
+        response_mode,
+        resource,
+        request_object,
+        request_uri,
+        login_hint,
+        acr_values,
+        claims,
+        dpop_jkt,
+        transaction,
+        csrf_token,
+        identifier,
+        password,
+        mfa_transaction,
+        totp_code,
+    } = form;
+    let protocol_parameters_absent = response_type.is_empty()
+        && client_id.is_empty()
+        && redirect_uri.is_empty()
+        && scope.is_empty()
+        && state.is_empty()
+        && nonce.is_none()
+        && code_challenge.is_none()
+        && code_challenge_method.is_none()
+        && ui_locales.is_none()
+        && prompt.is_none()
+        && max_age.is_none()
+        && response_mode.is_none()
+        && resource.is_none()
+        && request_object.is_none()
+        && request_uri.is_none()
+        && login_hint.is_none()
+        && acr_values.is_none()
+        && claims.is_none()
+        && dpop_jkt.is_none();
+    if mfa_transaction.is_some() {
+        let (Some(mfa_transaction), Some(csrf_token), Some(totp_code)) =
+            (mfa_transaction, csrf_token, totp_code)
+        else {
+            return browser_request_rejection(
+                &request,
+                "The submitted verification form is incomplete or malformed",
+            );
+        };
+        if !protocol_parameters_absent
+            || transaction.is_some()
+            || identifier.is_some()
+            || password.is_some()
+            || !valid_csrf(&request, &csrf_token)
+        {
+            return browser_request_rejection(
+                &request,
+                "The submitted verification form is incomplete or malformed",
+            );
+        }
+        return complete_totp_authentication(
+            issuer_id,
+            request,
+            mfa_transaction,
+            csrf_token,
+            totp_code,
+            application,
+        )
+        .await;
+    }
+    if totp_code.is_some() {
+        return browser_request_rejection(
+            &request,
+            "The submitted verification form is incomplete or malformed",
+        );
+    }
+    if let Some(transaction) = transaction {
+        let (Some(csrf_token), Some(identifier), Some(password)) =
+            (csrf_token, identifier, password)
+        else {
+            return browser_request_rejection(
+                &request,
+                "The submitted sign-in form is incomplete or malformed",
+            );
+        };
+        if !protocol_parameters_absent || !valid_csrf(&request, &csrf_token) {
+            return browser_request_rejection(
+                &request,
+                "The submitted sign-in form is incomplete or malformed",
+            );
+        }
+        let snapshot = application.snapshot();
+        let Some(issuer) = snapshot.issuer(&issuer_id) else {
+            return browser_request_rejection(&request, "The authorization issuer is unknown");
+        };
+        let Some(database) = application.database() else {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authorization storage is unavailable",
+            );
+        };
+        let authorization = match database
+            .consume_browser_authorization(&transaction, issuer.url.trim_end_matches('/'))
+            .await
+        {
+            Ok(Some(authorization)) => authorization,
+            Ok(None) => {
+                return protocol_error(
+                    &snapshot.configuration.branding,
+                    "The sign-in form has expired; please start again",
+                    &correlation_id(&request),
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to consume browser authorization transaction");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "authorization storage failed",
+                );
+            }
+        };
+        return complete_authentication(
+            issuer_id,
+            request,
+            authorization,
+            csrf_token,
+            identifier,
+            password,
+            application,
+        )
+        .await;
+    }
+    let authorization = AuthorizationRequest {
+        response_type,
+        client_id,
+        redirect_uri,
+        scope,
+        state,
+        nonce: nonce.unwrap_or_default(),
+        code_challenge,
+        code_challenge_method,
+        ui_locales,
+        prompt,
+        max_age,
+        response_mode,
+        resource,
+        request_object,
+        request_uri,
+        login_hint,
+        acr_values,
+        claims,
+        dpop_jkt,
+    }
+    .normalize_empty_optional_parameters();
+    if authorization.request_object.is_none()
+        && (authorization.response_type.is_empty()
+            || authorization.client_id.is_empty()
+            || authorization.redirect_uri.is_empty()
+            || authorization.scope.is_empty()
+            || authorization.state.is_empty())
+    {
+        return browser_request_rejection(
+            &request,
+            "The submitted form is incomplete or malformed",
+        );
+    }
+    let authorization =
+        match resolve_authorization_request_object(&issuer_id, authorization, &application).await {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                return authorization_input_response(
+                    &issuer_id,
+                    &request,
+                    &application,
+                    Err(error),
+                )
+                .await;
+            }
+        };
+
+    match (csrf_token, identifier, password) {
+        (None, None, None) => {
+            authorization_input_response(
+                &issuer_id,
+                &request,
+                &application,
+                enforce_pushed_authorization_policy(&issuer_id, authorization, &application),
+            )
+            .await
+        }
+        _ => browser_request_rejection(&request, "The submitted form is incomplete or malformed"),
+    }
+}
+
+async fn authorization_response(
+    issuer_id: &str,
+    request: &HttpRequest,
+    application: &Application,
+    authorization: Result<AuthorizationRequest, ()>,
+) -> HttpResponse {
+    let request_id = correlation_id(request);
+    let mut session = existing_session(request, application).await;
     let snapshot = application.snapshot();
     let default_branding = &snapshot.configuration.branding;
-    let authorization = serde_urlencoded::from_str::<AuthorizationRequest>(request.query_string());
 
-    match authorization {
-        Ok(authorization) => match authorization.validate(&snapshot, &issuer_id) {
+    let mut response = match authorization {
+        Ok(authorization) => match authorization.validate(&snapshot, issuer_id) {
             Ok(client) => {
-                let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
+                let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
                 let messages = branding.messages(authorization.ui_locales.as_deref());
-                let csrf_token = random_token();
-                let mut response = html_response(
-                    StatusCode::OK,
-                    LoginTemplate {
-                        product_name: &branding.product_name,
-                        primary_color: &branding.primary_color,
-                        issuer_id: &issuer_id,
-                        client_name: if client.name.is_empty() {
-                            &client.id
-                        } else {
-                            &client.name
-                        },
-                        request: &authorization,
-                        csrf_token: &csrf_token,
-                        identifier: "",
-                        has_error: false,
-                        error: None,
-                        messages: &messages,
-                        logo: branding.logo.as_deref(),
-                        favicon: branding.favicon.as_deref(),
-                        font_family: branding.font_family.as_deref(),
-                        support_url: branding.support_url.as_deref(),
-                        privacy_url: branding.privacy_url.as_deref(),
-                        terms_url: branding.terms_url.as_deref(),
-                    }
-                    .render(),
-                );
-                add_csrf_cookie(&mut response, &request, &csrf_token);
-                response
+                let user = session
+                    .subject
+                    .as_deref()
+                    .and_then(|subject| snapshot.user(subject))
+                    .filter(|user| user.totp_secret_reference.is_none() || session.mfa_verified)
+                    .filter(|_| {
+                        authorization_authentication_context_satisfies(
+                            client,
+                            &authorization,
+                            session.mfa_verified,
+                        )
+                    });
+                if session.subject.is_some() && user.is_none() {
+                    session.clear_cookie = true;
+                }
+                let session_auth_time = session
+                    .authenticated_at
+                    .map(|authenticated_at| authenticated_at.timestamp());
+                let session_too_old = authorization.max_age_seconds().is_some_and(|max_age| {
+                    max_age == 0
+                        || session_auth_time.is_none_or(|auth_time| {
+                            auth_time < Utc::now().timestamp().saturating_sub(max_age)
+                        })
+                });
+                let force_login = authorization.has_prompt("login")
+                    || authorization.has_prompt("select_account")
+                    || session_too_old;
+                let consent_required = authorization_consent_required(client, &authorization);
+
+                if authorization.has_prompt("none") && session.unavailable {
+                    authorization_request_error(
+                        application.database(),
+                        &snapshot,
+                        default_branding,
+                        issuer_id,
+                        &authorization,
+                        crate::protocol::AuthorizationError::new(
+                            "server_error",
+                            "The authenticated session could not be checked",
+                        ),
+                        &request_id,
+                    )
+                    .await
+                } else if authorization.has_prompt("none") && user.is_none() {
+                    authorization_request_error(
+                        application.database(),
+                        &snapshot,
+                        default_branding,
+                        issuer_id,
+                        &authorization,
+                        crate::protocol::AuthorizationError::new(
+                            "login_required",
+                            "User interaction is required to authenticate",
+                        ),
+                        &request_id,
+                    )
+                    .await
+                } else if authorization.has_prompt("none") && force_login {
+                    authorization_request_error(
+                        application.database(),
+                        &snapshot,
+                        default_branding,
+                        issuer_id,
+                        &authorization,
+                        crate::protocol::AuthorizationError::new(
+                            "login_required",
+                            "The authenticated session is too old",
+                        ),
+                        &request_id,
+                    )
+                    .await
+                } else if authorization.has_prompt("none") && consent_required {
+                    authorization_request_error(
+                        application.database(),
+                        &snapshot,
+                        default_branding,
+                        issuer_id,
+                        &authorization,
+                        crate::protocol::AuthorizationError::new(
+                            "consent_required",
+                            "User interaction is required to grant consent",
+                        ),
+                        &request_id,
+                    )
+                    .await
+                } else if let Some(user) = user.filter(|_| !force_login) {
+                    resume_authorization(
+                        application,
+                        &snapshot,
+                        issuer_id,
+                        &authorization,
+                        client,
+                        user,
+                        session_auth_time.unwrap_or_else(|| Utc::now().timestamp()),
+                        session.mfa_verified,
+                        &branding,
+                        &messages,
+                        request,
+                    )
+                    .await
+                } else {
+                    render_login(
+                        application,
+                        &snapshot,
+                        issuer_id,
+                        &authorization,
+                        client,
+                        &branding,
+                        &messages,
+                        request,
+                    )
+                    .await
+                }
             }
-            Err(error) => authorization_request_error(
-                &snapshot,
-                default_branding,
-                &issuer_id,
-                &authorization,
-                error,
-            ),
+            Err(error) => {
+                authorization_request_error(
+                    application.database(),
+                    &snapshot,
+                    default_branding,
+                    issuer_id,
+                    &authorization,
+                    error,
+                    &request_id,
+                )
+                .await
+            }
         },
         Err(_) => protocol_error(
             default_branding,
             "The authorization request is incomplete or malformed",
+            &request_id,
         ),
+    };
+    if session.clear_cookie {
+        remove_session_cookie(&mut response, request);
+    }
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_login(
+    application: &Application,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    authorization: &AuthorizationRequest,
+    client: &crate::configuration::Client,
+    branding: &crate::configuration::Branding,
+    messages: &crate::configuration::UiMessages,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization storage is unavailable",
+        );
+    };
+    let Some(issuer) = snapshot.issuer(issuer_id) else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The authorization issuer is unknown",
+            &correlation_id(request),
+        );
+    };
+    let transaction = match database
+        .issue_browser_authorization(
+            issuer.url.trim_end_matches('/'),
+            authorization,
+            issuer.token_policy.browser_authorization_lifetime,
+        )
+        .await
+    {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::error!(%error, "failed to persist browser authorization transaction");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authorization storage failed",
+            );
+        }
+    };
+    let csrf_token = random_token();
+    let mut response = html_response(
+        StatusCode::OK,
+        LoginTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id,
+            client_name: if client.name.is_empty() {
+                &client.id
+            } else {
+                &client.name
+            },
+            transaction: &transaction,
+            csrf_token: &csrf_token,
+            identifier: authorization.login_hint.as_deref().unwrap_or_default(),
+            has_error: false,
+            error: None,
+            messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+            support_url: branding.support_url.as_deref(),
+            privacy_url: branding.privacy_url.as_deref(),
+            terms_url: branding.terms_url.as_deref(),
+        }
+        .render(),
+    );
+    add_csrf_cookie(&mut response, request, &csrf_token);
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resume_authorization(
+    application: &Application,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    authorization: &AuthorizationRequest,
+    client: &crate::configuration::Client,
+    user: &crate::configuration::User,
+    auth_time: i64,
+    mfa_verified: bool,
+    branding: &crate::configuration::Branding,
+    messages: &crate::configuration::UiMessages,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    if !essential_claims_satisfied(
+        snapshot,
+        issuer_id,
+        authorization,
+        user,
+        auth_time,
+        mfa_verified,
+    ) {
+        return authorization_request_error(
+            Some(database),
+            snapshot,
+            &snapshot.configuration.branding,
+            issuer_id,
+            authorization,
+            crate::protocol::AuthorizationError::new(
+                "access_denied",
+                "An essential requested claim cannot be satisfied",
+            ),
+            &correlation_id(request),
+        )
+        .await;
+    }
+    let grant = build_authorization_grant(
+        snapshot,
+        issuer_id,
+        authorization,
+        user,
+        auth_time,
+        mfa_verified,
+    );
+    tracing::info!(
+        event = "authentication_session",
+        outcome = "reused",
+        issuer_id,
+        client_id = %grant.client_id,
+        subject_id = %grant.subject,
+        "authenticated browser session reused"
+    );
+
+    if authorization_consent_required(client, authorization) {
+        let transaction = match database
+            .issue_pending_authorization(&grant, &authorization.state)
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::error!(%error, "failed to store pending authorization");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "authorization storage failed",
+                );
+            }
+        };
+        let csrf_token = random_token();
+        let scopes = consent_scopes(&grant.scopes, messages);
+        let mut response = html_response(
+            StatusCode::OK,
+            ConsentTemplate {
+                product_name: &branding.product_name,
+                primary_color: &branding.primary_color,
+                issuer_id,
+                client_name: if client.name.is_empty() {
+                    &client.id
+                } else {
+                    &client.name
+                },
+                scopes: &scopes,
+                transaction: &transaction,
+                csrf_token: &csrf_token,
+                messages,
+                logo: branding.logo.as_deref(),
+                favicon: branding.favicon.as_deref(),
+                font_family: branding.font_family.as_deref(),
+                support_url: branding.support_url.as_deref(),
+                privacy_url: branding.privacy_url.as_deref(),
+                terms_url: branding.terms_url.as_deref(),
+            }
+            .render(),
+        );
+        add_csrf_cookie(&mut response, request, &csrf_token);
+        response
+    } else {
+        match authorization_success(database, &grant, &authorization.state, branding).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::error!(%error, "failed to issue authorization code");
+                oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "authorization storage failed",
+                )
+            }
+        }
     }
 }
 
-async fn authenticate(
-    path: web::Path<String>,
+fn build_authorization_grant(
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    authorization: &AuthorizationRequest,
+    user: &crate::configuration::User,
+    auth_time: i64,
+    mfa_verified: bool,
+) -> AuthorizationGrant {
+    let issuer = snapshot.issuer(issuer_id).expect("validated issuer");
+    let scopes = normalized_scopes(&authorization.scope);
+    let claims = tokens::mapped_claims(snapshot, user, &scopes);
+    AuthorizationGrant {
+        issuer: issuer.url.trim_end_matches('/').to_owned(),
+        subject: user.id.clone(),
+        client_id: authorization.client_id.clone(),
+        redirect_uri: authorization.redirect_uri.clone(),
+        scopes,
+        nonce: (!authorization.nonce.is_empty()).then(|| authorization.nonce.clone()),
+        code_challenge: authorization.code_challenge.clone(),
+        response_mode: authorization.response_mode.clone(),
+        resource: authorization.resource.clone(),
+        dpop_jkt: authorization.dpop_jkt.clone(),
+        auth_time: Some(auth_time),
+        mfa_verified,
+        claims: json!(claims),
+        expires_at: Utc::now() + Duration::seconds(issuer.token_policy.authorization_code_lifetime),
+    }
+}
+
+async fn complete_authentication(
+    issuer_id: String,
     request: HttpRequest,
-    form: web::Form<LoginForm>,
+    authorization: AuthorizationRequest,
+    csrf_token: String,
+    submitted_identifier: String,
+    password: String,
     application: web::Data<Application>,
-) -> impl Responder {
-    let issuer_id = path.into_inner();
+) -> HttpResponse {
+    let request_id = correlation_id(&request);
     let snapshot = application.snapshot();
-    let form = form.into_inner();
-    let authorization = AuthorizationRequest {
-        response_type: form.response_type,
-        client_id: form.client_id,
-        redirect_uri: form.redirect_uri,
-        scope: form.scope,
-        state: form.state,
-        nonce: form.nonce,
-        code_challenge: form.code_challenge,
-        code_challenge_method: form.code_challenge_method,
-        ui_locales: form.ui_locales,
-    };
     let default_branding = &snapshot.configuration.branding;
 
-    if !valid_csrf(&request, &form.csrf_token) {
+    if !valid_csrf(&request, &csrf_token) {
         return protocol_error(
             default_branding,
             "The sign-in form has expired; please start again",
+            &request_id,
         );
     }
 
     let client = match authorization.validate(&snapshot, &issuer_id) {
         Ok(client) => client,
-        Err(error) => return protocol_error(default_branding, error.description),
+        Err(error) => return protocol_error(default_branding, error.description, &request_id),
     };
+    let issuer = snapshot
+        .issuer(&issuer_id)
+        .expect("the authorization request validated its issuer");
     let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
     let messages = branding.messages(authorization.ui_locales.as_deref());
     let Some(database) = application.database() else {
@@ -469,30 +2048,24 @@ async fn authenticate(
             json!({"error": "database_unavailable"}),
         );
     };
-    let identifier = form.identifier.trim().to_owned();
-    let remote_address = forwarded_headers_trusted()
-        .then(|| {
-            request
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').next())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
-        .flatten()
-        .or_else(|| request.peer_addr().map(|address| address.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_owned());
-    let rate_limit_key = format!(
-        "{}:{}",
-        remote_address,
-        identifier.to_lowercase()
+    let submitted_identifier = submitted_identifier.trim();
+    let identifier_allowed = valid_submitted_identifier(submitted_identifier);
+    let password_allowed = valid_submitted_password(&password);
+    let credentials_shape_valid = identifier_allowed && password_allowed;
+    let identifier = if identifier_allowed {
+        submitted_identifier.to_owned()
+    } else {
+        String::new()
+    };
+    let remote_address = authentication_remote_address(&request, forwarded_headers_trusted());
+    let rate_limit_keys = authentication_rate_limit_keys(
+        &remote_address,
+        identifier_allowed.then_some(identifier.as_str()),
     );
     let rate_limit = &snapshot.configuration.authentication.rate_limit;
     match database
-        .allow_authentication_attempt(
-            &rate_limit_key,
+        .allow_authentication_attempts(
+            &rate_limit_keys,
             rate_limit.attempts,
             rate_limit.window_seconds,
         )
@@ -507,6 +2080,24 @@ async fn authenticate(
                 issuer_id,
                 client_id = %authorization.client_id
             );
+            let transaction = match database
+                .issue_browser_authorization(
+                    issuer.url.trim_end_matches('/'),
+                    &authorization,
+                    issuer.token_policy.browser_authorization_lifetime,
+                )
+                .await
+            {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    tracing::error!(%error, "failed to renew browser authorization transaction");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "authorization storage failed",
+                    );
+                }
+            };
             let mut response = html_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 LoginTemplate {
@@ -518,11 +2109,11 @@ async fn authenticate(
                     } else {
                         &client.name
                     },
-                    request: &authorization,
-                    csrf_token: &form.csrf_token,
+                    transaction: &transaction,
+                    csrf_token: &csrf_token,
                     identifier: &identifier,
                     has_error: true,
-                    error: Some("Too many attempts. Please wait before trying again."),
+                    error: Some(&messages.sign_in_rate_limited),
                     messages: &messages,
                     logo: branding.logo.as_deref(),
                     favicon: branding.favicon.as_deref(),
@@ -550,17 +2141,22 @@ async fn authenticate(
             );
         }
     }
-    let user = snapshot.user_by_identifier(&identifier).cloned();
-    let password = form.password;
+    let user = credentials_shape_valid
+        .then(|| snapshot.user_by_identifier(&identifier).cloned())
+        .flatten();
     let hash = user
         .as_ref()
         .map(|user| user.password_hash.clone())
-        .unwrap_or_else(|| {
-            "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa".to_owned()
-        });
-    let valid_password = web::block(move || bcrypt::verify(password, &hash).unwrap_or(false))
+        .unwrap_or_else(|| snapshot.dummy_password_hash().to_owned());
+    let password = if credentials_shape_valid {
+        password
+    } else {
+        "invalid-credential-shape".to_owned()
+    };
+    let password_verified = web::block(move || bcrypt::verify(password, &hash).unwrap_or(false))
         .await
         .unwrap_or(false);
+    let valid_password = credentials_shape_valid && password_verified;
 
     let Some(user) = user.filter(|_| valid_password) else {
         application.metrics().authentication(false);
@@ -571,6 +2167,24 @@ async fn authenticate(
             client_id = %authorization.client_id,
             reason = "invalid_credentials"
         );
+        let transaction = match database
+            .issue_browser_authorization(
+                issuer.url.trim_end_matches('/'),
+                &authorization,
+                issuer.token_policy.browser_authorization_lifetime,
+            )
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::error!(%error, "failed to renew browser authorization transaction");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "authorization storage failed",
+                );
+            }
+        };
         return html_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             LoginTemplate {
@@ -582,11 +2196,11 @@ async fn authenticate(
                 } else {
                     &client.name
                 },
-                request: &authorization,
-                csrf_token: &form.csrf_token,
+                transaction: &transaction,
+                csrf_token: &csrf_token,
                 identifier: &identifier,
                 has_error: true,
-                error: Some("The email or password is incorrect."),
+                error: Some(&messages.sign_in_invalid_credentials),
                 messages: &messages,
                 logo: branding.logo.as_deref(),
                 favicon: branding.favicon.as_deref(),
@@ -598,31 +2212,415 @@ async fn authenticate(
             .render(),
         );
     };
-    let issuer = snapshot.issuer(&issuer_id).expect("validated issuer");
-    let scopes = authorization
-        .scope
-        .split_ascii_whitespace()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let claims = tokens::mapped_claims(&snapshot, &user, &scopes);
-    let grant = AuthorizationGrant {
-        issuer: issuer.url.trim_end_matches('/').to_owned(),
-        subject: user.id,
-        client_id: authorization.client_id,
-        redirect_uri: authorization.redirect_uri.clone(),
-        scopes,
-        nonce: (!authorization.nonce.is_empty()).then_some(authorization.nonce),
-        code_challenge: authorization.code_challenge,
-        claims: json!(claims),
-        expires_at: Utc::now() + Duration::seconds(issuer.token_policy.authorization_code_lifetime),
-    };
+    if authorization_requires_mfa(client, &authorization) && user.totp_secret_reference.is_none() {
+        application.metrics().authentication(false);
+        application.metrics().mfa(MfaOutcome::Rejected);
+        tracing::warn!(
+            event = "authentication",
+            outcome = "failure",
+            issuer_id,
+            client_id = %authorization.client_id,
+            reason = "required_mfa_unavailable"
+        );
+        return authorization_request_error(
+            Some(database),
+            &snapshot,
+            default_branding,
+            &issuer_id,
+            &authorization,
+            crate::protocol::AuthorizationError::new(
+                "access_denied",
+                "The application requires multi-factor authentication",
+            ),
+            &request_id,
+        )
+        .await;
+    }
+    if let Some(reference) = &user.totp_secret_reference {
+        if !authorization_authentication_context_satisfies(client, &authorization, true) {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Rejected);
+            return authorization_request_error(
+                Some(database),
+                &snapshot,
+                default_branding,
+                &issuer_id,
+                &authorization,
+                crate::protocol::AuthorizationError::new(
+                    "access_denied",
+                    "The requested authentication context cannot be satisfied",
+                ),
+                &request_id,
+            )
+            .await;
+        }
+        if let Err(error) = crate::totp::secret_from_reference(reference) {
+            tracing::error!(?error, "configured TOTP secret is unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication is unavailable",
+            );
+        }
+        let payload = serde_json::to_value(&authorization)
+            .expect("validated authorization request serializes");
+        let transaction = match database
+            .issue_totp_challenge(
+                issuer.url.trim_end_matches('/'),
+                &user.id,
+                "authorization",
+                &payload,
+                issuer.token_policy.browser_authorization_lifetime,
+            )
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::error!(%error, "failed to persist TOTP challenge");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "multi-factor authentication storage failed",
+                );
+            }
+        };
+        application.metrics().mfa(MfaOutcome::Challenged);
+        return render_totp_challenge(
+            &request,
+            &snapshot,
+            &issuer_id,
+            client,
+            &authorization,
+            &transaction,
+            &csrf_token,
+            None,
+            StatusCode::OK,
+        );
+    }
 
+    finish_authenticated_authorization(
+        &request,
+        &application,
+        &snapshot,
+        &issuer_id,
+        &authorization,
+        client,
+        &user,
+        &csrf_token,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_totp_challenge(
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    client: &crate::configuration::Client,
+    authorization: &AuthorizationRequest,
+    transaction: &str,
+    csrf_token: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(authorization.ui_locales.as_deref());
+    let form_action = format!("/{issuer_id}/authorize");
+    let mut response = html_response(
+        status,
+        TotpTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            client_name: if client.name.is_empty() {
+                &client.id
+            } else {
+                &client.name
+            },
+            transaction,
+            form_action: &form_action,
+            transaction_field: "mfa_transaction",
+            action_value: None,
+            csrf_token,
+            has_error: error.is_some(),
+            error,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+            support_url: branding.support_url.as_deref(),
+            privacy_url: branding.privacy_url.as_deref(),
+            terms_url: branding.terms_url.as_deref(),
+        }
+        .render(),
+    );
+    add_csrf_cookie(&mut response, request, csrf_token);
+    response
+}
+
+async fn complete_totp_authentication(
+    issuer_id: String,
+    request: HttpRequest,
+    transaction: String,
+    csrf_token: String,
+    submitted_code: String,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        return browser_request_rejection(&request, "The authorization issuer is unknown");
+    };
+    let issuer_url = issuer.url.trim_end_matches('/');
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization storage is unavailable",
+        );
+    };
+    let challenge = match database
+        .totp_challenge(&transaction, issuer_url, "authorization")
+        .await
+    {
+        Ok(Some(challenge)) => challenge,
+        Ok(None) => {
+            let message = snapshot
+                .branding(Some(&issuer_id), None)
+                .messages(None)
+                .totp_expired;
+            return protocol_error(
+                &snapshot.configuration.branding,
+                &message,
+                &correlation_id(&request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load TOTP challenge");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    };
+    let authorization = match serde_json::from_value::<AuthorizationRequest>(challenge.payload) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            tracing::error!(%error, "stored TOTP authorization challenge is invalid");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    };
+    let client = match authorization.validate(&snapshot, &issuer_id) {
+        Ok(client) => client,
+        Err(error) => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                error.description,
+                &correlation_id(&request),
+            );
+        }
+    };
+    let Some(user) = snapshot.user(&challenge.subject) else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "This verification is no longer valid",
+            &correlation_id(&request),
+        );
+    };
+    let Some(reference) = user.totp_secret_reference.as_ref() else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "This verification is no longer valid",
+            &correlation_id(&request),
+        );
+    };
+    let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
+    let messages = branding.messages(authorization.ui_locales.as_deref());
+    let remote_address = authentication_remote_address(&request, forwarded_headers_trusted());
+    let rate_limit_keys = authentication_rate_limit_keys(&remote_address, Some(&user.identifier));
+    let rate_limit = &snapshot.configuration.authentication.rate_limit;
+    match database
+        .allow_authentication_attempts(
+            &rate_limit_keys,
+            rate_limit.attempts,
+            rate_limit.window_seconds,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            application.metrics().rate_limit_rejection();
+            let mut response = render_totp_challenge(
+                &request,
+                &snapshot,
+                &issuer_id,
+                client,
+                &authorization,
+                &transaction,
+                &csrf_token,
+                Some(&messages.sign_in_rate_limited),
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+            if let Ok(value) = actix_web::http::header::HeaderValue::from_str(
+                &rate_limit.window_seconds.to_string(),
+            ) {
+                response
+                    .headers_mut()
+                    .insert(actix_web::http::header::RETRY_AFTER, value);
+            }
+            return response;
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to rate-limit TOTP authentication");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authentication storage failed",
+            );
+        }
+    }
+    let secret = match crate::totp::secret_from_reference(reference) {
+        Ok(secret) => secret,
+        Err(error) => {
+            tracing::error!(?error, "configured TOTP secret is unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication is unavailable",
+            );
+        }
+    };
+    let Some(counter) = crate::totp::verify(&secret, &submitted_code, Utc::now().timestamp())
+    else {
+        application.metrics().authentication(false);
+        application.metrics().mfa(MfaOutcome::Failure);
+        tracing::warn!(
+            event = "authentication",
+            outcome = "failure",
+            issuer_id,
+            client_id = %client.id,
+            reason = "invalid_totp"
+        );
+        return render_totp_challenge(
+            &request,
+            &snapshot,
+            &issuer_id,
+            client,
+            &authorization,
+            &transaction,
+            &csrf_token,
+            Some(&messages.totp_invalid_code),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    };
+    match database
+        .consume_totp_challenge(&transaction, issuer_url, &user.id, "authorization", counter)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Rejected);
+            let message = snapshot
+                .branding(Some(&issuer_id), Some(&client.id))
+                .messages(authorization.ui_locales.as_deref())
+                .totp_expired;
+            return protocol_error(
+                &snapshot.configuration.branding,
+                &message,
+                &correlation_id(&request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to consume TOTP challenge");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    }
+    application.metrics().mfa(MfaOutcome::Success);
+    finish_authenticated_authorization(
+        &request,
+        &application,
+        &snapshot,
+        &issuer_id,
+        &authorization,
+        client,
+        user,
+        &csrf_token,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_authenticated_authorization(
+    request: &HttpRequest,
+    application: &Application,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    authorization: &AuthorizationRequest,
+    client: &crate::configuration::Client,
+    user: &crate::configuration::User,
+    csrf_token: &str,
+    mfa_verified: bool,
+) -> HttpResponse {
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization storage is unavailable",
+        );
+    };
+    let auth_time = Utc::now().timestamp();
+    if !authorization_authentication_context_satisfies(client, authorization, mfa_verified)
+        || !essential_claims_satisfied(
+            snapshot,
+            issuer_id,
+            authorization,
+            user,
+            auth_time,
+            mfa_verified,
+        )
+    {
+        application.metrics().authentication(false);
+        return authorization_request_error(
+            Some(database),
+            snapshot,
+            &snapshot.configuration.branding,
+            issuer_id,
+            authorization,
+            crate::protocol::AuthorizationError::new(
+                "access_denied",
+                "An essential requested claim cannot be satisfied",
+            ),
+            &correlation_id(request),
+        )
+        .await;
+    }
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(authorization.ui_locales.as_deref());
+    let grant = build_authorization_grant(
+        snapshot,
+        issuer_id,
+        authorization,
+        user,
+        auth_time,
+        mfa_verified,
+    );
     let session_policy = &snapshot.configuration.authentication.session;
     let session = match database
         .start_session(
             &grant.subject,
             session_policy.max_concurrent.max(1),
             session_policy.absolute_timeout.max(1),
+            mfa_verified,
         )
         .await
     {
@@ -641,11 +2639,12 @@ async fn authenticate(
         outcome = "success",
         issuer_id,
         client_id = %grant.client_id,
-        subject_id = %grant.subject
+        subject_id = %grant.subject,
+        mfa_verified
     );
     application.metrics().authentication(true);
 
-    if client.consent_required.unwrap_or(true) {
+    if authorization_consent_required(client, authorization) {
         let transaction = match database
             .issue_pending_authorization(&grant, &authorization.state)
             .await
@@ -660,13 +2659,13 @@ async fn authenticate(
                 );
             }
         };
-        let scopes = consent_scopes(&grant.scopes);
+        let scopes = consent_scopes(&grant.scopes, &messages);
         let mut response = html_response(
             StatusCode::OK,
             ConsentTemplate {
                 product_name: &branding.product_name,
                 primary_color: &branding.primary_color,
-                issuer_id: &issuer_id,
+                issuer_id,
                 client_name: if client.name.is_empty() {
                     &client.id
                 } else {
@@ -674,7 +2673,7 @@ async fn authenticate(
                 },
                 scopes: &scopes,
                 transaction: &transaction,
-                csrf_token: &form.csrf_token,
+                csrf_token,
                 messages: &messages,
                 logo: branding.logo.as_deref(),
                 favicon: branding.favicon.as_deref(),
@@ -687,18 +2686,18 @@ async fn authenticate(
         );
         add_session_cookie(
             &mut response,
-            &request,
+            request,
             &session,
             session_policy.absolute_timeout,
         );
         return response;
     }
 
-    match authorization_success(database, &grant, &authorization.state).await {
+    match authorization_success(database, &grant, &authorization.state, &branding).await {
         Ok(mut response) => {
             add_session_cookie(
                 &mut response,
-                &request,
+                request,
                 &session,
                 session_policy.absolute_timeout,
             );
@@ -721,11 +2720,16 @@ async fn consent(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
+    let request_id = correlation_id(&request);
     let snapshot = application.snapshot();
     let form = form.into_inner();
     let branding = &snapshot.configuration.branding;
     if !valid_csrf(&request, &form.csrf_token) {
-        return protocol_error(branding, "The consent form has expired; please start again");
+        return protocol_error(
+            branding,
+            "The consent form has expired; please start again",
+            &request_id,
+        );
     }
     let Some(database) = application.database() else {
         return oauth_error(
@@ -735,10 +2739,13 @@ async fn consent(
         );
     };
     let Some(session) = session_token(&request) else {
-        return protocol_error(
+        let mut response = protocol_error(
             branding,
             "Your sign-in session has expired; please start again",
+            &request_id,
         );
+        remove_session_cookie(&mut response, &request);
+        return response;
     };
     let session_policy = &snapshot.configuration.authentication.session;
     let subject = match database
@@ -747,10 +2754,13 @@ async fn consent(
     {
         Ok(Some(subject)) => subject,
         Ok(None) => {
-            return protocol_error(
+            let mut response = protocol_error(
                 branding,
                 "Your sign-in session has expired; please start again",
+                &request_id,
             );
+            remove_session_cookie(&mut response, &request);
+            return response;
         }
         Err(error) => {
             tracing::error!(%error, "failed to validate authenticated session");
@@ -766,7 +2776,13 @@ async fn consent(
         .await
     {
         Ok(Some(pending)) if pending.expires_at > Utc::now() => pending,
-        Ok(_) => return protocol_error(branding, "This authorization request has expired"),
+        Ok(_) => {
+            return protocol_error(
+                branding,
+                "This authorization request has expired",
+                &request_id,
+            );
+        }
         Err(error) => {
             tracing::error!(%error, "failed to consume pending authorization");
             return oauth_error(
@@ -777,10 +2793,14 @@ async fn consent(
         }
     };
     let Some(issuer) = snapshot.issuer(&issuer_id) else {
-        return protocol_error(branding, "The authorization issuer is unknown");
+        return protocol_error(branding, "The authorization issuer is unknown", &request_id);
     };
     if pending.issuer != issuer.url.trim_end_matches('/') || pending.subject != subject {
-        return protocol_error(branding, "This authorization request is not valid");
+        return protocol_error(
+            branding,
+            "This authorization request is not valid",
+            &request_id,
+        );
     }
 
     match form.decision.as_str() {
@@ -794,7 +2814,7 @@ async fn consent(
             );
             let state = pending.state.clone();
             let grant = AuthorizationGrant::from(pending);
-            match authorization_success(database, &grant, &state).await {
+            match authorization_success(database, &grant, &state, branding).await {
                 Ok(response) => response,
                 Err(error) => {
                     tracing::error!(%error, "failed to issue authorization code");
@@ -814,9 +2834,9 @@ async fn consent(
                 client_id = %pending.client_id,
                 subject_id = %pending.subject
             );
-            authorization_denied(&pending)
+            authorization_denied(database, &pending, branding).await
         }
-        _ => protocol_error(branding, "The consent decision is invalid"),
+        _ => protocol_error(branding, "The consent decision is invalid", &request_id),
     }
 }
 
@@ -827,13 +2847,46 @@ async fn logout_confirmation(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
-    let query = query.into_inner();
+    let request_id = correlation_id(&request);
+    let mut query = query.into_inner();
+    for parameter in [
+        &mut query.id_token_hint,
+        &mut query.post_logout_redirect_uri,
+        &mut query.state,
+    ] {
+        if parameter.as_deref() == Some("") {
+            *parameter = None;
+        }
+    }
     let snapshot = application.snapshot();
     let default_branding = &snapshot.configuration.branding;
     let Some(issuer) = snapshot.issuer(&issuer_id) else {
-        return protocol_error(default_branding, "The logout issuer is unknown");
+        return protocol_error(
+            default_branding,
+            "The logout issuer is unknown",
+            &request_id,
+        );
     };
     let branding = snapshot.branding(Some(&issuer_id), None);
+    if query
+        .id_token_hint
+        .as_deref()
+        .is_some_and(|value| value.len() > MAX_LOGOUT_HINT_BYTES)
+        || query
+            .post_logout_redirect_uri
+            .as_deref()
+            .is_some_and(|value| value.len() > 4_096)
+        || query
+            .state
+            .as_deref()
+            .is_some_and(|value| value.len() > 1_024)
+    {
+        return protocol_error(
+            &branding,
+            "One or more logout parameters exceed the supported length",
+            &request_id,
+        );
+    }
     let Some(database) = application.database() else {
         return oauth_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -841,6 +2894,7 @@ async fn logout_confirmation(
             "database unavailable",
         );
     };
+    let clear_session = invalid_existing_session(&request, &application).await;
 
     let return_to = match query.post_logout_redirect_uri.as_deref() {
         Some(uri) => {
@@ -848,6 +2902,7 @@ async fn logout_confirmation(
                 return protocol_error(
                     &branding,
                     "An ID token hint is required for a post-logout redirect",
+                    &request_id,
                 );
             };
             let keys = match database
@@ -874,22 +2929,30 @@ async fn logout_confirmation(
                 .ok()
             });
             let Some(claims) = claims else {
-                return protocol_error(&branding, "The ID token hint is invalid");
+                return protocol_error(&branding, "The ID token hint is invalid", &request_id);
             };
             let Some(client) = snapshot.client(&claims.aud) else {
-                return protocol_error(&branding, "The ID token audience is unknown");
+                return protocol_error(&branding, "The ID token audience is unknown", &request_id);
             };
             if !client
                 .post_logout_redirect_uris
                 .iter()
                 .any(|registered| registered == uri)
             {
-                return protocol_error(&branding, "The post-logout redirect URI is not registered");
+                return protocol_error(
+                    &branding,
+                    "The post-logout redirect URI is not registered",
+                    &request_id,
+                );
             }
             match redirect_with_state(uri, query.state.as_deref()) {
                 Some(uri) => Some(uri),
                 None => {
-                    return protocol_error(&branding, "The post-logout redirect URI is invalid");
+                    return protocol_error(
+                        &branding,
+                        "The post-logout redirect URI is invalid",
+                        &request_id,
+                    );
                 }
             }
         }
@@ -911,6 +2974,7 @@ async fn logout_confirmation(
         }
     };
     let csrf_token = random_token();
+    let messages = branding.messages(None);
     let mut response = html_response(
         StatusCode::OK,
         LogoutTemplate {
@@ -919,6 +2983,7 @@ async fn logout_confirmation(
             issuer_id: &issuer_id,
             transaction: &transaction,
             csrf_token: &csrf_token,
+            messages: &messages,
             logo: branding.logo.as_deref(),
             favicon: branding.favicon.as_deref(),
             font_family: branding.font_family.as_deref(),
@@ -926,6 +2991,9 @@ async fn logout_confirmation(
         .render(),
     );
     add_csrf_cookie(&mut response, &request, &csrf_token);
+    if clear_session {
+        remove_session_cookie(&mut response, &request);
+    }
     response
 }
 
@@ -936,10 +3004,15 @@ async fn logout(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
+    let request_id = correlation_id(&request);
     let form = form.into_inner();
     let branding = application.snapshot().branding(Some(&issuer_id), None);
     if !valid_csrf(&request, &form.csrf_token) {
-        return protocol_error(&branding, "The logout form has expired; please start again");
+        return protocol_error(
+            &branding,
+            "The logout form has expired; please start again",
+            &request_id,
+        );
     }
     let Some(database) = application.database() else {
         return oauth_error(
@@ -950,7 +3023,9 @@ async fn logout(
     };
     let return_to = match database.consume_logout_transaction(&form.transaction).await {
         Ok(Some(return_to)) => return_to,
-        Ok(None) => return protocol_error(&branding, "This logout request has expired"),
+        Ok(None) => {
+            return protocol_error(&branding, "This logout request has expired", &request_id);
+        }
         Err(error) => {
             tracing::error!(%error, "failed to consume logout transaction");
             return oauth_error(
@@ -961,7 +3036,9 @@ async fn logout(
         }
     };
 
-    if let Some(session) = session_token(&request)
+    let session = session_token(&request);
+    let session_present = session.is_some();
+    if let Some(session) = session
         && let Err(error) = database.revoke_session(&session).await
     {
         tracing::error!(%error, "failed to revoke session during logout");
@@ -972,15 +3049,15 @@ async fn logout(
         );
     }
 
+    let messages = branding.messages(None);
     let mut response = match return_to {
-        Some(uri) => HttpResponse::Found()
-            .insert_header((actix_web::http::header::LOCATION, uri))
-            .finish(),
+        Some(uri) => redirect_response(uri),
         None => html_response(
             StatusCode::OK,
             LogoutDoneTemplate {
                 product_name: &branding.product_name,
                 primary_color: &branding.primary_color,
+                messages: &messages,
                 logo: branding.logo.as_deref(),
                 favicon: branding.favicon.as_deref(),
                 font_family: branding.font_family.as_deref(),
@@ -989,6 +3066,13 @@ async fn logout(
         ),
     };
     remove_session_cookie(&mut response, &request);
+    tracing::info!(
+        event = "logout",
+        outcome = "success",
+        issuer_id,
+        session_present,
+        "browser session ended"
+    );
     response
 }
 
@@ -1002,6 +3086,11 @@ impl From<PendingAuthorization> for AuthorizationGrant {
             scopes: pending.scopes,
             nonce: pending.nonce,
             code_challenge: pending.code_challenge,
+            response_mode: pending.response_mode,
+            resource: pending.resource,
+            dpop_jkt: pending.dpop_jkt,
+            auth_time: pending.auth_time,
+            mfa_verified: pending.mfa_verified,
             claims: pending.claims,
             expires_at: pending.expires_at,
         }
@@ -1012,109 +3101,257 @@ async fn authorization_success(
     database: &Database,
     grant: &AuthorizationGrant,
     state: &str,
+    branding: &crate::configuration::Branding,
 ) -> Result<HttpResponse, sqlx::Error> {
     let code = database.issue_authorization_code(grant).await?;
-    let mut redirect = url::Url::parse(&grant.redirect_uri)
-        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
-    redirect
-        .query_pairs_mut()
-        .append_pair("code", &code)
-        .append_pair("state", state);
-    Ok(HttpResponse::Found()
-        .insert_header((actix_web::http::header::LOCATION, redirect.to_string()))
-        .finish())
+    authorization_client_response(
+        &grant.redirect_uri,
+        grant.response_mode.as_deref(),
+        &[
+            ("code", code.as_str()),
+            ("state", state),
+            ("iss", grant.issuer.as_str()),
+        ],
+        branding,
+        Some((database, &grant.issuer, &grant.client_id)),
+    )
+    .await
+    .map_err(sqlx::Error::Protocol)
 }
 
-fn authorization_denied(pending: &PendingAuthorization) -> HttpResponse {
-    let Ok(mut redirect) = url::Url::parse(&pending.redirect_uri) else {
-        return oauth_error(
+async fn authorization_denied(
+    database: &Database,
+    pending: &PendingAuthorization,
+    branding: &crate::configuration::Branding,
+) -> HttpResponse {
+    authorization_client_response(
+        &pending.redirect_uri,
+        pending.response_mode.as_deref(),
+        &[
+            ("error", "access_denied"),
+            ("error_description", "The resource owner denied the request"),
+            ("state", pending.state.as_str()),
+            ("iss", pending.issuer.as_str()),
+        ],
+        branding,
+        Some((database, &pending.issuer, &pending.client_id)),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "redirect URI is invalid",
-        );
-    };
-    redirect
-        .query_pairs_mut()
-        .append_pair("error", "access_denied")
-        .append_pair("error_description", "The resource owner denied the request")
-        .append_pair("state", &pending.state);
-    HttpResponse::Found()
-        .insert_header((actix_web::http::header::LOCATION, redirect.to_string()))
-        .finish()
+        )
+    })
 }
 
-fn authorization_request_error(
+async fn authorization_request_error(
+    database: Option<&Database>,
     snapshot: &crate::configuration::Snapshot,
     branding: &crate::configuration::Branding,
     issuer_id: &str,
     request: &AuthorizationRequest,
     error: crate::protocol::AuthorizationError,
+    request_id: &str,
 ) -> HttpResponse {
     let trusted_redirect = snapshot.issuer(issuer_id).is_some()
         && snapshot
             .client(&request.client_id)
             .is_some_and(|client| client.redirect_uris.contains(&request.redirect_uri));
     if !trusted_redirect {
-        return protocol_error(branding, error.description);
+        return protocol_error(branding, error.description, request_id);
     }
-    let Ok(mut redirect) = url::Url::parse(&request.redirect_uri) else {
-        return protocol_error(branding, error.description);
-    };
-    redirect
-        .query_pairs_mut()
-        .append_pair("error", error.code)
-        .append_pair("error_description", error.description);
+    let mut parameters = vec![
+        ("error", error.code),
+        ("error_description", error.description),
+    ];
     if !request.state.is_empty() {
-        redirect
-            .query_pairs_mut()
-            .append_pair("state", &request.state);
+        parameters.push(("state", &request.state));
     }
-    HttpResponse::Found()
-        .insert_header((actix_web::http::header::LOCATION, redirect.to_string()))
-        .finish()
+    if let Some(issuer) = snapshot.issuer(issuer_id) {
+        parameters.push(("iss", issuer.url.trim_end_matches('/')));
+    }
+    let issuer = snapshot
+        .issuer(issuer_id)
+        .map(|issuer| issuer.url.trim_end_matches('/'));
+    authorization_client_response(
+        &request.redirect_uri,
+        request.response_mode.as_deref(),
+        &parameters,
+        branding,
+        database
+            .zip(issuer)
+            .map(|(database, issuer)| (database, issuer, request.client_id.as_str())),
+    )
+    .await
+    .unwrap_or_else(|_| protocol_error(branding, error.description, request_id))
 }
 
-async fn exchange_token(
+async fn authorization_client_response(
+    redirect_uri: &str,
+    response_mode: Option<&str>,
+    parameters: &[(&str, &str)],
+    branding: &crate::configuration::Branding,
+    jarm: Option<(&Database, &str, &str)>,
+) -> Result<HttpResponse, String> {
+    let signed_response;
+    let signed_parameters;
+    let (response_mode, parameters) =
+        if matches!(response_mode, Some("jwt" | "query.jwt" | "form_post.jwt")) {
+            let (database, issuer, client_id) =
+                jarm.ok_or_else(|| "authorization response signing is unavailable".to_owned())?;
+            let parameter = |name: &str| {
+                parameters
+                    .iter()
+                    .find_map(|(candidate, value)| (*candidate == name).then_some(*value))
+            };
+            let key = database
+                .signing_key(issuer)
+                .await
+                .map_err(|error| error.to_string())?;
+            signed_response = tokens::issue_authorization_response(
+                &key,
+                &tokens::AuthorizationResponseInput {
+                    issuer,
+                    audience: client_id,
+                    code: parameter("code"),
+                    error: parameter("error"),
+                    error_description: parameter("error_description"),
+                    state: parameter("state"),
+                    now: Utc::now().timestamp(),
+                    lifetime: 60,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            signed_parameters = [("response", signed_response.as_str())];
+            (
+                if response_mode == Some("form_post.jwt") {
+                    Some("form_post")
+                } else {
+                    Some("query")
+                },
+                signed_parameters.as_slice(),
+            )
+        } else {
+            (response_mode, parameters)
+        };
+    let mut redirect = url::Url::parse(redirect_uri).map_err(|error| error.to_string())?;
+    if response_mode != Some("form_post") {
+        for (name, value) in parameters {
+            redirect.query_pairs_mut().append_pair(name, value);
+        }
+        return Ok(redirect_response(redirect.to_string()));
+    }
+
+    let form_action = redirect.origin().ascii_serialization();
+    if form_action == "null" {
+        return Err("redirect URI has no web origin".to_owned());
+    }
+    let mut response = html_response(
+        StatusCode::OK,
+        FormPostTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            redirect_uri,
+            parameters,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+        }
+        .render(),
+    );
+    prevent_caching(&mut response);
+    let content_security_policy = format!(
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; form-action {form_action}; base-uri 'none'; frame-ancestors 'none'"
+    );
+    let value = actix_web::http::header::HeaderValue::from_str(&content_security_policy)
+        .map_err(|error| error.to_string())?;
+    response
+        .headers_mut()
+        .insert(actix_web::http::header::CONTENT_SECURITY_POLICY, value);
+    Ok(response)
+}
+
+async fn device_authorization(
     path: web::Path<String>,
     request: HttpRequest,
-    form: web::Form<TokenForm>,
+    form: web::Form<DeviceAuthorizationForm>,
     application: web::Data<Application>,
-) -> impl Responder {
+) -> HttpResponse {
     let issuer_id = path.into_inner();
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.issuer(&issuer_id) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
     };
     let form = form.into_inner();
-    if form.grant_type != "authorization_code" {
+    let client = match authenticated_endpoint_client(
+        &snapshot,
+        &request,
+        application.database(),
+        issuer,
+        EndpointClientAuthentication {
+            form_id: form.client_id.as_deref(),
+            form_secret: form.client_secret.as_deref(),
+            client_assertion_type: form.client_assertion_type.as_deref(),
+            client_assertion: form.client_assertion.as_deref(),
+            realm: "device_authorization",
+            endpoint_path: "/device_authorization",
+        },
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    if !client
+        .grant_types
+        .iter()
+        .any(|grant| grant == DEVICE_CODE_GRANT)
+    {
         return oauth_error(
             StatusCode::BAD_REQUEST,
-            "unsupported_grant_type",
-            "only authorization_code is supported",
+            "unauthorized_client",
+            "the client does not allow device authorization",
         );
     }
-    let (basic_id, basic_secret) = basic_credentials(&request);
-    if basic_id.is_some()
-        && form.client_id.is_some()
-        && basic_id.as_deref() != form.client_id.as_deref()
-    {
-        return invalid_client_response();
-    }
-    let client_id = basic_id
-        .clone()
-        .or(form.client_id.clone())
-        .unwrap_or_default();
-    let Some(client) = snapshot.client(&client_id) else {
-        return invalid_client_response();
+    let scopes = match form.scope.as_deref() {
+        Some(scope) if scope.len() <= 2_048 => normalized_scopes(scope),
+        Some(_) => vec![],
+        None => client
+            .scopes
+            .iter()
+            .filter(|scope| scope.as_str() != "offline_access" && issuer.scopes.contains(scope))
+            .cloned()
+            .collect(),
     };
-    if !authenticate_client(
-        client,
-        basic_id.as_deref(),
-        basic_secret.as_deref(),
-        form.client_id.as_deref(),
-        form.client_secret.as_deref(),
-    ) {
-        return invalid_client_response();
+    if scopes.is_empty()
+        || !scopes.iter().any(|scope| scope == "openid")
+        || scopes
+            .iter()
+            .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
+        || (scopes.iter().any(|scope| scope == "offline_access")
+            && !client
+                .grant_types
+                .iter()
+                .any(|grant| grant == "refresh_token"))
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_scope",
+            "one or more requested device scopes are not allowed",
+        );
+    }
+    if form
+        .resource
+        .as_ref()
+        .is_some_and(|resource| resource.len() > 4_096 || !client.resources.contains(resource))
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "the requested resource is not registered for this client",
+        );
     }
     let Some(database) = application.database() else {
         return oauth_error(
@@ -1123,7 +3360,1630 @@ async fn exchange_token(
             "database unavailable",
         );
     };
-    let grant = match database.consume_authorization_code(&form.code).await {
+    match database
+        .issue_device_authorization(
+            issuer.url.trim_end_matches('/'),
+            &client.id,
+            &scopes,
+            form.resource.as_deref(),
+            issuer.token_policy.device_code_lifetime,
+            issuer.token_policy.device_poll_interval,
+        )
+        .await
+    {
+        Ok((device_code, user_code)) => {
+            application
+                .metrics()
+                .device_authorization(DeviceAuthorizationOutcome::Created);
+            let verification_uri = format!("{}/device", issuer.url.trim_end_matches('/'));
+            let mut complete = url::Url::parse(&verification_uri)
+                .expect("validated issuer creates a valid device verification URI");
+            complete
+                .query_pairs_mut()
+                .append_pair("user_code", &user_code);
+            tracing::info!(
+                event = "device_authorization",
+                outcome = "created",
+                issuer_id,
+                client_id = %client.id,
+                "device authorization created"
+            );
+            no_store_json_response(
+                StatusCode::OK,
+                json!({
+                    "device_code": device_code,
+                    "user_code": user_code,
+                    "verification_uri": verification_uri,
+                    "verification_uri_complete": complete.to_string(),
+                    "expires_in": issuer.token_policy.device_code_lifetime,
+                    "interval": issuer.token_policy.device_poll_interval
+                }),
+            )
+        }
+        Err(error) => {
+            application
+                .metrics()
+                .device_authorization(DeviceAuthorizationOutcome::Rejected);
+            tracing::error!(%error, "failed to create device authorization");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device authorization storage failed",
+            )
+        }
+    }
+}
+
+async fn device_verification(
+    path: web::Path<String>,
+    request: HttpRequest,
+    query: web::Query<DeviceVerificationQuery>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    if snapshot.issuer(&issuer_id).is_none() {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+    }
+    let user_code = query
+        .user_code
+        .as_deref()
+        .and_then(normalize_device_user_code)
+        .map(|(_, formatted)| formatted)
+        .unwrap_or_default();
+    render_device_code_page(
+        &request,
+        &snapshot,
+        &issuer_id,
+        &user_code,
+        None,
+        StatusCode::OK,
+    )
+}
+
+async fn device_interaction(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<DeviceInteractionForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+    };
+    let form = form.into_inner();
+    if !valid_csrf(&request, &form.csrf_token) {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device form has expired; please start again",
+            &correlation_id(&request),
+        );
+    }
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    match form.action.as_str() {
+        "verify" => {
+            let submitted = form.user_code.as_deref().unwrap_or_default();
+            let Some((user_code, formatted_code)) = normalize_device_user_code(submitted) else {
+                return render_device_code_page(
+                    &request,
+                    &snapshot,
+                    &issuer_id,
+                    "",
+                    Some("invalid"),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                );
+            };
+            let remote = authentication_remote_address(&request, forwarded_headers_trusted());
+            let rate_limit = &snapshot.configuration.authentication.rate_limit;
+            match database
+                .allow_authentication_attempt(
+                    &format!("device-code:{issuer_id}:{remote}"),
+                    rate_limit.attempts,
+                    rate_limit.window_seconds,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    application.metrics().request_rate_limit_rejection();
+                    return render_device_code_page(
+                        &request,
+                        &snapshot,
+                        &issuer_id,
+                        &formatted_code,
+                        Some("rate_limited"),
+                        StatusCode::TOO_MANY_REQUESTS,
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to rate-limit a device code attempt");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "device verification storage failed",
+                    );
+                }
+            }
+            let (transaction, authorization) = match database
+                .begin_device_verification(&user_code, issuer.url.trim_end_matches('/'))
+                .await
+            {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    return render_device_code_page(
+                        &request,
+                        &snapshot,
+                        &issuer_id,
+                        &formatted_code,
+                        Some("invalid"),
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to begin device verification");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "device verification storage failed",
+                    );
+                }
+            };
+            let Some(client) = active_device_authorization(&snapshot, issuer, &authorization)
+            else {
+                return render_device_code_page(
+                    &request,
+                    &snapshot,
+                    &issuer_id,
+                    &formatted_code,
+                    Some("invalid"),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                );
+            };
+            let session = existing_session(&request, &application).await;
+            let authenticated = session
+                .subject
+                .as_deref()
+                .and_then(|subject| snapshot.user(subject))
+                .is_some_and(|user| {
+                    (user.totp_secret_reference.is_none() || session.mfa_verified)
+                        && authentication_context_satisfies(client, session.mfa_verified)
+                });
+            let mut response = render_device_confirmation(
+                &request,
+                &snapshot,
+                &issuer_id,
+                client,
+                &authorization,
+                &formatted_code,
+                &transaction,
+                authenticated,
+                "",
+                None,
+                StatusCode::OK,
+            );
+            if session.clear_cookie {
+                remove_session_cookie(&mut response, &request);
+            }
+            response
+        }
+        "decision" => {
+            decide_device_interaction(
+                &request,
+                &application,
+                &snapshot,
+                issuer,
+                &issuer_id,
+                form,
+                database,
+            )
+            .await
+        }
+        "totp" => {
+            complete_device_totp(
+                &request,
+                &application,
+                &snapshot,
+                issuer,
+                &issuer_id,
+                form,
+                database,
+            )
+            .await
+        }
+        _ => protocol_error(
+            &snapshot.configuration.branding,
+            "The device action is invalid",
+            &correlation_id(&request),
+        ),
+    }
+}
+
+fn render_device_code_page(
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    user_code: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
+    let branding = snapshot.branding(Some(issuer_id), None);
+    let messages = branding.messages(None);
+    let error_message = match error {
+        Some("invalid") => Some(messages.device_invalid_code.as_str()),
+        Some("rate_limited") => Some(messages.sign_in_rate_limited.as_str()),
+        _ => None,
+    };
+    let csrf_token = random_token();
+    let mut response = html_response(
+        status,
+        DeviceCodeTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id,
+            user_code,
+            csrf_token: &csrf_token,
+            has_error: error_message.is_some(),
+            error: error_message,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+            support_url: branding.support_url.as_deref(),
+            privacy_url: branding.privacy_url.as_deref(),
+            terms_url: branding.terms_url.as_deref(),
+        }
+        .render(),
+    );
+    add_csrf_cookie(&mut response, request, &csrf_token);
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_device_confirmation(
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    client: &crate::configuration::Client,
+    authorization: &DeviceAuthorization,
+    user_code: &str,
+    transaction: &str,
+    authenticated: bool,
+    identifier: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(None);
+    let scopes = consent_scopes(&authorization.scopes, &messages);
+    let csrf_token = random_token();
+    let mut response = html_response(
+        status,
+        DeviceConfirmTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id,
+            client_name: if client.name.is_empty() {
+                &client.id
+            } else {
+                &client.name
+            },
+            user_code,
+            scopes: &scopes,
+            transaction,
+            csrf_token: &csrf_token,
+            authenticated,
+            identifier,
+            has_error: error.is_some(),
+            error,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+        }
+        .render(),
+    );
+    add_csrf_cookie(&mut response, request, &csrf_token);
+    response
+}
+
+fn client_requires_mfa(client: &crate::configuration::Client) -> bool {
+    client.required_acr.as_deref() == Some(crate::configuration::MFA_ACR)
+}
+
+fn authentication_context_satisfies(
+    client: &crate::configuration::Client,
+    mfa_verified: bool,
+) -> bool {
+    !client_requires_mfa(client) || mfa_verified
+}
+
+fn authorization_authentication_context_satisfies(
+    client: &crate::configuration::Client,
+    authorization: &AuthorizationRequest,
+    mfa_verified: bool,
+) -> bool {
+    authentication_context_satisfies(client, mfa_verified)
+        && authorization.authentication_context_satisfies(mfa_verified)
+}
+
+fn authorization_requires_mfa(
+    client: &crate::configuration::Client,
+    authorization: &AuthorizationRequest,
+) -> bool {
+    !authorization_authentication_context_satisfies(client, authorization, false)
+        && authorization_authentication_context_satisfies(client, authorization, true)
+}
+
+fn essential_claims_satisfied(
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    authorization: &AuthorizationRequest,
+    user: &crate::configuration::User,
+    auth_time: i64,
+    mfa_verified: bool,
+) -> bool {
+    let scopes = normalized_scopes(&authorization.scope);
+    let mapped = tokens::mapped_claims(snapshot, user, &scopes);
+    let issuer = snapshot
+        .issuer(issuer_id)
+        .expect("validated authorization issuer");
+    authorization.essential_claims().into_iter().all(|claim| {
+        let actual = match claim.destination {
+            crate::protocol::ClaimDestination::IdToken => match claim.name.as_str() {
+                "sub" => Some(json!(user.id)),
+                "iss" => Some(json!(issuer.url.trim_end_matches('/'))),
+                "aud" => Some(json!(authorization.client_id)),
+                "nonce" => (!authorization.nonce.is_empty()).then(|| json!(authorization.nonce)),
+                "auth_time" => Some(json!(auth_time)),
+                "acr" => Some(json!(if mfa_verified {
+                    crate::configuration::MFA_ACR
+                } else {
+                    crate::configuration::PASSWORD_ACR
+                })),
+                "amr" => Some(if mfa_verified {
+                    json!(["pwd", "otp"])
+                } else {
+                    json!(["pwd"])
+                }),
+                "iat" | "exp" | "at_hash" => Some(Value::Null),
+                name => mapped.get(name).cloned(),
+            },
+            crate::protocol::ClaimDestination::UserInfo => match claim.name.as_str() {
+                "sub" => Some(json!(user.id)),
+                name => mapped.get(name).cloned(),
+            },
+        };
+        actual.is_some_and(|actual| {
+            claim.accepted_values.is_empty()
+                || (actual != Value::Null && claim.accepted_values.contains(&actual))
+        })
+    })
+}
+
+fn active_device_authorization<'a>(
+    snapshot: &'a crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    authorization: &DeviceAuthorization,
+) -> Option<&'a crate::configuration::Client> {
+    let client = snapshot.client(&authorization.client_id)?;
+    (authorization.issuer == issuer.url.trim_end_matches('/')
+        && authorization.expires_at > Utc::now()
+        && client
+            .grant_types
+            .iter()
+            .any(|grant| grant == DEVICE_CODE_GRANT)
+        && authorization.scopes.iter().any(|scope| scope == "openid")
+        && authorization
+            .scopes
+            .iter()
+            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope))
+        && authorization
+            .resource
+            .as_ref()
+            .is_none_or(|resource| client.resources.contains(resource)))
+    .then_some(client)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_device_totp_challenge(
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    client: &crate::configuration::Client,
+    transaction: &str,
+    csrf_token: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(None);
+    let form_action = format!("/{issuer_id}/device");
+    let mut response = html_response(
+        status,
+        TotpTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            client_name: if client.name.is_empty() {
+                &client.id
+            } else {
+                &client.name
+            },
+            transaction,
+            form_action: &form_action,
+            transaction_field: "mfa_transaction",
+            action_value: Some("totp"),
+            csrf_token,
+            has_error: error.is_some(),
+            error,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+            support_url: branding.support_url.as_deref(),
+            privacy_url: branding.privacy_url.as_deref(),
+            terms_url: branding.terms_url.as_deref(),
+        }
+        .render(),
+    );
+    add_csrf_cookie(&mut response, request, csrf_token);
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_device_totp(
+    request: &HttpRequest,
+    application: &Application,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    issuer_id: &str,
+    form: DeviceInteractionForm,
+    database: &Database,
+) -> HttpResponse {
+    let (Some(transaction), Some(submitted_code)) =
+        (form.mfa_transaction.as_deref(), form.totp_code.as_deref())
+    else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device verification is incomplete",
+            &correlation_id(request),
+        );
+    };
+    if form.transaction.is_some()
+        || form.user_code.is_some()
+        || form.decision.is_some()
+        || form.identifier.is_some()
+        || form.password.is_some()
+    {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device verification is invalid",
+            &correlation_id(request),
+        );
+    }
+    let issuer_url = issuer.url.trim_end_matches('/');
+    let challenge = match database
+        .totp_challenge(transaction, issuer_url, "device")
+        .await
+    {
+        Ok(Some(challenge)) => challenge,
+        Ok(None) => {
+            let message = snapshot
+                .branding(Some(issuer_id), None)
+                .messages(None)
+                .totp_expired;
+            return protocol_error(
+                &snapshot.configuration.branding,
+                &message,
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load device TOTP challenge");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    };
+    let payload = match serde_json::from_value::<DeviceTotpPayload>(challenge.payload) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(%error, "stored device TOTP challenge is invalid");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    };
+    let authorization = match database
+        .device_verification_by_transaction(&payload.device_transaction)
+        .await
+    {
+        Ok(Some(authorization)) => authorization,
+        Ok(None) => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device confirmation has expired",
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load device verification during TOTP");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device verification storage failed",
+            );
+        }
+    };
+    let Some(client) = active_device_authorization(snapshot, issuer, &authorization) else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device confirmation is no longer valid",
+            &correlation_id(request),
+        );
+    };
+    let Some(user) = snapshot.user(&challenge.subject) else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "This verification is no longer valid",
+            &correlation_id(request),
+        );
+    };
+    let Some(reference) = user.totp_secret_reference.as_ref() else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "This verification is no longer valid",
+            &correlation_id(request),
+        );
+    };
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(None);
+    let remote = authentication_remote_address(request, forwarded_headers_trusted());
+    let keys = authentication_rate_limit_keys(&remote, Some(&user.identifier));
+    let rate_limit = &snapshot.configuration.authentication.rate_limit;
+    match database
+        .allow_authentication_attempts(&keys, rate_limit.attempts, rate_limit.window_seconds)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            application.metrics().rate_limit_rejection();
+            return render_device_totp_challenge(
+                request,
+                snapshot,
+                issuer_id,
+                client,
+                transaction,
+                &form.csrf_token,
+                Some(&messages.sign_in_rate_limited),
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to rate-limit device TOTP authentication");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authentication storage failed",
+            );
+        }
+    }
+    let secret = match crate::totp::secret_from_reference(reference) {
+        Ok(secret) => secret,
+        Err(error) => {
+            tracing::error!(?error, "configured TOTP secret is unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication is unavailable",
+            );
+        }
+    };
+    let Some(counter) = crate::totp::verify(&secret, submitted_code, Utc::now().timestamp()) else {
+        application.metrics().authentication(false);
+        application.metrics().mfa(MfaOutcome::Failure);
+        return render_device_totp_challenge(
+            request,
+            snapshot,
+            issuer_id,
+            client,
+            transaction,
+            &form.csrf_token,
+            Some(&messages.totp_invalid_code),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    };
+    match database
+        .consume_totp_challenge(transaction, issuer_url, &user.id, "device", counter)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Rejected);
+            let message = snapshot
+                .branding(Some(issuer_id), Some(&client.id))
+                .messages(None)
+                .totp_expired;
+            return protocol_error(
+                &snapshot.configuration.branding,
+                &message,
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to consume device TOTP challenge");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "multi-factor authentication storage failed",
+            );
+        }
+    }
+    application.metrics().mfa(MfaOutcome::Success);
+    let approved = match payload.decision.as_str() {
+        "approve" => true,
+        "deny" => false,
+        _ => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device decision is invalid",
+                &correlation_id(request),
+            );
+        }
+    };
+    let claims = if approved {
+        Value::Object(tokens::mapped_claims(snapshot, user, &authorization.scopes))
+    } else {
+        json!({})
+    };
+    let session_policy = &snapshot.configuration.authentication.session;
+    let session = match database
+        .start_session(
+            &user.id,
+            session_policy.max_concurrent.max(1),
+            session_policy.absolute_timeout.max(1),
+            true,
+        )
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!(%error, "failed to start MFA device verification session");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "session storage failed",
+            );
+        }
+    };
+    match database
+        .decide_device_authorization(
+            &payload.device_transaction,
+            &user.id,
+            &claims,
+            Utc::now().timestamp(),
+            approved,
+            true,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device confirmation has expired",
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to persist device decision after TOTP");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device verification storage failed",
+            );
+        }
+    }
+    application.metrics().authentication(true);
+    application.metrics().device_authorization(if approved {
+        DeviceAuthorizationOutcome::Approved
+    } else {
+        DeviceAuthorizationOutcome::Denied
+    });
+    tracing::info!(
+        event = "device_authorization",
+        outcome = if approved { "approved" } else { "denied" },
+        issuer_id,
+        client_id = %client.id,
+        mfa_verified = true,
+        "device authorization decision completed"
+    );
+    let mut response = html_response(
+        StatusCode::OK,
+        DeviceDoneTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            approved,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+        }
+        .render(),
+    );
+    add_session_cookie(
+        &mut response,
+        request,
+        &session,
+        session_policy.absolute_timeout,
+    );
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn decide_device_interaction(
+    request: &HttpRequest,
+    application: &Application,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    issuer_id: &str,
+    form: DeviceInteractionForm,
+    database: &Database,
+) -> HttpResponse {
+    let Some(transaction) = form
+        .transaction
+        .as_deref()
+        .filter(|value| valid_opaque_token(value))
+    else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device confirmation has expired",
+            &correlation_id(request),
+        );
+    };
+    let Some((user_code, formatted_code)) = form
+        .user_code
+        .as_deref()
+        .and_then(normalize_device_user_code)
+    else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device confirmation is invalid",
+            &correlation_id(request),
+        );
+    };
+    let authorization = match database.device_verification(transaction, &user_code).await {
+        Ok(Some(authorization)) => authorization,
+        Ok(None) => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device confirmation has expired",
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load device verification");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device verification storage failed",
+            );
+        }
+    };
+    let Some(client) = active_device_authorization(snapshot, issuer, &authorization) else {
+        return protocol_error(
+            &snapshot.configuration.branding,
+            "The device confirmation is no longer valid",
+            &correlation_id(request),
+        );
+    };
+    let approved = match form.decision.as_deref() {
+        Some("approve") => true,
+        Some("deny") => false,
+        _ => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device decision is invalid",
+                &correlation_id(request),
+            );
+        }
+    };
+    let session = existing_session(request, application).await;
+    if session.unavailable {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "session storage failed",
+        );
+    }
+    let session_user = session
+        .subject
+        .as_deref()
+        .and_then(|subject| snapshot.user(subject))
+        .filter(|user| user.totp_secret_reference.is_none() || session.mfa_verified)
+        .filter(|_| authentication_context_satisfies(client, session.mfa_verified))
+        .cloned();
+    let mut new_session = None;
+    let mfa_verified = session.mfa_verified;
+    let user = if let Some(user) = session_user {
+        user
+    } else {
+        let submitted_identifier = form.identifier.as_deref().unwrap_or_default().trim();
+        let identifier_valid = valid_submitted_identifier(submitted_identifier);
+        let identifier = if identifier_valid {
+            submitted_identifier
+        } else {
+            ""
+        };
+        let remote = authentication_remote_address(request, forwarded_headers_trusted());
+        let keys = authentication_rate_limit_keys(
+            &remote,
+            identifier_valid.then_some(submitted_identifier),
+        );
+        let rate_limit = &snapshot.configuration.authentication.rate_limit;
+        match database
+            .allow_authentication_attempts(&keys, rate_limit.attempts, rate_limit.window_seconds)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                application.metrics().rate_limit_rejection();
+                return render_device_confirmation(
+                    request,
+                    snapshot,
+                    issuer_id,
+                    client,
+                    &authorization,
+                    &formatted_code,
+                    transaction,
+                    false,
+                    identifier,
+                    Some(
+                        &snapshot
+                            .branding(Some(issuer_id), Some(&client.id))
+                            .messages(None)
+                            .sign_in_rate_limited,
+                    ),
+                    StatusCode::TOO_MANY_REQUESTS,
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to rate-limit device authentication");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "authentication storage failed",
+                );
+            }
+        }
+        let user = identifier_valid
+            .then(|| snapshot.user_by_identifier(identifier).cloned())
+            .flatten();
+        let hash = user
+            .as_ref()
+            .map(|user| user.password_hash.clone())
+            .unwrap_or_else(|| snapshot.dummy_password_hash().to_owned());
+        let password = form.password.as_deref().unwrap_or_default();
+        let password = if valid_submitted_password(password) {
+            password.to_owned()
+        } else {
+            "invalid-credential-shape".to_owned()
+        };
+        let verified = web::block(move || bcrypt::verify(password, &hash).unwrap_or(false))
+            .await
+            .unwrap_or(false);
+        let Some(user) = user.filter(|_| verified) else {
+            application.metrics().authentication(false);
+            let message = snapshot
+                .branding(Some(issuer_id), Some(&client.id))
+                .messages(None)
+                .sign_in_invalid_credentials;
+            return render_device_confirmation(
+                request,
+                snapshot,
+                issuer_id,
+                client,
+                &authorization,
+                &formatted_code,
+                transaction,
+                false,
+                identifier,
+                Some(&message),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            );
+        };
+        if client_requires_mfa(client) && user.totp_secret_reference.is_none() {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Rejected);
+            let message = snapshot
+                .branding(Some(issuer_id), Some(&client.id))
+                .messages(None)
+                .sign_in_mfa_required;
+            return render_device_confirmation(
+                request,
+                snapshot,
+                issuer_id,
+                client,
+                &authorization,
+                &formatted_code,
+                transaction,
+                false,
+                identifier,
+                Some(&message),
+                StatusCode::FORBIDDEN,
+            );
+        }
+        if let Some(reference) = &user.totp_secret_reference {
+            if let Err(error) = crate::totp::secret_from_reference(reference) {
+                tracing::error!(?error, "configured TOTP secret is unavailable");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "multi-factor authentication is unavailable",
+                );
+            }
+            let payload = serde_json::to_value(DeviceTotpPayload {
+                device_transaction: transaction.to_owned(),
+                decision: if approved { "approve" } else { "deny" }.to_owned(),
+            })
+            .expect("device TOTP challenge serializes");
+            let mfa_transaction = match database
+                .issue_totp_challenge(
+                    issuer.url.trim_end_matches('/'),
+                    &user.id,
+                    "device",
+                    &payload,
+                    issuer.token_policy.device_code_lifetime,
+                )
+                .await
+            {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    tracing::error!(%error, "failed to persist device TOTP challenge");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "multi-factor authentication storage failed",
+                    );
+                }
+            };
+            application.metrics().mfa(MfaOutcome::Challenged);
+            return render_device_totp_challenge(
+                request,
+                snapshot,
+                issuer_id,
+                client,
+                &mfa_transaction,
+                &form.csrf_token,
+                None,
+                StatusCode::OK,
+            );
+        }
+        let session_policy = &snapshot.configuration.authentication.session;
+        match database
+            .start_session(
+                &user.id,
+                session_policy.max_concurrent.max(1),
+                session_policy.absolute_timeout.max(1),
+                false,
+            )
+            .await
+        {
+            Ok(session) => new_session = Some(session),
+            Err(error) => {
+                tracing::error!(%error, "failed to start device verification session");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "session storage failed",
+                );
+            }
+        }
+        application.metrics().authentication(true);
+        user
+    };
+    let claims = if approved {
+        Value::Object(tokens::mapped_claims(
+            snapshot,
+            &user,
+            &authorization.scopes,
+        ))
+    } else {
+        json!({})
+    };
+    match database
+        .decide_device_authorization(
+            transaction,
+            &user.id,
+            &claims,
+            Utc::now().timestamp(),
+            approved,
+            mfa_verified,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return protocol_error(
+                &snapshot.configuration.branding,
+                "The device confirmation has expired",
+                &correlation_id(request),
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to persist device decision");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device verification storage failed",
+            );
+        }
+    }
+    if approved {
+        tracing::info!(
+            event = "device_authorization",
+            outcome = "approved",
+            issuer_id,
+            client_id = %client.id,
+            subject_id = %user.id,
+            "device authorization approved"
+        );
+    } else {
+        tracing::info!(
+            event = "device_authorization",
+            outcome = "denied",
+            issuer_id,
+            client_id = %client.id,
+            "device authorization denied"
+        );
+    }
+    application.metrics().device_authorization(if approved {
+        DeviceAuthorizationOutcome::Approved
+    } else {
+        DeviceAuthorizationOutcome::Denied
+    });
+    let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
+    let messages = branding.messages(None);
+    let mut response = html_response(
+        StatusCode::OK,
+        DeviceDoneTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            approved,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+        }
+        .render(),
+    );
+    if let Some(session) = new_session {
+        add_session_cookie(
+            &mut response,
+            request,
+            &session,
+            snapshot
+                .configuration
+                .authentication
+                .session
+                .absolute_timeout,
+        );
+    } else if session.clear_cookie {
+        remove_session_cookie(&mut response, request);
+    }
+    response
+}
+
+fn normalize_device_user_code(value: &str) -> Option<(String, String)> {
+    const ALPHABET: &str = "BCDFGHJKLMNPQRSTVWXY";
+    let mut normalized = String::with_capacity(8);
+    for character in value.trim().chars() {
+        if character == '-' || character.is_ascii_whitespace() {
+            continue;
+        }
+        let character = character.to_ascii_uppercase();
+        if !ALPHABET.contains(character) || normalized.len() == 8 {
+            return None;
+        }
+        normalized.push(character);
+    }
+    (normalized.len() == 8).then(|| {
+        let formatted = format!("{}-{}", &normalized[..4], &normalized[4..]);
+        (normalized, formatted)
+    })
+}
+
+async fn exchange_token(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<TokenForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.as_str().to_owned();
+    let metrics_application = application.clone();
+    let cors_snapshot = application.snapshot();
+    let cors_request = request.clone();
+    let cors_client_id = form.client_id.clone();
+    let mut response = exchange_token_inner(path, request, form, application).await;
+    add_token_cors(
+        &mut response,
+        &cors_request,
+        &cors_snapshot,
+        cors_client_id.as_deref(),
+    );
+    let success = response.status().is_success();
+    metrics_application.metrics().token_exchange(success);
+    if !success {
+        tracing::warn!(
+            event = "token_exchange",
+            outcome = "failure",
+            issuer_id,
+            status = response.status().as_u16(),
+            "token exchange rejected"
+        );
+    }
+    response
+}
+
+async fn token_options(
+    path: web::Path<String>,
+    request: HttpRequest,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let snapshot = application.snapshot();
+    if snapshot.issuer(path.as_str()).is_none() {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+    }
+    let requested_method = request
+        .headers()
+        .get("access-control-request-method")
+        .and_then(|value| value.to_str().ok());
+    let requested_headers_supported = request
+        .headers()
+        .get("access-control-request-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|headers| {
+            headers.split(',').all(|header| {
+                matches!(
+                    header.trim().to_ascii_lowercase().as_str(),
+                    "content-type" | "dpop"
+                )
+            })
+        });
+    let origin = request
+        .headers()
+        .get(actix_web::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if !requested_method.is_some_and(|method| method.eq_ignore_ascii_case("POST"))
+        || !requested_headers_supported
+        || !origin.is_some_and(|origin| token_origin_allowed(&snapshot, origin, None))
+    {
+        return HttpResponse::Forbidden().finish();
+    }
+
+    let mut response = HttpResponse::NoContent().finish();
+    add_token_cors(&mut response, &request, &snapshot, None);
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-allow-methods"),
+        actix_web::http::header::HeaderValue::from_static("POST"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-allow-headers"),
+        actix_web::http::header::HeaderValue::from_static("Content-Type, DPoP"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-max-age"),
+        actix_web::http::header::HeaderValue::from_static("600"),
+    );
+    response
+}
+
+async fn exchange_token_inner(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<TokenForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
+    };
+    let form = form.into_inner();
+    if !matches!(
+        form.grant_type.as_str(),
+        "authorization_code"
+            | "refresh_token"
+            | "client_credentials"
+            | TOKEN_EXCHANGE_GRANT
+            | DEVICE_CODE_GRANT
+    ) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            "the requested grant type is not supported",
+        );
+    }
+    if (form.grant_type == "authorization_code"
+        && (form.code.as_deref().is_none_or(str::is_empty)
+            || form.redirect_uri.as_deref().is_none_or(str::is_empty)))
+        || (form.grant_type == "refresh_token"
+            && form.refresh_token.as_deref().is_none_or(str::is_empty))
+        || (form.grant_type == DEVICE_CODE_GRANT
+            && form.device_code.as_deref().is_none_or(str::is_empty))
+        || (form.grant_type == TOKEN_EXCHANGE_GRANT
+            && (form.subject_token.as_deref().is_none_or(str::is_empty)
+                || form.subject_token_type.as_deref().is_none_or(str::is_empty)))
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "the token request is incomplete",
+        );
+    }
+    let client = match authenticated_endpoint_client(
+        &snapshot,
+        &request,
+        application.database(),
+        issuer,
+        EndpointClientAuthentication {
+            form_id: form.client_id.as_deref(),
+            form_secret: form.client_secret.as_deref(),
+            client_assertion_type: form.client_assertion_type.as_deref(),
+            client_assertion: form.client_assertion.as_deref(),
+            realm: "token",
+            endpoint_path: "/token",
+        },
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    let dpop = match verified_dpop_endpoint_proof(
+        &request,
+        database,
+        issuer,
+        "/token",
+        "authorization_server",
+        None,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopProofError::Invalid) => {
+            return invalid_dpop_proof_response("the DPoP proof is invalid or has been replayed");
+        }
+        Err(DpopProofError::NonceRequired(nonce)) => {
+            return dpop_nonce_response(false, &nonce);
+        }
+        Err(DpopProofError::Unavailable) => {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "DPoP replay storage unavailable",
+            );
+        }
+    };
+
+    match form.grant_type.as_str() {
+        "authorization_code" => {
+            exchange_authorization_code_grant(
+                &issuer_id,
+                issuer,
+                client,
+                &form,
+                database,
+                dpop.as_ref(),
+            )
+            .await
+        }
+        "refresh_token" => {
+            exchange_refresh_token_grant(
+                &issuer_id,
+                &snapshot,
+                issuer,
+                client,
+                &form,
+                database,
+                dpop.as_ref(),
+            )
+            .await
+        }
+        "client_credentials" => {
+            exchange_client_credentials_grant(
+                &issuer_id,
+                &snapshot,
+                issuer,
+                client,
+                &form,
+                database,
+                dpop.as_ref(),
+            )
+            .await
+        }
+        DEVICE_CODE_GRANT => {
+            exchange_device_code_grant(
+                &issuer_id,
+                &snapshot,
+                issuer,
+                client,
+                &form,
+                database,
+                dpop.as_ref(),
+                application.metrics(),
+            )
+            .await
+        }
+        TOKEN_EXCHANGE_GRANT => {
+            exchange_access_token_grant(
+                &issuer_id,
+                &snapshot,
+                issuer,
+                client,
+                &form,
+                database,
+                dpop.as_ref(),
+            )
+            .await
+        }
+        _ => unreachable!("grant type checked above"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exchange_device_code_grant(
+    issuer_id: &str,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    form: &TokenForm,
+    database: &Database,
+    dpop: Option<&tokens::VerifiedDpopProof>,
+    metrics: &crate::metrics::Metrics,
+) -> HttpResponse {
+    if !client
+        .grant_types
+        .iter()
+        .any(|grant| grant == DEVICE_CODE_GRANT)
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "the client does not allow the device authorization grant",
+        );
+    }
+    let Some(device_code) = form.device_code.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "device_code is required",
+        );
+    };
+    if !valid_opaque_token(device_code) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "device code is invalid",
+        );
+    }
+    let grant = match database
+        .poll_device_authorization(device_code, issuer.url.trim_end_matches('/'), &client.id)
+        .await
+    {
+        Ok(DevicePoll::Approved(grant)) => grant,
+        Ok(DevicePoll::Pending) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Pending);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "authorization_pending",
+                "the user has not completed device authorization",
+            );
+        }
+        Ok(DevicePoll::SlowDown) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::SlowDown);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "slow_down",
+                "the client is polling faster than the permitted interval",
+            );
+        }
+        Ok(DevicePoll::Denied) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Denied);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "access_denied",
+                "the user denied the device authorization request",
+            );
+        }
+        Ok(DevicePoll::Expired) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "expired_token",
+                "the device code has expired",
+            );
+        }
+        Ok(DevicePoll::Invalid) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "device code is invalid",
+            );
+        }
+        Err(error) => {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+            tracing::error!(%error, "failed to poll device authorization");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device authorization storage failed",
+            );
+        }
+    };
+
+    let currently_valid = grant.issuer == issuer.url.trim_end_matches('/')
+        && grant.client_id == client.id
+        && grant.expires_at > Utc::now()
+        && snapshot.user(&grant.subject).is_some()
+        && grant.scopes.iter().any(|scope| scope == "openid")
+        && grant
+            .scopes
+            .iter()
+            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope))
+        && grant
+            .resource
+            .as_ref()
+            .is_none_or(|resource| client.resources.contains(resource));
+    if !currently_valid {
+        metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "device authorization grant is no longer active",
+        );
+    }
+
+    let dpop_jkt = dpop.map(|proof| proof.jkt.clone());
+    let claims = refresh_claims(snapshot, &grant.scopes, grant.claims);
+    let refresh_token = if grant.scopes.iter().any(|scope| scope == "offline_access") {
+        if !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == "refresh_token")
+        {
+            metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "offline access is no longer allowed for this client",
+            );
+        }
+        let refresh_grant = RefreshGrant {
+            issuer: grant.issuer.clone(),
+            subject: grant.subject.clone(),
+            client_id: grant.client_id.clone(),
+            scopes: grant.scopes.clone(),
+            resource: grant.resource.clone(),
+            dpop_jkt: (client.client_type == "public")
+                .then(|| dpop_jkt.clone())
+                .flatten(),
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            claims: claims.clone(),
+            expires_at: Utc::now() + Duration::seconds(issuer.token_policy.refresh_token_lifetime),
+        };
+        match database.issue_refresh_token(&refresh_grant).await {
+            Ok(token) => Some(token),
+            Err(error) => {
+                metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
+                tracing::error!(%error, "failed to issue device refresh token");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "token storage failed",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let response = issue_token_response(
+        issuer_id,
+        issuer,
+        database,
+        TokenIssue {
+            issuer: grant.issuer,
+            subject: grant.subject,
+            client_id: grant.client_id,
+            scopes: grant.scopes,
+            resource: grant.resource,
+            dpop_jkt,
+            nonce: None,
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            claims,
+        },
+        refresh_token,
+        DEVICE_CODE_GRANT,
+    )
+    .await;
+    metrics.device_authorization(if response.status().is_success() {
+        DeviceAuthorizationOutcome::TokenIssued
+    } else {
+        DeviceAuthorizationOutcome::Rejected
+    });
+    response
+}
+
+struct TokenIssue {
+    issuer: String,
+    subject: String,
+    client_id: String,
+    scopes: Vec<String>,
+    resource: Option<String>,
+    dpop_jkt: Option<String>,
+    nonce: Option<String>,
+    auth_time: Option<i64>,
+    mfa_verified: bool,
+    claims: Value,
+}
+
+async fn exchange_authorization_code_grant(
+    issuer_id: &str,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    form: &TokenForm,
+    database: &Database,
+    dpop: Option<&tokens::VerifiedDpopProof>,
+) -> HttpResponse {
+    if !client
+        .grant_types
+        .iter()
+        .any(|grant| grant == "authorization_code")
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "the client does not allow authorization_code",
+        );
+    }
+    let (Some(code), Some(redirect_uri)) = (form.code.as_deref(), form.redirect_uri.as_deref())
+    else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "code and redirect_uri are required",
+        );
+    };
+    if code.is_empty() || code.len() > 4_096 || redirect_uri.len() > 4_096 {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "authorization code parameters are invalid",
+        );
+    }
+    let grant = match database.consume_authorization_code(code).await {
         Ok(Some(grant)) => grant,
         Ok(None) => {
             return oauth_error(
@@ -1143,8 +5003,12 @@ async fn exchange_token(
     };
     if grant.expires_at <= Utc::now()
         || grant.issuer != issuer.url.trim_end_matches('/')
-        || grant.client_id != client_id
-        || grant.redirect_uri != form.redirect_uri
+        || grant.client_id != client.id
+        || grant.redirect_uri != redirect_uri
+        || grant
+            .resource
+            .as_ref()
+            .is_some_and(|resource| !client.resources.contains(resource))
         || !verify_pkce(
             grant.code_challenge.as_deref(),
             form.code_verifier.as_deref(),
@@ -1156,9 +5020,743 @@ async fn exchange_token(
             "authorization code validation failed",
         );
     }
-    let key = match database.signing_key(&grant.issuer).await {
+    if form.resource.as_ref() != grant.resource.as_ref() && form.resource.is_some() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "the requested resource does not match the authorization grant",
+        );
+    }
+    if grant
+        .dpop_jkt
+        .as_deref()
+        .is_some_and(|expected| dpop.map(|proof| proof.jkt.as_str()) != Some(expected))
+    {
+        return invalid_dpop_proof_response(
+            "the DPoP proof does not match the authorization grant",
+        );
+    }
+    let access_dpop_jkt = dpop.map(|proof| proof.jkt.clone());
+    let refresh_token = if grant.scopes.iter().any(|scope| scope == "offline_access") {
+        if !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == "refresh_token")
+        {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "offline access is no longer allowed for this client",
+            );
+        }
+        let refresh_grant = RefreshGrant {
+            issuer: grant.issuer.clone(),
+            subject: grant.subject.clone(),
+            client_id: grant.client_id.clone(),
+            scopes: grant.scopes.clone(),
+            resource: grant.resource.clone(),
+            dpop_jkt: (client.client_type == "public")
+                .then(|| access_dpop_jkt.clone())
+                .flatten(),
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            claims: grant.claims.clone(),
+            expires_at: Utc::now() + Duration::seconds(issuer.token_policy.refresh_token_lifetime),
+        };
+        match database.issue_refresh_token(&refresh_grant).await {
+            Ok(token) => Some(token),
+            Err(error) => {
+                tracing::error!(%error, "failed to issue refresh token");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "token storage failed",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    issue_token_response(
+        issuer_id,
+        issuer,
+        database,
+        TokenIssue {
+            issuer: grant.issuer,
+            subject: grant.subject,
+            client_id: grant.client_id,
+            scopes: grant.scopes,
+            resource: grant.resource,
+            dpop_jkt: access_dpop_jkt,
+            nonce: grant.nonce,
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            claims: grant.claims,
+        },
+        refresh_token,
+        "authorization_code",
+    )
+    .await
+}
+
+async fn exchange_refresh_token_grant(
+    issuer_id: &str,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    form: &TokenForm,
+    database: &Database,
+    dpop: Option<&tokens::VerifiedDpopProof>,
+) -> HttpResponse {
+    if !client
+        .grant_types
+        .iter()
+        .any(|grant| grant == "refresh_token")
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "the client does not allow refresh_token",
+        );
+    }
+    let Some(refresh_token) = form.refresh_token.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "refresh_token is required",
+        );
+    };
+    if refresh_token.is_empty() || refresh_token.len() > 4_096 {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "refresh_token is invalid",
+        );
+    }
+    let requested_scopes = match form.scope.as_deref() {
+        Some(scope) if scope.len() <= 2_048 => {
+            let scopes = normalized_scopes(scope);
+            if !scopes.iter().any(|scope| scope == "openid") {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_scope",
+                    "a refreshed OpenID grant must retain openid",
+                );
+            }
+            Some(scopes)
+        }
+        Some(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope is invalid",
+            );
+        }
+        None => None,
+    };
+    let rotation = match database
+        .rotate_refresh_token(
+            refresh_token,
+            issuer.url.trim_end_matches('/'),
+            &client.id,
+            requested_scopes.as_deref(),
+            form.resource.as_deref(),
+            (client.client_type == "public")
+                .then(|| dpop.map(|proof| proof.jkt.as_str()))
+                .flatten(),
+        )
+        .await
+    {
+        Ok(rotation) => rotation,
+        Err(error) => {
+            tracing::error!(%error, "failed to rotate refresh token");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            );
+        }
+    };
+    let (rotated_token, mut grant) = match rotation {
+        RefreshRotation::Rotated { token, grant } => (token, *grant),
+        RefreshRotation::InvalidScope => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope exceeds the original grant",
+            );
+        }
+        RefreshRotation::InvalidTarget => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                "the requested resource does not match the refresh grant",
+            );
+        }
+        RefreshRotation::InvalidDpopProof => {
+            return invalid_dpop_proof_response("the DPoP proof does not match the refresh token");
+        }
+        RefreshRotation::Replayed => {
+            tracing::warn!(
+                event = "refresh_token_replay",
+                outcome = "family_revoked",
+                issuer_id,
+                client_id = %client.id,
+                "refresh token replay detected"
+            );
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh token is invalid",
+            );
+        }
+        RefreshRotation::Invalid => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh token is invalid",
+            );
+        }
+    };
+    let currently_valid = snapshot.user(&grant.subject).is_some()
+        && grant
+            .resource
+            .as_ref()
+            .is_none_or(|resource| client.resources.contains(resource))
+        && grant
+            .scopes
+            .iter()
+            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope));
+    if !currently_valid {
+        let _ = database
+            .revoke_refresh_token(&rotated_token, &grant.issuer, &grant.client_id)
+            .await;
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh token grant is no longer active",
+        );
+    }
+    grant.claims = refresh_claims(snapshot, &grant.scopes, grant.claims);
+    issue_token_response(
+        issuer_id,
+        issuer,
+        database,
+        TokenIssue {
+            issuer: grant.issuer,
+            subject: grant.subject,
+            client_id: grant.client_id,
+            scopes: grant.scopes,
+            resource: grant.resource,
+            dpop_jkt: dpop.map(|proof| proof.jkt.clone()),
+            nonce: None,
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            claims: grant.claims,
+        },
+        Some(rotated_token),
+        "refresh_token",
+    )
+    .await
+}
+
+async fn exchange_client_credentials_grant(
+    issuer_id: &str,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    form: &TokenForm,
+    database: &Database,
+    dpop: Option<&tokens::VerifiedDpopProof>,
+) -> HttpResponse {
+    if client.client_type != "confidential"
+        || !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == "client_credentials")
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "the client does not allow client_credentials",
+        );
+    }
+    if form
+        .resource
+        .as_ref()
+        .is_some_and(|resource| resource.len() > 4_096 || !client.resources.contains(resource))
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "the requested resource is not registered for this client",
+        );
+    }
+    let eligible = |scope: &&String| {
+        issuer.scopes.contains(*scope) && service_scope_allowed(snapshot, scope.as_str())
+    };
+    let allowed_scopes = client
+        .scopes
+        .iter()
+        .filter(eligible)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scopes = match form.scope.as_deref() {
+        Some(scope) if scope.len() <= 2_048 => {
+            let requested = normalized_scopes(scope);
+            if requested.is_empty()
+                || requested
+                    .iter()
+                    .any(|scope| !allowed_scopes.contains(scope))
+            {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_scope",
+                    "one or more requested service scopes are not allowed",
+                );
+            }
+            requested
+        }
+        Some(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope is invalid",
+            );
+        }
+        None if !allowed_scopes.is_empty() => allowed_scopes,
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "the client has no service scope for this issuer",
+            );
+        }
+    };
+    let access_grant = AccessGrant {
+        issuer: issuer.url.trim_end_matches('/').to_owned(),
+        subject: client.id.clone(),
+        client_id: client.id.clone(),
+        scopes: scopes.clone(),
+        grant_type: "client_credentials".to_owned(),
+        resource: form.resource.clone(),
+        dpop_jkt: dpop.map(|proof| proof.jkt.clone()),
+        auth_time: None,
+        mfa_verified: false,
+        claims: json!({}),
+        expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
+    };
+    match issue_access_credential(issuer, database, &access_grant).await {
+        Ok((access_token, _key)) => {
+            tracing::info!(
+                event = "token_exchange",
+                outcome = "success",
+                issuer_id,
+                client_id = %client.id,
+                grant_type = "client_credentials",
+                "service access token issued"
+            );
+            let mut body = json!({
+                "access_token": access_token,
+                "token_type": if dpop.is_some() { "DPoP" } else { "Bearer" },
+                "expires_in": issuer.token_policy.access_token_lifetime,
+                "scope": scopes.join(" ")
+            });
+            if let Some(resource) = &form.resource
+                && let Some(body) = body.as_object_mut()
+            {
+                body.insert("resource".to_owned(), json!(resource));
+            }
+            no_store_json_response(StatusCode::OK, body)
+        }
+        Err(error) => {
+            tracing::error!(?error, "failed to issue service access token");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            )
+        }
+    }
+}
+
+async fn exchange_access_token_grant(
+    issuer_id: &str,
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    form: &TokenForm,
+    database: &Database,
+    dpop: Option<&tokens::VerifiedDpopProof>,
+) -> HttpResponse {
+    if client.client_type != "confidential"
+        || !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == TOKEN_EXCHANGE_GRANT)
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "the client does not allow token exchange",
+        );
+    }
+    if form.actor_token.is_some() || form.actor_token_type.is_some() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "actor token exchange is not supported",
+        );
+    }
+    if form.subject_token_type.as_deref() != Some(ACCESS_TOKEN_TYPE)
+        || form
+            .requested_token_type
+            .as_deref()
+            .is_some_and(|token_type| token_type != ACCESS_TOKEN_TYPE)
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "only access tokens can be exchanged and issued",
+        );
+    }
+    let Some(subject_token) = form.subject_token.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "subject_token is required",
+        );
+    };
+    if subject_token.is_empty()
+        || subject_token.len() > MAX_ACCESS_TOKEN_BYTES
+        || form
+            .subject_token_type
+            .as_deref()
+            .is_some_and(|value| value.len() > 256)
+        || form
+            .requested_token_type
+            .as_deref()
+            .is_some_and(|value| value.len() > 256)
+        || form
+            .audience
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || value.len() > 4_096)
+        || form
+            .resource
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || value.len() > 4_096)
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token exchange parameters are invalid",
+        );
+    }
+
+    let subject = match database.access_grant(subject_token).await {
+        Ok(Some(grant)) => grant,
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "subject token is invalid",
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load token exchange subject");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            );
+        }
+    };
+    if !active_token_exchange_subject(snapshot, issuer, client, &subject) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "subject token is invalid",
+        );
+    }
+    if subject
+        .dpop_jkt
+        .as_deref()
+        .is_some_and(|jkt| dpop.is_none_or(|proof| proof.jkt != jkt))
+    {
+        return invalid_dpop_proof_response("the DPoP proof does not match the subject token");
+    }
+
+    let target = match (form.resource.as_deref(), form.audience.as_deref()) {
+        (Some(resource), Some(audience)) if resource != audience => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                "resource and audience must identify the same registered target",
+            );
+        }
+        (Some(resource), _) | (_, Some(resource)) => Some(resource.to_owned()),
+        (None, None) => subject.resource.clone(),
+    };
+    if target
+        .as_ref()
+        .is_some_and(|resource| !client.resources.contains(resource))
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "the requested target is not registered for this client",
+        );
+    }
+
+    let scopes = match form.scope.as_deref() {
+        Some(scope) if scope.len() <= 2_048 => {
+            let requested = normalized_scopes(scope);
+            if requested.is_empty()
+                || requested.iter().any(|scope| {
+                    scope == "offline_access"
+                        || !subject.scopes.contains(scope)
+                        || !issuer.scopes.contains(scope)
+                        || !client.scopes.contains(scope)
+                })
+            {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_scope",
+                    "requested scopes exceed the subject token grant",
+                );
+            }
+            requested
+        }
+        Some(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope is invalid",
+            );
+        }
+        None => subject
+            .scopes
+            .iter()
+            .filter(|scope| scope.as_str() != "offline_access")
+            .cloned()
+            .collect(),
+    };
+    if scopes.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_scope",
+            "the subject token has no exchangeable scope",
+        );
+    }
+
+    let now = Utc::now();
+    let expires_in = (subject.expires_at - now)
+        .num_seconds()
+        .min(issuer.token_policy.access_token_lifetime);
+    if expires_in <= 0 {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "subject token is invalid",
+        );
+    }
+    let dpop_jkt = subject
+        .dpop_jkt
+        .clone()
+        .or_else(|| dpop.map(|proof| proof.jkt.clone()));
+    let exchanged_grant = AccessGrant {
+        issuer: subject.issuer,
+        subject: subject.subject,
+        client_id: subject.client_id,
+        scopes: scopes.clone(),
+        grant_type: TOKEN_EXCHANGE_GRANT.to_owned(),
+        resource: target.clone(),
+        dpop_jkt: dpop_jkt.clone(),
+        auth_time: subject.auth_time,
+        mfa_verified: subject.mfa_verified,
+        claims: subject.claims,
+        expires_at: now + Duration::seconds(expires_in),
+    };
+    match issue_access_credential(issuer, database, &exchanged_grant).await {
+        Ok((access_token, _key)) => {
+            tracing::info!(
+                event = "token_exchange",
+                outcome = "success",
+                issuer_id,
+                client_id = %client.id,
+                grant_type = TOKEN_EXCHANGE_GRANT,
+                subject_id = %exchanged_grant.subject,
+                "access token exchanged"
+            );
+            let mut body = json!({
+                "access_token": access_token,
+                "issued_token_type": ACCESS_TOKEN_TYPE,
+                "token_type": if dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+                "expires_in": expires_in,
+                "scope": scopes.join(" ")
+            });
+            if let Some(resource) = target
+                && let Some(body) = body.as_object_mut()
+            {
+                body.insert("resource".to_owned(), json!(resource));
+            }
+            no_store_json_response(StatusCode::OK, body)
+        }
+        Err(error) => {
+            tracing::error!(?error, "failed to persist exchanged access token");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            )
+        }
+    }
+}
+
+fn refresh_claims(
+    snapshot: &crate::configuration::Snapshot,
+    scopes: &[String],
+    claims: Value,
+) -> Value {
+    let Value::Object(mut claims) = claims else {
+        return json!({});
+    };
+    claims.retain(|claim, _| {
+        snapshot
+            .configuration
+            .claims
+            .get(claim)
+            .is_some_and(|mapping| scopes.contains(&mapping.scope))
+    });
+    Value::Object(claims)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccessTokenIssuanceError {
+    #[error("signing key unavailable: {0}")]
+    Key(sqlx::Error),
+    #[error("access token signing failed: {0}")]
+    Signing(jsonwebtoken::errors::Error),
+    #[error("access token storage failed: {0}")]
+    Storage(sqlx::Error),
+    #[error("signed access token exceeds the configured transport bound")]
+    TooLarge,
+}
+
+async fn active_signing_key(
+    issuer: &crate::configuration::Issuer,
+    database: &Database,
+    issuer_url: &str,
+) -> Result<SigningKey, sqlx::Error> {
+    match issuer.token_policy.signing_key_rotation_interval {
+        Some(interval) => database
+            .rotate_signing_key_if_due(
+                issuer_url,
+                interval,
+                issuer.signing_key_retention_seconds(),
+                Utc::now(),
+            )
+            .await
+            .map(|(key, _changed)| key),
+        None => database.signing_key(issuer_url).await,
+    }
+}
+
+async fn issue_access_credential(
+    issuer: &crate::configuration::Issuer,
+    database: &Database,
+    grant: &AccessGrant,
+) -> Result<(String, Option<SigningKey>), AccessTokenIssuanceError> {
+    if issuer.token_policy.access_token_format == "opaque" {
+        return database
+            .issue_access_token(grant)
+            .await
+            .map(|token| (token, None))
+            .map_err(AccessTokenIssuanceError::Storage);
+    }
+
+    let key = active_signing_key(issuer, database, &grant.issuer)
+        .await
+        .map_err(AccessTokenIssuanceError::Key)?;
+    let now = Utc::now().timestamp();
+    let lifetime = (grant.expires_at.timestamp() - now).max(1);
+    let scope = grant.scopes.join(" ");
+    let claims = grant.claims.as_object().cloned().unwrap_or_default();
+    let token = tokens::issue_access_token(
+        &key,
+        &tokens::AccessTokenInput {
+            issuer: &grant.issuer,
+            subject: &grant.subject,
+            audience: grant.resource.as_deref().unwrap_or(&grant.client_id),
+            client_id: &grant.client_id,
+            scope: &scope,
+            jti: &random_token(),
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            dpop_jkt: grant.dpop_jkt.as_deref(),
+            claims: &claims,
+            now,
+            lifetime,
+        },
+    )
+    .map_err(AccessTokenIssuanceError::Signing)?;
+    if token.len() > MAX_ACCESS_TOKEN_BYTES {
+        return Err(AccessTokenIssuanceError::TooLarge);
+    }
+    database
+        .store_access_token(&token, grant)
+        .await
+        .map_err(AccessTokenIssuanceError::Storage)?;
+    Ok((token, Some(key)))
+}
+
+async fn issue_token_response(
+    issuer_id: &str,
+    issuer: &crate::configuration::Issuer,
+    database: &Database,
+    grant: TokenIssue,
+    refresh_token: Option<String>,
+    grant_type: &'static str,
+) -> HttpResponse {
+    let claims = grant.claims.as_object().cloned().unwrap_or_default();
+    let now = Utc::now().timestamp();
+    let access_grant = AccessGrant {
+        issuer: grant.issuer.clone(),
+        subject: grant.subject.clone(),
+        client_id: grant.client_id.clone(),
+        scopes: grant.scopes.clone(),
+        grant_type: grant_type.to_owned(),
+        resource: grant.resource.clone(),
+        dpop_jkt: grant.dpop_jkt.clone(),
+        auth_time: grant.auth_time,
+        mfa_verified: grant.mfa_verified,
+        claims: grant.claims.clone(),
+        expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
+    };
+    let (access_token, access_token_key) =
+        match issue_access_credential(issuer, database, &access_grant).await {
+            Ok(result) => result,
+            Err(error) => {
+                revoke_unissued_refresh_token(database, refresh_token.as_deref(), &grant).await;
+                tracing::error!(?error, "failed to issue access token");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "token storage failed",
+                );
+            }
+        };
+    let key_result = match access_token_key {
+        Some(key) => Ok(key),
+        None => active_signing_key(issuer, database, &grant.issuer).await,
+    };
+    let key = match key_result {
         Ok(key) => key,
         Err(error) => {
+            let _ = database
+                .revoke_access_token(&access_token, &access_grant.issuer, &access_grant.client_id)
+                .await;
+            revoke_unissued_refresh_token(database, refresh_token.as_deref(), &grant).await;
             tracing::error!(%error, "failed to load signing key");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1167,8 +5765,7 @@ async fn exchange_token(
             );
         }
     };
-    let claims = grant.claims.as_object().cloned().unwrap_or_default();
-    let now = Utc::now().timestamp();
+    let at_hash = tokens::access_token_hash(&access_token);
     let id_token = match tokens::issue_id_token(
         &key,
         &tokens::IdTokenInput {
@@ -1176,6 +5773,9 @@ async fn exchange_token(
             subject: &grant.subject,
             audience: &grant.client_id,
             nonce: grant.nonce.as_deref(),
+            auth_time: grant.auth_time,
+            mfa_verified: grant.mfa_verified,
+            at_hash: Some(&at_hash),
             claims: &claims,
             now,
             lifetime: issuer.token_policy.id_token_lifetime,
@@ -1183,6 +5783,10 @@ async fn exchange_token(
     ) {
         Ok(token) => token,
         Err(error) => {
+            let _ = database
+                .revoke_access_token(&access_token, &access_grant.issuer, &access_grant.client_id)
+                .await;
+            revoke_unissued_refresh_token(database, refresh_token.as_deref(), &grant).await;
             tracing::error!(%error, "failed to sign ID token");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1191,18 +5795,102 @@ async fn exchange_token(
             );
         }
     };
-    let access_grant = AccessGrant {
-        issuer: grant.issuer,
-        subject: grant.subject,
-        client_id: grant.client_id,
-        scopes: grant.scopes.clone(),
-        claims: grant.claims,
-        expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
+    let mut body = json!({
+        "access_token": access_token,
+        "token_type": if grant.dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+        "expires_in": issuer.token_policy.access_token_lifetime,
+        "scope": grant.scopes.join(" "),
+        "id_token": id_token
+    });
+    if let Some(refresh_token) = refresh_token
+        && let Some(body) = body.as_object_mut()
+    {
+        body.insert("refresh_token".to_owned(), json!(refresh_token));
+    }
+    if let Some(resource) = &grant.resource
+        && let Some(body) = body.as_object_mut()
+    {
+        body.insert("resource".to_owned(), json!(resource));
+    }
+    tracing::info!(
+        event = "token_exchange",
+        outcome = "success",
+        issuer_id,
+        client_id = %access_grant.client_id,
+        grant_type,
+        subject_id = %access_grant.subject
+    );
+    no_store_json_response(StatusCode::OK, body)
+}
+
+async fn revoke_unissued_refresh_token(
+    database: &Database,
+    refresh_token: Option<&str>,
+    grant: &TokenIssue,
+) {
+    let Some(refresh_token) = refresh_token else {
+        return;
     };
-    let access_token = match database.issue_access_token(&access_grant).await {
-        Ok(token) => token,
+    if let Err(error) = database
+        .revoke_refresh_token(refresh_token, &grant.issuer, &grant.client_id)
+        .await
+    {
+        tracing::error!(%error, "failed to revoke an unissued refresh family");
+    }
+}
+
+async fn introspect_token(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<TokenStatusForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
+    };
+    let form = form.into_inner();
+    if form.token.is_empty() || form.token.len() > MAX_ACCESS_TOKEN_BYTES {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token must be a non-empty bounded value",
+        );
+    }
+    let client = match authenticated_endpoint_client(
+        &snapshot,
+        &request,
+        application.database(),
+        issuer,
+        EndpointClientAuthentication {
+            form_id: form.client_id.as_deref(),
+            form_secret: form.client_secret.as_deref(),
+            client_assertion_type: form.client_assertion_type.as_deref(),
+            client_assertion: form.client_assertion.as_deref(),
+            realm: "introspection",
+            endpoint_path: "/introspect",
+        },
+    )
+    .await
+    {
+        Ok(client) if client.client_type == "confidential" && client.introspection_allowed => {
+            client
+        }
+        _ => return invalid_client_response_for("introspection"),
+    };
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    let issuer_url = issuer.url.trim_end_matches('/');
+    let grant = match database.introspection_grant(&form.token, issuer_url).await {
+        Ok(grant) => grant,
         Err(error) => {
-            tracing::error!(%error, "failed to issue access token");
+            tracing::error!(%error, "failed to introspect access token");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "temporarily_unavailable",
@@ -1210,36 +5898,169 @@ async fn exchange_token(
             );
         }
     };
-    let mut response = json_response(
-        StatusCode::OK,
-        json!({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": issuer.token_policy.access_token_lifetime,
-            "scope": grant.scopes.join(" "),
-            "id_token": id_token
-        }),
-    );
-    response.headers_mut().insert(
-        actix_web::http::header::CACHE_CONTROL,
-        actix_web::http::header::HeaderValue::from_static("no-store"),
-    );
-    response.headers_mut().insert(
-        actix_web::http::header::PRAGMA,
-        actix_web::http::header::HeaderValue::from_static("no-cache"),
-    );
+    let response = grant
+        .filter(|grant| active_introspection_grant(&snapshot, issuer, grant))
+        .map_or_else(
+            || json!({"active": false}),
+            |grant| {
+                let mut response = json!({
+                    "active": true,
+                    "scope": grant.scopes.join(" "),
+                    "client_id": grant.client_id,
+                    "token_type": if grant.dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+                    "exp": grant.expires_at.timestamp(),
+                    "iat": grant.issued_at.timestamp(),
+                    "sub": grant.subject,
+                    "iss": grant.issuer
+                });
+                if let Some(resource) = grant.resource
+                    && let Some(response) = response.as_object_mut()
+                {
+                    response.insert("aud".to_owned(), json!(resource));
+                }
+                if let Some(jkt) = grant.dpop_jkt
+                    && let Some(response) = response.as_object_mut()
+                {
+                    response.insert("cnf".to_owned(), json!({"jkt": jkt}));
+                }
+                if let Some(auth_time) = grant.auth_time
+                    && let Some(response) = response.as_object_mut()
+                {
+                    response.insert("auth_time".to_owned(), json!(auth_time));
+                    response.insert(
+                        "acr".to_owned(),
+                        json!(if grant.mfa_verified {
+                            tokens::MFA_ACR
+                        } else {
+                            tokens::PASSWORD_ACR
+                        }),
+                    );
+                    response.insert(
+                        "amr".to_owned(),
+                        if grant.mfa_verified {
+                            json!(["pwd", "otp"])
+                        } else {
+                            json!(["pwd"])
+                        },
+                    );
+                }
+                response
+            },
+        );
+    let token_type_hint = match form.token_type_hint.as_deref() {
+        Some("access_token") => "access_token",
+        Some(_) => "other",
+        None => "unspecified",
+    };
     tracing::info!(
-        event = "token_exchange",
+        event = "token_introspection",
+        outcome = if response["active"] == true { "active" } else { "inactive" },
+        issuer_id,
+        client_id = %client.id,
+        token_type_hint,
+        "access token introspected"
+    );
+    no_store_json_response(StatusCode::OK, response)
+}
+
+async fn revoke_token(
+    path: web::Path<String>,
+    request: HttpRequest,
+    form: web::Form<TokenStatusForm>,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
+    };
+    let form = form.into_inner();
+    if form.token.is_empty() || form.token.len() > MAX_ACCESS_TOKEN_BYTES {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token must be a non-empty bounded value",
+        );
+    }
+    let client = match authenticated_endpoint_client(
+        &snapshot,
+        &request,
+        application.database(),
+        issuer,
+        EndpointClientAuthentication {
+            form_id: form.client_id.as_deref(),
+            form_secret: form.client_secret.as_deref(),
+            client_assertion_type: form.client_assertion_type.as_deref(),
+            client_assertion: form.client_assertion.as_deref(),
+            realm: "revocation",
+            endpoint_path: "/revoke",
+        },
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let Some(database) = application.database() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "database unavailable",
+        );
+    };
+    let access_revoked = match database
+        .revoke_access_token(&form.token, issuer.url.trim_end_matches('/'), &client.id)
+        .await
+    {
+        Ok(revoked) => revoked,
+        Err(error) => {
+            tracing::error!(%error, "failed to revoke access token");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            );
+        }
+    };
+    let refresh_revoked = match database
+        .revoke_refresh_token(&form.token, issuer.url.trim_end_matches('/'), &client.id)
+        .await
+    {
+        Ok(revoked) => revoked,
+        Err(error) => {
+            tracing::error!(%error, "failed to revoke refresh token");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "token storage failed",
+            );
+        }
+    };
+    let token_type_hint = match form.token_type_hint.as_deref() {
+        Some("access_token") => "access_token",
+        Some("refresh_token") => "refresh_token",
+        Some(_) => "other",
+        None => "unspecified",
+    };
+    tracing::info!(
+        event = "token_revocation",
         outcome = "success",
         issuer_id,
-        client_id,
-        subject_id = %access_grant.subject
+        client_id = %client.id,
+        token_type_hint,
+        token_found = access_revoked || refresh_revoked,
+        "token revocation completed"
     );
-    application.metrics().token_exchange_success();
+    let mut response = HttpResponse::Ok().finish();
+    prevent_caching(&mut response);
     response
 }
 
-async fn jwks(path: web::Path<String>, application: web::Data<Application>) -> impl Responder {
+async fn jwks(
+    path: web::Path<String>,
+    request: HttpRequest,
+    application: web::Data<Application>,
+) -> impl Responder {
     let issuer_id = path.into_inner();
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.issuer(&issuer_id) else {
@@ -1255,20 +6076,13 @@ async fn jwks(path: web::Path<String>, application: web::Data<Application>) -> i
         .public_signing_keys(issuer.url.trim_end_matches('/'))
         .await
     {
-        Ok(keys) => {
-            let mut response = json_response(
-                StatusCode::OK,
-                json!({"keys": keys.into_iter().map(|key| json!({
+        Ok(keys) => cacheable_json_response(
+            &request,
+            json!({"keys": keys.into_iter().map(|key| json!({
                 "kty": "RSA", "kid": key.kid, "use": "sig", "alg": "RS256",
                 "n": key.modulus, "e": key.exponent
                 })).collect::<Vec<_>>() }),
-            );
-            response.headers_mut().insert(
-                actix_web::http::header::CACHE_CONTROL,
-                actix_web::http::header::HeaderValue::from_static("public, max-age=300"),
-            );
-            response
-        }
+        ),
         Err(error) => {
             tracing::error!(%error, "failed to load JWKS");
             json_response(
@@ -1286,27 +6100,267 @@ async fn user_info(
 ) -> impl Responder {
     let issuer_id = path.into_inner();
     let snapshot = application.snapshot();
-    let token = request
-        .headers()
-        .get(actix_web::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let (Some(token), Some(database)) = (token, application.database()) else {
-        return invalid_bearer_response();
+    let credential = access_token_credential(&request);
+    let (Some((scheme, token)), Some(database)) = (credential, application.database()) else {
+        let mut response = invalid_bearer_response();
+        add_user_info_cors(&mut response, &request, &snapshot, None);
+        return response;
     };
-    match database.access_grant(token).await {
-        Ok(Some(grant)) if valid_user_info_grant(&snapshot, &issuer_id, &grant) => {
-            let mut claims = grant.claims.as_object().cloned().unwrap_or_default();
-            claims.insert("sub".to_owned(), json!(grant.subject));
-            let mut response = json_response(StatusCode::OK, Value::Object(claims));
-            response.headers_mut().insert(
-                actix_web::http::header::CACHE_CONTROL,
-                actix_web::http::header::HeaderValue::from_static("no-store"),
+    let grant = match database.access_grant(token).await {
+        Ok(Some(grant)) if valid_user_info_grant(&snapshot, &issuer_id, &grant) => grant,
+        _ => {
+            tracing::warn!(
+                event = "userinfo",
+                outcome = "failure",
+                issuer_id,
+                reason = "invalid_token",
+                "UserInfo request rejected"
             );
-            response
+            let mut response = if scheme.eq_ignore_ascii_case("dpop") {
+                invalid_dpop_access_response("invalid_token", "the access token is invalid")
+            } else {
+                invalid_bearer_response()
+            };
+            add_user_info_cors(&mut response, &request, &snapshot, None);
+            return response;
         }
-        _ => invalid_bearer_response(),
+    };
+    if let Some(expected_jkt) = grant.dpop_jkt.as_deref() {
+        if !scheme.eq_ignore_ascii_case("dpop") {
+            let mut response = invalid_dpop_access_response(
+                "invalid_token",
+                "a DPoP-bound access token must use the DPoP authorization scheme",
+            );
+            add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+            return response;
+        }
+        let issuer = snapshot
+            .issuer(&issuer_id)
+            .expect("validated UserInfo issuer");
+        let proof = match verified_dpop_endpoint_proof(
+            &request,
+            database,
+            issuer,
+            "/userinfo",
+            "userinfo",
+            Some(token),
+        )
+        .await
+        {
+            Ok(Some(proof)) if proof.jkt == expected_jkt => proof,
+            Ok(_) | Err(DpopProofError::Invalid) => {
+                let mut response = invalid_dpop_access_response(
+                    "invalid_dpop_proof",
+                    "the DPoP proof is missing, invalid, mismatched, or replayed",
+                );
+                add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+                return response;
+            }
+            Err(DpopProofError::NonceRequired(nonce)) => {
+                let mut response = dpop_nonce_response(true, &nonce);
+                add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+                return response;
+            }
+            Err(DpopProofError::Unavailable) => {
+                let mut response = oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "DPoP replay storage unavailable",
+                );
+                add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+                return response;
+            }
+        };
+        tracing::debug!(dpop_jkt = %proof.jkt, "DPoP-bound UserInfo proof accepted");
+    } else if !scheme.eq_ignore_ascii_case("bearer") {
+        let mut response = invalid_bearer_response();
+        add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+        return response;
     }
+
+    tracing::info!(
+        event = "userinfo",
+        outcome = "success",
+        issuer_id,
+        client_id = %grant.client_id,
+        subject_id = %grant.subject,
+        dpop_bound = grant.dpop_jkt.is_some(),
+        "UserInfo claims returned"
+    );
+    let mut claims = grant.claims.as_object().cloned().unwrap_or_default();
+    claims.insert("sub".to_owned(), json!(grant.subject));
+    let mut response = json_response(StatusCode::OK, Value::Object(claims));
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    add_user_info_cors(&mut response, &request, &snapshot, Some(&grant.client_id));
+    response
+}
+
+async fn user_info_options(
+    path: web::Path<String>,
+    request: HttpRequest,
+    application: web::Data<Application>,
+) -> HttpResponse {
+    let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
+    if snapshot.issuer(&issuer_id).is_none() {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+    }
+    let requested_method = request
+        .headers()
+        .get("access-control-request-method")
+        .and_then(|value| value.to_str().ok());
+    let requested_headers_supported = request
+        .headers()
+        .get("access-control-request-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|headers| {
+            headers.split(',').all(|header| {
+                matches!(
+                    header.trim().to_ascii_lowercase().as_str(),
+                    "authorization" | "content-type" | "dpop"
+                )
+            })
+        });
+    let origin = request
+        .headers()
+        .get(actix_web::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if !matches!(requested_method, Some("GET" | "POST"))
+        || !requested_headers_supported
+        || !origin.is_some_and(|origin| user_info_origin_allowed(&snapshot, origin, None))
+    {
+        return HttpResponse::Forbidden().finish();
+    }
+
+    let mut response = HttpResponse::NoContent().finish();
+    add_user_info_cors(&mut response, &request, &snapshot, None);
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-allow-methods"),
+        actix_web::http::header::HeaderValue::from_static("GET, POST"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-allow-headers"),
+        actix_web::http::header::HeaderValue::from_static("Authorization, Content-Type, DPoP"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("access-control-max-age"),
+        actix_web::http::header::HeaderValue::from_static("600"),
+    );
+    response
+}
+
+fn add_user_info_cors(
+    response: &mut HttpResponse,
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    client_id: Option<&str>,
+) {
+    let Some(origin) = request
+        .headers()
+        .get(actix_web::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|origin| registered_redirect_origin_allowed(snapshot, origin, client_id, false))
+    else {
+        return;
+    };
+    let Ok(origin) = actix_web::http::header::HeaderValue::from_str(origin) else {
+        return;
+    };
+    response
+        .headers_mut()
+        .insert(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    response.headers_mut().insert(
+        actix_web::http::header::VARY,
+        actix_web::http::header::HeaderValue::from_static("Origin"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+        actix_web::http::header::HeaderValue::from_static("cross-origin"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        actix_web::http::header::HeaderValue::from_static("DPoP-Nonce, WWW-Authenticate"),
+    );
+}
+
+fn user_info_origin_allowed(
+    snapshot: &crate::configuration::Snapshot,
+    origin: &str,
+    client_id: Option<&str>,
+) -> bool {
+    registered_redirect_origin_allowed(snapshot, origin, client_id, false)
+}
+
+fn add_token_cors(
+    response: &mut HttpResponse,
+    request: &HttpRequest,
+    snapshot: &crate::configuration::Snapshot,
+    client_id: Option<&str>,
+) {
+    let Some(origin) = request
+        .headers()
+        .get(actix_web::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|origin| token_origin_allowed(snapshot, origin, client_id))
+    else {
+        return;
+    };
+    let Ok(origin) = actix_web::http::header::HeaderValue::from_str(origin) else {
+        return;
+    };
+    response
+        .headers_mut()
+        .insert(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    response.headers_mut().insert(
+        actix_web::http::header::VARY,
+        actix_web::http::header::HeaderValue::from_static("Origin"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+        actix_web::http::header::HeaderValue::from_static("cross-origin"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        actix_web::http::header::HeaderValue::from_static("DPoP-Nonce"),
+    );
+}
+
+fn token_origin_allowed(
+    snapshot: &crate::configuration::Snapshot,
+    origin: &str,
+    client_id: Option<&str>,
+) -> bool {
+    registered_redirect_origin_allowed(snapshot, origin, client_id, true)
+}
+
+fn registered_redirect_origin_allowed(
+    snapshot: &crate::configuration::Snapshot,
+    origin: &str,
+    client_id: Option<&str>,
+    public_clients_only: bool,
+) -> bool {
+    let Ok(origin_url) = url::Url::parse(origin) else {
+        return false;
+    };
+    if origin_url.path() != "/"
+        || origin_url.query().is_some()
+        || origin_url.fragment().is_some()
+        || origin_url.origin().ascii_serialization() != origin
+    {
+        return false;
+    }
+    snapshot
+        .configuration
+        .clients
+        .iter()
+        .filter(|client| client_id.is_none_or(|expected| client.id == expected))
+        .filter(|client| !public_clients_only || client.client_type == "public")
+        .flat_map(|client| client.redirect_uris.iter())
+        .filter_map(|redirect| url::Url::parse(redirect).ok())
+        .any(|redirect| redirect.origin() == origin_url.origin())
 }
 
 fn valid_user_info_grant(
@@ -1314,28 +6368,289 @@ fn valid_user_info_grant(
     issuer_id: &str,
     grant: &AccessGrant,
 ) -> bool {
-    snapshot
-        .issuer(issuer_id)
-        .is_some_and(|issuer| grant.issuer == issuer.url.trim_end_matches('/'))
+    let (Some(issuer), Some(client)) = (
+        snapshot.issuer(issuer_id),
+        snapshot.client(&grant.client_id),
+    ) else {
+        return false;
+    };
+    grant.issuer == issuer.url.trim_end_matches('/')
+        && grant.resource.is_none()
         && snapshot.user(&grant.subject).is_some()
+        && grant.scopes.iter().any(|scope| scope == "openid")
+        && grant
+            .scopes
+            .iter()
+            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope))
+        && match grant.grant_type.as_str() {
+            "authorization_code" => client
+                .grant_types
+                .iter()
+                .any(|grant| grant == "authorization_code"),
+            "refresh_token" => client
+                .grant_types
+                .iter()
+                .any(|grant| grant == "refresh_token"),
+            DEVICE_CODE_GRANT => client
+                .grant_types
+                .iter()
+                .any(|grant| grant == DEVICE_CODE_GRANT),
+            TOKEN_EXCHANGE_GRANT => client
+                .grant_types
+                .iter()
+                .any(|grant| grant == TOKEN_EXCHANGE_GRANT),
+            _ => false,
+        }
 }
 
-fn basic_credentials(request: &HttpRequest) -> (Option<String>, Option<String>) {
-    let decoded = request
-        .headers()
-        .get(actix_web::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Basic "))
-        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
-        .and_then(|value| String::from_utf8(value).ok());
-    match decoded.and_then(|value| {
-        value
-            .split_once(':')
-            .map(|(id, secret)| (id.to_owned(), secret.to_owned()))
-    }) {
-        Some((id, secret)) => (Some(id), Some(secret)),
-        None => (None, None),
+fn active_token_exchange_subject(
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
+    grant: &AccessGrant,
+) -> bool {
+    if grant.issuer != issuer.url.trim_end_matches('/')
+        || grant.client_id != client.id
+        || grant
+            .resource
+            .as_ref()
+            .is_some_and(|resource| !client.resources.contains(resource))
+        || grant
+            .scopes
+            .iter()
+            .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
+    {
+        return false;
     }
+    match grant.grant_type.as_str() {
+        "client_credentials" => {
+            grant.subject == client.id
+                && client
+                    .grant_types
+                    .iter()
+                    .any(|grant| grant == "client_credentials")
+                && grant
+                    .scopes
+                    .iter()
+                    .all(|scope| service_scope_allowed(snapshot, scope))
+        }
+        "authorization_code" | "refresh_token" | DEVICE_CODE_GRANT => {
+            snapshot.user(&grant.subject).is_some()
+                && client.grant_types.iter().any(|configured| {
+                    configured == &grant.grant_type
+                        || (grant.grant_type == "refresh_token" && configured == "refresh_token")
+                })
+        }
+        TOKEN_EXCHANGE_GRANT => {
+            client
+                .grant_types
+                .iter()
+                .any(|grant| grant == TOKEN_EXCHANGE_GRANT)
+                && (snapshot.user(&grant.subject).is_some()
+                    || (grant.subject == client.id
+                        && grant
+                            .scopes
+                            .iter()
+                            .all(|scope| service_scope_allowed(snapshot, scope))))
+        }
+        _ => false,
+    }
+}
+
+fn active_introspection_grant(
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &crate::configuration::Issuer,
+    grant: &crate::database::IntrospectionGrant,
+) -> bool {
+    let Some(client) = snapshot.client(&grant.client_id) else {
+        return false;
+    };
+    if grant.issuer != issuer.url.trim_end_matches('/')
+        || grant
+            .resource
+            .as_ref()
+            .is_some_and(|resource| !client.resources.contains(resource))
+        || grant
+            .scopes
+            .iter()
+            .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
+    {
+        return false;
+    }
+    match grant.grant_type.as_str() {
+        "client_credentials" => {
+            client.client_type == "confidential"
+                && grant.subject == client.id
+                && client
+                    .grant_types
+                    .iter()
+                    .any(|grant| grant == "client_credentials")
+                && grant
+                    .scopes
+                    .iter()
+                    .all(|scope| service_scope_allowed(snapshot, scope))
+        }
+        "authorization_code" | "refresh_token" | DEVICE_CODE_GRANT => {
+            snapshot.user(&grant.subject).is_some()
+                && client
+                    .grant_types
+                    .iter()
+                    .any(|configured| configured == &grant.grant_type)
+        }
+        TOKEN_EXCHANGE_GRANT => {
+            client
+                .grant_types
+                .iter()
+                .any(|grant| grant == TOKEN_EXCHANGE_GRANT)
+                && (snapshot.user(&grant.subject).is_some()
+                    || (grant.subject == client.id
+                        && grant
+                            .scopes
+                            .iter()
+                            .all(|scope| service_scope_allowed(snapshot, scope))))
+        }
+        _ => false,
+    }
+}
+
+fn service_scope_allowed(snapshot: &crate::configuration::Snapshot, scope: &str) -> bool {
+    scope != "openid"
+        && scope != "offline_access"
+        && !snapshot
+            .configuration
+            .claims
+            .values()
+            .any(|mapping| mapping.scope == scope)
+}
+
+#[derive(Debug)]
+enum DpopProofError {
+    Invalid,
+    NonceRequired(String),
+    Unavailable,
+}
+
+async fn verified_dpop_endpoint_proof(
+    request: &HttpRequest,
+    database: &Database,
+    issuer: &crate::configuration::Issuer,
+    endpoint_path: &str,
+    nonce_context: &'static str,
+    access_token: Option<&str>,
+) -> Result<Option<tokens::VerifiedDpopProof>, DpopProofError> {
+    let header_name = actix_web::http::header::HeaderName::from_static("dpop");
+    let mut values = request.headers().get_all(header_name);
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(DpopProofError::Invalid);
+    }
+    let proof = value.to_str().map_err(|_| DpopProofError::Invalid)?;
+    let clock_skew = u64::try_from(issuer.token_policy.clock_skew).unwrap_or_default();
+    let now = Utc::now();
+    let endpoint_uri = format!("{}{}", issuer.url.trim_end_matches('/'), endpoint_path);
+    let verified = tokens::verify_dpop_proof(
+        proof,
+        request.method().as_str(),
+        &endpoint_uri,
+        access_token,
+        clock_skew,
+        now.timestamp(),
+    )
+    .map_err(|_| DpopProofError::Invalid)?;
+    if issuer.token_policy.dpop_nonce_required {
+        match database
+            .validate_or_issue_dpop_nonce(
+                issuer.url.trim_end_matches('/'),
+                nonce_context,
+                &verified.jkt,
+                verified.nonce.as_deref(),
+                issuer.token_policy.dpop_nonce_lifetime,
+            )
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(nonce)) => return Err(DpopProofError::NonceRequired(nonce)),
+            Err(error) => {
+                tracing::error!(%error, "failed to validate DPoP nonce state");
+                return Err(DpopProofError::Unavailable);
+            }
+        }
+    }
+    let replay_lifetime = i64::try_from(clock_skew)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(2)
+        .saturating_add(300);
+    let expires_at = now + Duration::seconds(replay_lifetime);
+    match database
+        .register_dpop_proof(&verified.jkt, &verified.jti, expires_at)
+        .await
+    {
+        Ok(true) => Ok(Some(verified)),
+        Ok(false) => Err(DpopProofError::Invalid),
+        Err(error) => {
+            tracing::error!(%error, "failed to persist DPoP proof replay state");
+            Err(DpopProofError::Unavailable)
+        }
+    }
+}
+
+fn access_token_credential(request: &HttpRequest) -> Option<(&str, &str)> {
+    let mut values = request
+        .headers()
+        .get_all(actix_web::http::header::AUTHORIZATION);
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let mut parts = value.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    if token.is_empty() || token.len() > MAX_ACCESS_TOKEN_BYTES || parts.next().is_some() {
+        return None;
+    }
+    Some((scheme, token))
+}
+
+#[cfg(test)]
+fn bearer_token(request: &HttpRequest) -> Option<&str> {
+    access_token_credential(request)
+        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token))
+}
+
+fn basic_credentials(request: &HttpRequest) -> Result<Option<(String, String)>, ()> {
+    let mut values = request
+        .headers()
+        .get_all(actix_web::http::header::AUTHORIZATION);
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    let value = value.to_str().map_err(|_| ())?;
+    let mut parts = value.split_ascii_whitespace();
+    let scheme = parts.next().ok_or(())?;
+    let encoded = parts.next().ok_or(())?;
+    if !scheme.eq_ignore_ascii_case("basic") || parts.next().is_some() {
+        return Err(());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| ())?;
+    let (id, secret) = decoded.split_once(':').ok_or(())?;
+    let id = decode_form_component(id).ok_or(())?;
+    let secret = decode_form_component(secret).ok_or(())?;
+    Ok(Some((id, secret)))
+}
+
+fn decode_form_component(value: &str) -> Option<String> {
+    let encoded = format!("value={value}");
+    let mut pairs = url::form_urlencoded::parse(encoded.as_bytes());
+    let (key, value) = pairs.next()?;
+    (key == "value" && pairs.next().is_none()).then(|| value.into_owned())
 }
 
 fn authenticate_client(
@@ -1355,7 +6670,6 @@ fn authenticate_client(
         .secret_reference
         .as_ref()
         .and_then(|reference| match reference {
-            Value::String(secret) if !secret.is_empty() => Some(secret.clone()),
             Value::Object(reference)
                 if reference.get("provider").and_then(Value::as_str) == Some("env") =>
             {
@@ -1390,16 +6704,140 @@ fn authenticate_client(
     }
 }
 
-fn invalid_client_response() -> HttpResponse {
+async fn authenticated_endpoint_client<'a>(
+    snapshot: &'a crate::configuration::Snapshot,
+    request: &HttpRequest,
+    database: Option<&Database>,
+    issuer: &crate::configuration::Issuer,
+    authentication: EndpointClientAuthentication<'_>,
+) -> Result<&'a crate::configuration::Client, HttpResponse> {
+    let EndpointClientAuthentication {
+        form_id,
+        form_secret,
+        client_assertion_type,
+        client_assertion,
+        realm,
+        endpoint_path,
+    } = authentication;
+    let (basic_id, basic_secret) = match basic_credentials(request) {
+        Ok(Some((id, secret))) => (Some(id), Some(secret)),
+        Ok(None) => (None, None),
+        Err(()) => return Err(invalid_client_response_for(realm)),
+    };
+    if basic_id.is_some() && form_id.is_some() && basic_id.as_deref() != form_id {
+        return Err(invalid_client_response_for(realm));
+    }
+    let client_id = basic_id.as_deref().or(form_id).unwrap_or_default();
+    let Some(client) = snapshot.client(client_id) else {
+        return Err(invalid_client_response_for(realm));
+    };
+    if client.authentication_method.as_deref() == Some("private_key_jwt") {
+        let valid_transport = basic_id.is_none()
+            && basic_secret.is_none()
+            && form_secret.is_none()
+            && form_id == Some(client.id.as_str())
+            && client_assertion_type
+                == Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
+        let Some(assertion) = client_assertion.filter(|_| valid_transport) else {
+            return Err(invalid_client_assertion_response());
+        };
+        let Some(jwks) = &client.jwks else {
+            return Err(invalid_client_assertion_response());
+        };
+        let issuer_url = issuer.url.trim_end_matches('/');
+        let expected_audience = format!("{issuer_url}{endpoint_path}");
+        let clock_skew = u64::try_from(issuer.token_policy.clock_skew).unwrap_or_default();
+        let verified = crate::tokens::verify_client_assertion(
+            assertion,
+            jwks,
+            &client.id,
+            &expected_audience,
+            clock_skew,
+            Utc::now().timestamp(),
+        )
+        .map_err(|_| invalid_client_assertion_response())?;
+        let replay_expires_at = verified
+            .expires_at
+            .saturating_add(i64::try_from(clock_skew).unwrap_or(i64::MAX));
+        let expires_at = DateTime::<Utc>::from_timestamp(replay_expires_at, 0)
+            .ok_or_else(invalid_client_assertion_response)?;
+        let Some(database) = database else {
+            return Err(oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "client authentication storage unavailable",
+            ));
+        };
+        return match database
+            .register_client_assertion(issuer_url, &client.id, &verified.jti, expires_at)
+            .await
+        {
+            Ok(true) => Ok(client),
+            Ok(false) => {
+                tracing::warn!(
+                    event = "client_assertion_replay",
+                    outcome = "rejected",
+                    client_id = %client.id,
+                    endpoint = endpoint_path,
+                    "client assertion replay rejected"
+                );
+                Err(invalid_client_assertion_response())
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to persist client assertion replay state");
+                Err(oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "client authentication storage unavailable",
+                ))
+            }
+        };
+    }
+    if client_assertion_type.is_some() || client_assertion.is_some() {
+        return Err(invalid_client_response_for(realm));
+    }
+    if !authenticate_client(
+        client,
+        basic_id.as_deref(),
+        basic_secret.as_deref(),
+        form_id,
+        form_secret,
+    ) {
+        return Err(invalid_client_response_for(realm));
+    }
+    Ok(client)
+}
+
+struct EndpointClientAuthentication<'a> {
+    form_id: Option<&'a str>,
+    form_secret: Option<&'a str>,
+    client_assertion_type: Option<&'a str>,
+    client_assertion: Option<&'a str>,
+    realm: &'a str,
+    endpoint_path: &'a str,
+}
+
+fn invalid_client_assertion_response() -> HttpResponse {
+    oauth_error(
+        StatusCode::UNAUTHORIZED,
+        "invalid_client",
+        "client assertion authentication failed",
+    )
+}
+
+fn invalid_client_response_for(realm: &str) -> HttpResponse {
     let mut response = oauth_error(
         StatusCode::UNAUTHORIZED,
         "invalid_client",
         "client authentication failed",
     );
-    response.headers_mut().insert(
-        actix_web::http::header::WWW_AUTHENTICATE,
-        actix_web::http::header::HeaderValue::from_static("Basic realm=\"token\""),
-    );
+    if let Ok(value) =
+        actix_web::http::header::HeaderValue::from_str(&format!("Basic realm=\"{realm}\""))
+    {
+        response
+            .headers_mut()
+            .insert(actix_web::http::header::WWW_AUTHENTICATE, value);
+    }
     response
 }
 
@@ -1416,22 +6854,79 @@ fn invalid_bearer_response() -> HttpResponse {
     response
 }
 
-fn consent_scopes(scopes: &[String]) -> Vec<String> {
+fn invalid_dpop_proof_response(description: &str) -> HttpResponse {
+    oauth_error(StatusCode::BAD_REQUEST, "invalid_dpop_proof", description)
+}
+
+fn invalid_dpop_access_response(error: &str, description: &str) -> HttpResponse {
+    let mut response = oauth_error(StatusCode::UNAUTHORIZED, error, description);
+    let challenge = format!("DPoP error=\"{error}\", algs=\"ES256 RS256\"");
+    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(&challenge) {
+        response
+            .headers_mut()
+            .insert(actix_web::http::header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+fn dpop_nonce_response(protected_resource: bool, nonce: &str) -> HttpResponse {
+    let mut response = if protected_resource {
+        invalid_dpop_access_response(
+            "use_dpop_nonce",
+            "the server requires a nonce in the DPoP proof",
+        )
+    } else {
+        oauth_error(
+            StatusCode::BAD_REQUEST,
+            "use_dpop_nonce",
+            "the authorization server requires a nonce in the DPoP proof",
+        )
+    };
+    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(nonce) {
+        response.headers_mut().insert(
+            actix_web::http::header::HeaderName::from_static("dpop-nonce"),
+            value,
+        );
+    }
+    response
+}
+
+fn consent_scopes(scopes: &[String], messages: &crate::configuration::UiMessages) -> Vec<String> {
     scopes
         .iter()
         .map(|scope| match scope.as_str() {
-            "openid" => "Confirm your identity".to_owned(),
-            "profile" => "View your name and profile information".to_owned(),
-            "email" => "View your email address".to_owned(),
-            scope => format!("Access {scope}"),
+            "openid" => messages.scope_openid.clone(),
+            "profile" => messages.scope_profile.clone(),
+            "email" => messages.scope_email.clone(),
+            "offline_access" => messages.scope_offline_access.clone(),
+            scope => format!("{} {scope}", messages.scope_custom_prefix),
         })
         .collect()
+}
+
+fn authorization_consent_required(
+    client: &crate::configuration::Client,
+    authorization: &AuthorizationRequest,
+) -> bool {
+    client.consent_required.unwrap_or(true)
+        || authorization.has_prompt("consent")
+        || authorization.requests_scope("offline_access")
+}
+
+fn normalized_scopes(scope: &str) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for value in scope.split_ascii_whitespace() {
+        if !scopes.iter().any(|scope| scope == value) {
+            scopes.push(value.to_owned());
+        }
+    }
+    scopes
 }
 
 fn verify_pkce(challenge: Option<&str>, verifier: Option<&str>) -> bool {
     match (challenge, verifier) {
         (None, None | Some("")) => true,
-        (Some(challenge), Some(verifier)) => {
+        (Some(challenge), Some(verifier)) if valid_pkce_verifier(verifier) => {
             let calculated = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
             constant_time_eq::constant_time_eq(challenge.as_bytes(), calculated.as_bytes())
         }
@@ -1439,31 +6934,89 @@ fn verify_pkce(challenge: Option<&str>, verifier: Option<&str>) -> bool {
     }
 }
 
+fn valid_pkce_verifier(verifier: &str) -> bool {
+    (43..=128).contains(&verifier.len())
+        && verifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
 fn secure_request(request: &HttpRequest) -> bool {
-    (forwarded_headers_trusted()
-        && request
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .is_some_and(|scheme| scheme.trim() == "https"))
-        || request.connection_info().scheme() == "https"
+    secure_request_with_proxy_trust(request, forwarded_headers_trusted())
+}
+
+fn secure_request_with_proxy_trust(request: &HttpRequest, trust_proxy_headers: bool) -> bool {
+    request.uri().scheme_str() == Some("https")
+        || (trust_proxy_headers
+            && request
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .is_some_and(|scheme| scheme.trim().eq_ignore_ascii_case("https")))
 }
 
 fn forwarded_headers_trusted() -> bool {
     std::env::var("TRUST_PROXY_HEADERS")
         .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         || std::env::var_os("VERCEL").is_some()
 }
 
-fn valid_csrf(request: &HttpRequest, submitted: &str) -> bool {
+fn authentication_remote_address(request: &HttpRequest, trust_proxy_headers: bool) -> String {
+    if trust_proxy_headers
+        && let Some(address) = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+    {
+        return address.to_string();
+    }
     request
-        .cookie("__Host-robine_csrf")
-        .or_else(|| request.cookie("robine_csrf"))
-        .is_some_and(|cookie| {
-            constant_time_eq::constant_time_eq(cookie.value().as_bytes(), submitted.as_bytes())
-        })
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn authentication_rate_limit_keys(remote_address: &str, identifier: Option<&str>) -> Vec<String> {
+    let mut keys = vec![format!("network:{remote_address}")];
+    if let Some(identifier) = identifier {
+        keys.push(format!("identifier:{}", identifier.to_lowercase()));
+    }
+    keys
+}
+
+fn valid_csrf(request: &HttpRequest, submitted: &str) -> bool {
+    if !valid_opaque_token(submitted) {
+        return false;
+    }
+    let cookie = if secure_request(request) {
+        request.cookie("__Host-robine_csrf")
+    } else {
+        request.cookie("robine_csrf")
+    };
+    cookie.is_some_and(|cookie| {
+        valid_opaque_token(cookie.value())
+            && constant_time_eq::constant_time_eq(cookie.value().as_bytes(), submitted.as_bytes())
+    })
+}
+
+fn valid_opaque_token(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_submitted_identifier(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_IDENTIFIER_BYTES
+}
+
+fn valid_submitted_password(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_BCRYPT_PASSWORD_BYTES
 }
 
 fn add_csrf_cookie(response: &mut HttpResponse, request: &HttpRequest, token: &str) {
@@ -1483,10 +7036,86 @@ fn add_csrf_cookie(response: &mut HttpResponse, request: &HttpRequest, token: &s
 }
 
 fn session_token(request: &HttpRequest) -> Option<String> {
-    request
-        .cookie("__Host-robine_session")
-        .or_else(|| request.cookie("robine_session"))
-        .map(|cookie| cookie.value().to_owned())
+    let cookie = if secure_request(request) {
+        request.cookie("__Host-robine_session")
+    } else {
+        request.cookie("robine_session")
+    };
+    cookie.map(|cookie| cookie.value().to_owned())
+}
+
+async fn invalid_existing_session(request: &HttpRequest, application: &Application) -> bool {
+    existing_session(request, application).await.clear_cookie
+}
+
+struct ExistingSession {
+    subject: Option<String>,
+    authenticated_at: Option<chrono::DateTime<Utc>>,
+    mfa_verified: bool,
+    clear_cookie: bool,
+    unavailable: bool,
+}
+
+async fn existing_session(request: &HttpRequest, application: &Application) -> ExistingSession {
+    let Some(session) = session_token(request) else {
+        return ExistingSession {
+            subject: None,
+            authenticated_at: None,
+            mfa_verified: false,
+            clear_cookie: false,
+            unavailable: false,
+        };
+    };
+    let Some(database) = application.database() else {
+        return ExistingSession {
+            subject: None,
+            authenticated_at: None,
+            mfa_verified: false,
+            clear_cookie: false,
+            unavailable: true,
+        };
+    };
+    let idle_timeout = application
+        .snapshot()
+        .configuration
+        .authentication
+        .session
+        .idle_timeout
+        .max(1);
+    match database
+        .validate_session_details(&session, idle_timeout)
+        .await
+    {
+        Ok(Some(validated)) => ExistingSession {
+            subject: Some(validated.subject),
+            authenticated_at: Some(validated.authenticated_at),
+            mfa_verified: validated.mfa_verified,
+            clear_cookie: false,
+            unavailable: false,
+        },
+        Ok(None) => ExistingSession {
+            subject: None,
+            authenticated_at: None,
+            mfa_verified: false,
+            clear_cookie: true,
+            unavailable: false,
+        },
+        Err(error) => {
+            tracing::error!(
+                event = "session_validation",
+                outcome = "failed",
+                %error,
+                "failed to validate existing browser session"
+            );
+            ExistingSession {
+                subject: None,
+                authenticated_at: None,
+                mfa_verified: false,
+                clear_cookie: false,
+                unavailable: true,
+            }
+        }
+    }
 }
 
 fn add_session_cookie(
@@ -1554,6 +7183,31 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> HttpRespon
     response
 }
 
+fn no_store_json_response(status: StatusCode, body: serde_json::Value) -> HttpResponse {
+    let mut response = json_response(status, body);
+    prevent_caching(&mut response);
+    response
+}
+
+fn prevent_caching(response: &mut HttpResponse) {
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::PRAGMA,
+        actix_web::http::header::HeaderValue::from_static("no-cache"),
+    );
+}
+
+fn redirect_response(location: impl Into<String>) -> HttpResponse {
+    HttpResponse::Found()
+        .insert_header((actix_web::http::header::LOCATION, location.into()))
+        .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .insert_header((actix_web::http::header::PRAGMA, "no-cache"))
+        .finish()
+}
+
 fn random_token() -> String {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
@@ -1601,13 +7255,20 @@ async fn not_found() -> impl Responder {
     json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}))
 }
 
-fn protocol_error(branding: &crate::configuration::Branding, message: &str) -> HttpResponse {
+fn protocol_error(
+    branding: &crate::configuration::Branding,
+    message: &str,
+    request_id: &str,
+) -> HttpResponse {
+    let messages = branding.messages(None);
     html_response(
         StatusCode::BAD_REQUEST,
         ProtocolErrorTemplate {
             product_name: &branding.product_name,
             primary_color: &branding.primary_color,
             message,
+            request_id,
+            messages: &messages,
             logo: branding.logo.as_deref(),
             favicon: branding.favicon.as_deref(),
             font_family: branding.font_family.as_deref(),
@@ -1620,6 +7281,8 @@ fn html_response(status: StatusCode, body: askama::Result<String>) -> HttpRespon
     match body {
         Ok(body) => HttpResponse::build(status)
             .content_type("text/html; charset=utf-8")
+            .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+            .insert_header((actix_web::http::header::PRAGMA, "no-cache"))
             .body(body),
         Err(error) => {
             tracing::error!(%error, "failed to render template");
@@ -1633,6 +7296,48 @@ fn html_response(status: StatusCode, body: askama::Result<String>) -> HttpRespon
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> HttpResponse {
     HttpResponse::build(status).json(body)
+}
+
+fn cacheable_json_response(request: &HttpRequest, body: serde_json::Value) -> HttpResponse {
+    let body = body.to_string();
+    let etag = format!("\"{}\"", hex::encode(Sha256::digest(body.as_bytes())));
+    let mut response = if request_etag_matches(request, &etag) {
+        HttpResponse::NotModified().finish()
+    } else {
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body)
+    };
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static(
+            "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
+        ),
+    );
+    if let Ok(etag) = actix_web::http::header::HeaderValue::from_str(&etag) {
+        response
+            .headers_mut()
+            .insert(actix_web::http::header::ETAG, etag);
+    }
+    response
+}
+
+fn request_etag_matches(request: &HttpRequest, etag: &str) -> bool {
+    for value in request
+        .headers()
+        .get_all(actix_web::http::header::IF_NONE_MATCH)
+    {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        if value.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1666,10 +7371,57 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn normalizes_only_unambiguous_device_user_codes() {
+        assert_eq!(
+            normalize_device_user_code("bcdf-ghjk"),
+            Some(("BCDFGHJK".to_owned(), "BCDF-GHJK".to_owned()))
+        );
+        assert_eq!(
+            normalize_device_user_code(" BCDF GHJK "),
+            Some(("BCDFGHJK".to_owned(), "BCDF-GHJK".to_owned()))
+        );
+        assert_eq!(normalize_device_user_code("BCDI-GHJK"), None);
+        assert_eq!(normalize_device_user_code("BCDF-GHJKX"), None);
+        assert_eq!(normalize_device_user_code("BCDF"), None);
+    }
+
+    #[actix_web::test]
+    async fn canonicalizes_only_trusted_forwarded_authentication_addresses() {
+        let trusted = test::TestRequest::default()
+            .peer_addr("10.0.0.8:1234".parse().unwrap())
+            .insert_header(("x-forwarded-for", "2001:0db8:0:0::1, 10.0.0.7"))
+            .to_http_request();
+        assert_eq!(authentication_remote_address(&trusted, true), "2001:db8::1");
+        assert_eq!(authentication_remote_address(&trusted, false), "10.0.0.8");
+
+        let malformed = test::TestRequest::default()
+            .peer_addr("10.0.0.9:1234".parse().unwrap())
+            .insert_header(("x-forwarded-for", "attacker-controlled-bucket"))
+            .to_http_request();
+        assert_eq!(authentication_remote_address(&malformed, true), "10.0.0.9");
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_keys_protect_network_and_normalized_identifier_independently() {
+        assert_eq!(
+            authentication_rate_limit_keys("192.0.2.10", Some("Admin@Example.COM")),
+            vec![
+                "network:192.0.2.10".to_owned(),
+                "identifier:admin@example.com".to_owned(),
+            ]
+        );
+        assert_eq!(
+            authentication_rate_limit_keys("192.0.2.10", None),
+            vec!["network:192.0.2.10".to_owned()]
+        );
+    }
+
+    #[actix_web::test]
     async fn serves_oidc_discovery() {
+        let application = application();
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(application()))
+                .app_data(web::Data::new(application.clone()))
                 .configure(configure),
         )
         .await;
@@ -1679,8 +7431,345 @@ mod tests {
         let response = test::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        let etag = response
+            .headers()
+            .get(actix_web::http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .expect("discovery ETag")
+            .to_owned();
+        assert!(
+            response
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("s-maxage=300"))
+        );
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["issuer"], "https://id.example/default");
+        assert_eq!(
+            body["introspection_endpoint"],
+            "https://id.example/default/introspect"
+        );
+        assert_eq!(
+            body["revocation_endpoint"],
+            "https://id.example/default/revoke"
+        );
+        assert_eq!(
+            body["introspection_endpoint_auth_methods_supported"],
+            json!([
+                "client_secret_basic",
+                "client_secret_post",
+                "private_key_jwt"
+            ])
+        );
+        assert_eq!(
+            body["response_modes_supported"],
+            json!(["query", "form_post", "jwt", "query.jwt", "form_post.jwt"])
+        );
+        assert_eq!(
+            body["authorization_signing_alg_values_supported"],
+            json!(["RS256"])
+        );
+        assert_eq!(
+            body["dpop_signing_alg_values_supported"],
+            json!(["ES256", "RS256"])
+        );
+        assert_eq!(
+            body["acr_values_supported"],
+            json!([crate::tokens::PASSWORD_ACR])
+        );
+        assert_eq!(body["ui_locales_supported"], json!(["en"]));
+        assert_eq!(body["claims_parameter_supported"], true);
+        assert_eq!(body["request_parameter_supported"], true);
+        assert_eq!(
+            body["request_object_signing_alg_values_supported"],
+            json!(["RS256"])
+        );
+        assert_eq!(body["request_uri_parameter_supported"], true);
+        assert_eq!(body["require_pushed_authorization_requests"], false);
+        assert_eq!(
+            body["pushed_authorization_request_endpoint"],
+            "https://id.example/default/par"
+        );
+        assert_eq!(body["authorization_response_iss_parameter_supported"], true);
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/default/.well-known/openid-configuration")
+                .insert_header((actix_web::http::header::IF_NONE_MATCH, format!("W/{etag}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some(etag.as_str())
+        );
+
+        let mut changed = application.snapshot().as_ref().clone();
+        changed.configuration.issuers[0]
+            .scopes
+            .push("email".to_owned());
+        changed.revision = "changed".to_owned();
+        assert_eq!(
+            application.activate_snapshot(changed),
+            crate::ReconciliationOutcome::Activated
+        );
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/default/.well-known/openid-configuration")
+                .insert_header((actix_web::http::header::IF_NONE_MATCH, etag.as_str()))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            response
+                .headers()
+                .get(actix_web::http::header::ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some(etag.as_str())
+        );
+
+        for uri in [
+            "/.well-known/oauth-authorization-server/default",
+            "/default/.well-known/oauth-authorization-server",
+        ] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let oauth_metadata: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(oauth_metadata["issuer"], "https://id.example/default");
+            assert_eq!(
+                oauth_metadata["authorization_response_iss_parameter_supported"],
+                true
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn requires_par_globally_or_for_a_selected_client_on_get_and_post() {
+        let mut snapshot = application().snapshot().as_ref().clone();
+        snapshot
+            .configuration
+            .clients
+            .push(crate::configuration::Client {
+                id: "par-required-client".to_owned(),
+                name: "PAR required".to_owned(),
+                client_type: "public".to_owned(),
+                redirect_uris: vec!["https://app.example/callback".to_owned()],
+                post_logout_redirect_uris: vec![],
+                resources: vec![],
+                scopes: vec!["openid".to_owned()],
+                grant_types: vec!["authorization_code".to_owned()],
+                pkce_required: None,
+                nonce_required: None,
+                consent_required: None,
+                introspection_allowed: false,
+                require_pushed_authorization_requests: true,
+                required_acr: None,
+                authentication_method: None,
+                secret_reference: None,
+                jwks: None,
+                branding: None,
+            });
+        let application = Application::without_database(snapshot);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application.clone()))
+                .configure(configure),
+        )
+        .await;
+        let form = serde_urlencoded::to_string([
+            ("response_type", "code"),
+            ("client_id", "par-required-client"),
+            ("redirect_uri", "https://app.example/callback"),
+            ("scope", "openid"),
+            ("state", "mandatory-par-state"),
+            ("nonce", "mandatory-par-nonce"),
+            (
+                "code_challenge",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("code_challenge_method", "S256"),
+        ])
+        .expect("authorization form");
+
+        for request in [
+            test::TestRequest::get()
+                .uri(&format!("/default/authorize?{form}"))
+                .to_request(),
+            test::TestRequest::post()
+                .uri("/default/authorize")
+                .insert_header((
+                    actix_web::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                ))
+                .set_payload(form.clone())
+                .to_request(),
+        ] {
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::FOUND);
+            let location = response
+                .headers()
+                .get(actix_web::http::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .expect("authorization error redirect");
+            assert!(location.contains("error=invalid_request"));
+            assert!(location.contains("state=mandatory-par-state"));
+        }
+
+        let mut globally_required = application.snapshot().as_ref().clone();
+        globally_required.configuration.clients[0].require_pushed_authorization_requests = false;
+        globally_required.configuration.issuers[0]
+            .token_policy
+            .require_pushed_authorization_requests = true;
+        globally_required.revision = "globally-required".to_owned();
+        assert_eq!(
+            application.activate_snapshot(globally_required),
+            crate::ReconciliationOutcome::Activated
+        );
+        let discovery = DiscoveryDocument::build(&application.snapshot(), "default")
+            .expect("mandatory PAR discovery");
+        assert!(discovery.require_pushed_authorization_requests);
+    }
+
+    #[actix_web::test]
+    async fn discovers_the_issuer_with_privacy_preserving_webfinger() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        for account in ["known", "not-a-configured-user"] {
+            let query = serde_urlencoded::to_string([
+                ("resource", format!("acct:{account}@id.example")),
+                ("rel", OIDC_ISSUER_REL.to_owned()),
+            ])
+            .expect("WebFinger query");
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(&format!("/.well-known/webfinger?{query}"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/jrd+json")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .and_then(|value| value.to_str().ok()),
+                Some("*")
+            );
+            let body: Value = test::read_body_json(response).await;
+            assert_eq!(body["subject"], format!("acct:{account}@id.example"));
+            assert_eq!(body["links"][0]["rel"], OIDC_ISSUER_REL);
+            assert_eq!(body["links"][0]["href"], "https://id.example/default");
+        }
+
+        let query = serde_urlencoded::to_string([
+            ("resource", "https://id.example/default/user"),
+            ("rel", "https://example.invalid/unrelated"),
+        ])
+        .expect("filtered WebFinger query");
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/.well-known/webfinger?{query}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["links"], json!([]));
+
+        let query = serde_urlencoded::to_string([("resource", "acct:user@other.example")])
+            .expect("unknown WebFinger query");
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/.well-known/webfinger?{query}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn keeps_unready_health_responses_non_sensitive() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/health/ready").to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body, json!({"status": "not_ready"}));
+    }
+
+    #[actix_web::test]
+    async fn rejects_unknown_discovery_issuers_with_a_standard_error() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/missing/.well-known/openid-configuration")
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "invalid_request");
+        assert!(!body.to_string().contains("default"));
+    }
+
+    #[actix_web::test]
+    async fn renders_the_request_reference_on_local_protocol_errors() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/default/authorize")
+            .insert_header(("x-request-id", "protocol_error.123"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("form_post body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 protocol error");
+        assert!(body.contains("id=\"protocol-error\""));
+        assert!(body.contains("protocol_error.123"));
+        assert!(body.contains("Return home"));
     }
 
     #[actix_web::test]
@@ -1694,6 +7783,13 @@ mod tests {
         let response =
             test::call_service(&app, test::TestRequest::get().uri("/docs").to_request()).await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
         let body = test::read_body(response).await;
         let body = String::from_utf8(body.to_vec()).expect("UTF-8 documentation");
         assert!(body.contains("Authorization Code with PKCE"));
@@ -1719,6 +7815,444 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("UTF-8 home page");
         assert!(body.contains("rel=\"icon\" href=\"/favicon.svg?rev=abc123\""));
         assert!(body.contains("--auth-font: Atkinson Hyperlegible, sans-serif"));
+    }
+
+    #[actix_web::test]
+    async fn renders_the_complete_requested_locale_on_the_login_page() {
+        let snapshot = Snapshot::load().expect("development configuration should load");
+        let branding = snapshot.branding(Some("default"), Some("development-client"));
+        let messages = branding.messages(Some("fr en"));
+        let body = LoginTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id: "default",
+            client_name: "Development Client",
+            transaction: "opaque-browser-authorization-transaction",
+            csrf_token: "csrf",
+            identifier: "admin@example.com",
+            has_error: false,
+            error: None,
+            messages: &messages,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+            support_url: branding.support_url.as_deref(),
+            privacy_url: branding.privacy_url.as_deref(),
+            terms_url: branding.terms_url.as_deref(),
+        }
+        .render()
+        .expect("localized login page");
+        assert!(body.contains("<html lang=\"fr\">"));
+        assert!(body.contains("Heureux de vous revoir"));
+        assert!(body.contains("Connectez-vous pour continuer avec"));
+        assert!(body.contains("data-show-label=\"Afficher\""));
+        assert!(!body.contains("name=\"login_hint\""));
+        assert!(body.contains("name=\"identifier\" type=\"text\" value=\"admin@example.com\""));
+        assert!(!body.contains("<nav class=\"legal-links\""));
+    }
+
+    #[actix_web::test]
+    async fn renders_an_accessible_secret_free_totp_challenge() {
+        let branding = Branding::default();
+        let messages = branding.messages(None);
+        let body = TotpTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            client_name: "Client <unsafe>",
+            transaction: "opaque-mfa-transaction",
+            form_action: "/default/authorize",
+            transaction_field: "mfa_transaction",
+            action_value: None,
+            csrf_token: "csrf",
+            has_error: false,
+            error: None,
+            messages: &messages,
+            logo: None,
+            favicon: None,
+            font_family: None,
+            support_url: None,
+            privacy_url: None,
+            terms_url: None,
+        }
+        .render()
+        .expect("TOTP template");
+        assert!(body.contains("autocomplete=\"one-time-code\""));
+        assert!(body.contains("inputmode=\"numeric\""));
+        assert!(body.contains("pattern=\"[0-9]{6}\""));
+        assert!(body.contains("name=\"mfa_transaction\" value=\"opaque-mfa-transaction\""));
+        assert!(!body.contains("Client <unsafe>"));
+        assert!(body.contains("Client &#60;unsafe&#62;"));
+        assert!(!body.to_ascii_lowercase().contains("secret"));
+    }
+
+    #[actix_web::test]
+    async fn accepts_a_form_serialized_authorization_request() {
+        let application = Application::without_database(
+            Snapshot::load().expect("development configuration should load"),
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/authorize")
+                .set_form([
+                    ("response_type", "code"),
+                    ("client_id", "development-client"),
+                    ("redirect_uri", "http://localhost:4002/callback"),
+                    ("scope", "openid profile email"),
+                    ("state", "post-state"),
+                    ("nonce", "post-nonce"),
+                    (
+                        "code_challenge",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                    ("code_challenge_method", "S256"),
+                    ("acr_values", crate::configuration::MFA_ACR),
+                    (
+                        "claims",
+                        r#"{"id_token":{"acr":{"essential":true,"value":"urn:robine-id:acr:password+totp"}}}"#,
+                    ),
+                    ("future_extension", "ignored"),
+                ])
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "temporarily_unavailable");
+    }
+
+    #[actix_web::test]
+    async fn applies_optional_nonce_and_request_object_rules_to_authorization_post() {
+        let application = Application::without_database(
+            Snapshot::load().expect("development configuration should load"),
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/authorize")
+                .set_form([
+                    ("response_type", "code"),
+                    ("client_id", "penpot"),
+                    (
+                        "redirect_uri",
+                        "https://penpot.base59.dev/api/auth/oidc/callback",
+                    ),
+                    ("scope", "openid profile email"),
+                    ("state", "nonce-optional"),
+                ])
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "temporarily_unavailable");
+
+        for (parameter, value, expected_error) in [
+            (
+                "request",
+                "header.payload.signature",
+                "invalid_request_object",
+            ),
+            (
+                "request_uri",
+                "https://client.example/request.jwt",
+                "request_uri_not_supported",
+            ),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/default/authorize")
+                    .set_form(vec![
+                        ("response_type", "code"),
+                        ("client_id", "development-client"),
+                        ("redirect_uri", "http://localhost:4002/callback"),
+                        ("scope", "openid profile email"),
+                        ("state", "unsupported-request"),
+                        ("nonce", "nonce"),
+                        (
+                            "code_challenge",
+                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        ),
+                        ("code_challenge_method", "S256"),
+                        (parameter, value),
+                    ])
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FOUND);
+            let location = response
+                .headers()
+                .get(actix_web::http::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .expect("authorization error redirect");
+            assert!(location.contains(&format!("error={expected_error}")));
+            assert!(location.contains("state=unsupported-request"));
+            assert!(location.contains("iss=https%3A%2F%2Fid.base59.dev%2Fdefault"));
+        }
+    }
+
+    #[actix_web::test]
+    async fn rejects_duplicate_defined_oauth_parameters() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/token")
+                .insert_header((
+                    actix_web::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                ))
+                .set_payload("grant_type=authorization_code&grant_type=refresh_token")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "invalid_request");
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/default/authorize?response_type=code&response_type=token&client_id=development-client&redirect_uri=http%3A%2F%2Flocalhost%3A4002%2Fcallback&scope=openid&state=duplicate&nonce=nonce&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn exposes_user_info_through_get_and_post() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        for request in [
+            test::TestRequest::get()
+                .uri("/default/userinfo")
+                .to_request(),
+            test::TestRequest::post()
+                .uri("/default/userinfo")
+                .to_request(),
+        ] {
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer error=\"invalid_token\"")
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn allows_user_info_cors_only_for_registered_client_origins() {
+        let application = Application::without_database(
+            Snapshot::load().expect("development configuration should load"),
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::default()
+                .method(actix_web::http::Method::OPTIONS)
+                .uri("/default/userinfo")
+                .insert_header(("origin", "http://localhost:4002"))
+                .insert_header(("access-control-request-method", "GET"))
+                .insert_header(("access-control-request-headers", "authorization, dpop"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:4002")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .and_then(|value| value.to_str().ok()),
+            Some("Authorization, Content-Type, DPoP")
+        );
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::default()
+                .method(actix_web::http::Method::OPTIONS)
+                .uri("/default/userinfo")
+                .insert_header(("origin", "https://attacker.example"))
+                .insert_header(("access-control-request-method", "POST"))
+                .insert_header(("access-control-request-headers", "authorization"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[actix_web::test]
+    async fn allows_token_and_par_cors_only_for_registered_public_client_origins() {
+        let application = Application::without_database(
+            Snapshot::load().expect("development configuration should load"),
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+
+        for endpoint in ["token", "par"] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri(&format!("/default/{endpoint}"))
+                    .insert_header(("origin", "http://localhost:4002"))
+                    .insert_header(("access-control-request-method", "POST"))
+                    .insert_header(("access-control-request-headers", "content-type, dpop"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .and_then(|value| value.to_str().ok()),
+                Some("http://localhost:4002")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("access-control-allow-methods")
+                    .and_then(|value| value.to_str().ok()),
+                Some("POST")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("access-control-allow-headers")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Content-Type, DPoP")
+            );
+        }
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/token")
+                .insert_header(("origin", "http://localhost:4002"))
+                .insert_header((
+                    actix_web::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                ))
+                .set_payload(
+                    "grant_type=authorization_code&code=missing&client_id=rust-development-client&redirect_uri=http%3A%2F%2Flocalhost%3A4002%2Fcallback&code_verifier=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:4002")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .and_then(|value| value.to_str().ok()),
+            Some("DPoP-Nonce")
+        );
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/par")
+                .insert_header(("origin", "http://localhost:4002"))
+                .set_form([
+                    ("response_type", "code"),
+                    ("client_id", "rust-development-client"),
+                    ("redirect_uri", "http://localhost:4002/callback"),
+                    ("scope", "openid profile email"),
+                    ("state", "browser-par"),
+                    ("nonce", "browser-par"),
+                    (
+                        "code_challenge",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                    ("code_challenge_method", "S256"),
+                ])
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:4002")
+        );
+
+        for endpoint in ["token", "par"] {
+            for origin in ["https://penpot.base59.dev", "https://attacker.example"] {
+                let response = test::call_service(
+                    &app,
+                    test::TestRequest::default()
+                        .method(actix_web::http::Method::OPTIONS)
+                        .uri(&format!("/default/{endpoint}"))
+                        .insert_header(("origin", origin))
+                        .insert_header(("access-control-request-method", "POST"))
+                        .insert_header(("access-control-request-headers", "content-type"))
+                        .to_request(),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+        }
     }
 
     #[actix_web::test]
@@ -1766,6 +8300,626 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn accepts_only_the_cookie_name_for_the_request_security_context() {
+        let insecure_csrf = "i".repeat(43);
+        let secure_csrf = "s".repeat(43);
+        let loopback_csrf = "l".repeat(43);
+        let secure_with_fallback = test::TestRequest::get()
+            .uri("https://id.example/default/authorize")
+            .cookie(Cookie::new("robine_session", "insecure-session"))
+            .cookie(Cookie::new("robine_csrf", insecure_csrf.clone()))
+            .to_http_request();
+        assert_eq!(session_token(&secure_with_fallback), None);
+        assert!(!valid_csrf(&secure_with_fallback, &insecure_csrf));
+
+        let secure = test::TestRequest::get()
+            .uri("https://id.example/default/authorize")
+            .cookie(Cookie::new("__Host-robine_session", "secure-session"))
+            .cookie(Cookie::new("__Host-robine_csrf", secure_csrf.clone()))
+            .to_http_request();
+        assert_eq!(session_token(&secure).as_deref(), Some("secure-session"));
+        assert!(valid_csrf(&secure, &secure_csrf));
+
+        let loopback = test::TestRequest::get()
+            .uri("/default/authorize")
+            .cookie(Cookie::new("robine_session", "loopback-session"))
+            .cookie(Cookie::new("robine_csrf", loopback_csrf.clone()))
+            .to_http_request();
+        assert_eq!(
+            session_token(&loopback).as_deref(),
+            Some("loopback-session")
+        );
+        assert!(valid_csrf(&loopback, &loopback_csrf));
+        assert!(!valid_csrf(&loopback, ""));
+        assert!(!valid_csrf(&loopback, "short"));
+
+        let spoofed_proxy = test::TestRequest::get()
+            .uri("/default/authorize")
+            .insert_header(("x-forwarded-proto", "https"))
+            .to_http_request();
+        assert!(!secure_request_with_proxy_trust(&spoofed_proxy, false));
+        assert!(secure_request_with_proxy_trust(&spoofed_proxy, true));
+    }
+
+    #[actix_web::test]
+    async fn accepts_exactly_one_well_formed_access_token_credential() {
+        let valid = test::TestRequest::get()
+            .insert_header(("authorization", "bearer opaque-token"))
+            .to_http_request();
+        assert_eq!(bearer_token(&valid), Some("opaque-token"));
+
+        let dpop = test::TestRequest::get()
+            .insert_header(("authorization", "DPoP bound-token"))
+            .to_http_request();
+        assert_eq!(
+            access_token_credential(&dpop),
+            Some(("DPoP", "bound-token"))
+        );
+        assert_eq!(bearer_token(&dpop), None);
+
+        let extra_part = test::TestRequest::get()
+            .insert_header(("authorization", "Bearer opaque-token unexpected"))
+            .to_http_request();
+        assert_eq!(bearer_token(&extra_part), None);
+
+        let multiple = test::TestRequest::get()
+            .append_header(("authorization", "Bearer first"))
+            .append_header(("authorization", "Bearer second"))
+            .to_http_request();
+        assert_eq!(bearer_token(&multiple), None);
+    }
+
+    #[actix_web::test]
+    async fn returns_standard_dpop_nonce_challenges() {
+        let authorization_server = dpop_nonce_response(false, "fresh-as-nonce");
+        assert_eq!(authorization_server.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            authorization_server
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|value| value.to_str().ok()),
+            Some("fresh-as-nonce")
+        );
+
+        let resource_server = dpop_nonce_response(true, "fresh-resource-nonce");
+        assert_eq!(resource_server.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resource_server
+                .headers()
+                .get(actix_web::http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("DPoP error=\"use_dpop_nonce\", algs=\"ES256 RS256\"")
+        );
+        assert_eq!(
+            resource_server
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|value| value.to_str().ok()),
+            Some("fresh-resource-nonce")
+        );
+    }
+
+    #[actix_web::test]
+    async fn accepts_one_case_insensitive_form_encoded_basic_credential() {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode("client%3Aid:secret%3Awith%2Bcharacters");
+        let valid = test::TestRequest::post()
+            .insert_header(("authorization", format!("bAsIc {encoded}")))
+            .to_http_request();
+        assert_eq!(
+            basic_credentials(&valid),
+            Ok(Some((
+                "client:id".to_owned(),
+                "secret:with+characters".to_owned()
+            )))
+        );
+
+        let malformed = test::TestRequest::post()
+            .insert_header(("authorization", "Digest value"))
+            .to_http_request();
+        assert_eq!(basic_credentials(&malformed), Err(()));
+
+        let multiple = test::TestRequest::post()
+            .append_header(("authorization", "Basic Y2xpZW50OnNlY3JldA=="))
+            .append_header(("authorization", "Basic Y2xpZW50OnNlY3JldA=="))
+            .to_http_request();
+        assert_eq!(basic_credentials(&multiple), Err(()));
+    }
+
+    #[actix_web::test]
+    async fn rejects_a_malformed_authorization_header_at_the_token_endpoint() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::post()
+            .uri("/default/token")
+            .insert_header(("authorization", "Digest untrusted"))
+            .set_form([
+                ("grant_type", "authorization_code"),
+                ("code", "untrusted"),
+                ("client_id", "development-client"),
+                ("redirect_uri", "http://127.0.0.1:4000/callback"),
+                (
+                    "code_verifier",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+            ])
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic realm=\"token\"")
+        );
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "invalid_client");
+    }
+
+    #[actix_web::test]
+    async fn protects_token_status_endpoints_with_client_authentication() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        for (path, realm) in [
+            ("/default/introspect", "introspection"),
+            ("/default/revoke", "revocation"),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(path)
+                    .set_form([("token", "opaque-token"), ("client_id", "unknown")])
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok()),
+                Some(format!("Basic realm=\"{realm}\"").as_str())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn returns_an_oauth_error_for_an_incomplete_token_form() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::post()
+            .uri("/default/token")
+            .set_form([("grant_type", "authorization_code")])
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], "invalid_request");
+    }
+
+    #[actix_web::test]
+    async fn returns_a_correlated_page_for_an_incomplete_browser_form() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::post()
+            .uri("/default/authorize")
+            .insert_header(("x-request-id", "malformed_form.123"))
+            .set_form([("client_id", "development-client")])
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = test::read_body(response).await;
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 protocol error");
+        assert!(body.contains("The submitted form is incomplete or malformed"));
+        assert!(body.contains("malformed_form.123"));
+    }
+
+    #[actix_web::test]
+    async fn rejects_pkce_verifiers_outside_the_rfc7636_shape() {
+        let short = "short";
+        let short_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(short.as_bytes()));
+        assert!(!verify_pkce(Some(&short_challenge), Some(short)));
+
+        let valid = "a".repeat(43);
+        let valid_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(valid.as_bytes()));
+        assert!(verify_pkce(Some(&valid_challenge), Some(&valid)));
+    }
+
+    #[actix_web::test]
+    async fn normalizes_repeated_requested_scopes_as_a_set() {
+        assert_eq!(
+            normalized_scopes("openid profile openid email profile"),
+            vec!["openid", "profile", "email"]
+        );
+    }
+
+    #[actix_web::test]
+    async fn renders_a_cache_disabled_form_post_response_with_a_narrow_csp() {
+        let branding = Branding::default();
+        let mut response = authorization_client_response(
+            "https://app.example/callback?existing=1",
+            Some("form_post"),
+            &[
+                ("code", "code<&>"),
+                ("state", "state-value"),
+                ("iss", "https://id.example/default"),
+            ],
+            &branding,
+            None,
+        )
+        .await
+        .expect("form_post response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let dynamic_csp = response
+            .headers()
+            .get(actix_web::http::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("dynamic form-action CSP")
+            .to_owned();
+        assert!(dynamic_csp.contains("form-action https://app.example;"));
+        assert!(!dynamic_csp.contains("code<&>"));
+        secure(&mut response);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_SECURITY_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some(dynamic_csp.as_str())
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("form_post body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 form_post page");
+        assert!(body.contains("action=\"https://app.example/callback?existing=1\""));
+        assert!(body.contains("name=\"code\""));
+        assert!(!body.contains("value=\"code<&>\""));
+        assert!(body.contains("name=\"state\" value=\"state-value\""));
+        assert!(body.contains("data-auto-submit"));
+    }
+
+    #[actix_web::test]
+    async fn keeps_query_as_the_default_authorization_response_mode() {
+        let response = authorization_client_response(
+            "https://app.example/callback?existing=1",
+            None,
+            &[("code", "code-value"), ("state", "state-value")],
+            &Branding::default(),
+            None,
+        )
+        .await
+        .expect("query response");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(actix_web::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("existing=1"));
+        assert!(location.contains("code=code-value"));
+        assert!(location.contains("state=state-value"));
+    }
+
+    #[actix_web::test]
+    async fn offline_access_always_requires_explicit_consent() {
+        let client = crate::configuration::Client {
+            id: "offline-client".to_owned(),
+            name: "Offline client".to_owned(),
+            client_type: "public".to_owned(),
+            redirect_uris: vec!["https://app.example/callback".to_owned()],
+            post_logout_redirect_uris: vec![],
+            resources: vec![],
+            scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
+            grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+            pkce_required: Some(true),
+            nonce_required: Some(true),
+            consent_required: Some(false),
+            introspection_allowed: false,
+            require_pushed_authorization_requests: false,
+            required_acr: None,
+            authentication_method: Some("none".to_owned()),
+            secret_reference: None,
+            jwks: None,
+            branding: None,
+        };
+        let mut request = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: client.id.clone(),
+            redirect_uri: client.redirect_uris[0].clone(),
+            scope: "openid offline_access".to_owned(),
+            state: "state".to_owned(),
+            nonce: "nonce".to_owned(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
+            prompt: None,
+            max_age: None,
+            response_mode: None,
+            resource: None,
+            request_object: None,
+            request_uri: None,
+            login_hint: None,
+            acr_values: None,
+            claims: None,
+            dpop_jkt: None,
+        };
+
+        assert!(authorization_consent_required(&client, &request));
+        request.scope = "openid".to_owned();
+        assert!(!authorization_consent_required(&client, &request));
+        request.prompt = Some("consent".to_owned());
+        assert!(authorization_consent_required(&client, &request));
+
+        assert!(authentication_context_satisfies(&client, false));
+        assert!(authorization_authentication_context_satisfies(
+            &client, &request, false
+        ));
+        let mut mfa_client = client.clone();
+        mfa_client.required_acr = Some(crate::configuration::MFA_ACR.to_owned());
+        assert!(!authentication_context_satisfies(&mfa_client, false));
+        assert!(authentication_context_satisfies(&mfa_client, true));
+        request.claims = Some(
+            json!({"id_token": {"acr": {"essential": true, "value": crate::configuration::MFA_ACR}}})
+                .to_string(),
+        );
+        assert!(authorization_requires_mfa(&client, &request));
+        assert!(!authorization_authentication_context_satisfies(
+            &client, &request, false
+        ));
+        assert!(authorization_authentication_context_satisfies(
+            &client, &request, true
+        ));
+    }
+
+    #[actix_web::test]
+    async fn enforces_essential_id_token_and_userinfo_claim_values() {
+        let mut snapshot = application().snapshot().as_ref().clone();
+        snapshot.configuration.issuers[0]
+            .scopes
+            .push("profile".to_owned());
+        snapshot.configuration.claims.insert(
+            "department".to_owned(),
+            crate::configuration::ClaimMapping {
+                source: "department".to_owned(),
+                scope: "profile".to_owned(),
+            },
+        );
+        let user = crate::configuration::User {
+            id: "user-1".to_owned(),
+            identifier: "user@example.com".to_owned(),
+            password_hash: "unused".to_owned(),
+            totp_secret_reference: None,
+            name: None,
+            email: None,
+            claims: serde_json::Map::from_iter([("department".to_owned(), json!("engineering"))]),
+        };
+        let mut authorization = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: "web".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid profile".to_owned(),
+            state: "state".to_owned(),
+            nonce: "nonce".to_owned(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
+            prompt: None,
+            max_age: None,
+            response_mode: None,
+            resource: None,
+            request_object: None,
+            request_uri: None,
+            login_hint: None,
+            acr_values: None,
+            claims: Some(
+                json!({
+                    "id_token": {"auth_time": {"essential": true}},
+                    "userinfo": {"department": {"essential": true, "value": "engineering"}}
+                })
+                .to_string(),
+            ),
+            dpop_jkt: None,
+        };
+        assert!(essential_claims_satisfied(
+            &snapshot,
+            "default",
+            &authorization,
+            &user,
+            1_700_000_000,
+            false,
+        ));
+
+        authorization.claims = Some(
+            json!({"userinfo": {"department": {"essential": true, "value": "finance"}}})
+                .to_string(),
+        );
+        assert!(!essential_claims_satisfied(
+            &snapshot,
+            "default",
+            &authorization,
+            &user,
+            1_700_000_000,
+            false,
+        ));
+    }
+
+    #[actix_web::test]
+    async fn merges_only_identical_outer_request_object_parameters() {
+        let signed = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: "signed-client".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid profile".to_owned(),
+            state: "signed-state".to_owned(),
+            nonce: "signed-nonce".to_owned(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: Some("fr".to_owned()),
+            prompt: None,
+            max_age: None,
+            response_mode: Some("form_post".to_owned()),
+            resource: Some("https://api.example/resource".to_owned()),
+            request_object: None,
+            request_uri: None,
+            login_hint: None,
+            acr_values: Some(crate::configuration::MFA_ACR.to_owned()),
+            claims: Some(json!({"id_token": {"acr": {"essential": true}}}).to_string()),
+            dpop_jkt: Some("A".repeat(43)),
+        };
+        let mut outer = AuthorizationRequest {
+            response_type: String::new(),
+            client_id: "signed-client".to_owned(),
+            redirect_uri: String::new(),
+            scope: String::new(),
+            state: String::new(),
+            nonce: String::new(),
+            code_challenge: None,
+            code_challenge_method: None,
+            ui_locales: None,
+            prompt: None,
+            max_age: None,
+            response_mode: None,
+            resource: None,
+            request_object: Some("signed.jwt".to_owned()),
+            request_uri: None,
+            login_hint: None,
+            acr_values: None,
+            claims: None,
+            dpop_jkt: None,
+        };
+        let merged = merge_signed_authorization_request(&outer, signed.clone())
+            .expect("request-object-only outer parameters");
+        assert_eq!(merged.state, "signed-state");
+        assert!(merged.request_object.is_none());
+        assert_eq!(
+            merged.dpop_jkt.as_deref(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+        assert_eq!(
+            merged.acr_values.as_deref(),
+            Some(crate::configuration::MFA_ACR)
+        );
+        assert_eq!(merged.claims, signed.claims);
+
+        outer.scope = signed.scope.clone();
+        assert!(merge_signed_authorization_request(&outer, signed.clone()).is_some());
+        outer.dpop_jkt = Some("B".repeat(43));
+        assert!(merge_signed_authorization_request(&outer, signed.clone()).is_none());
+        outer.dpop_jkt = None;
+        outer.acr_values = Some(crate::configuration::PASSWORD_ACR.to_owned());
+        assert!(merge_signed_authorization_request(&outer, signed.clone()).is_none());
+        outer.acr_values = None;
+        outer.claims = Some(
+            "{ \"id_token\": { \"acr\": { \"essential\": true } } }".to_owned(),
+        );
+        assert!(merge_signed_authorization_request(&outer, signed.clone()).is_some());
+        outer.claims = Some(json!({"id_token": {"sub": null}}).to_string());
+        assert!(merge_signed_authorization_request(&outer, signed.clone()).is_none());
+        outer.claims = None;
+        outer.scope = "openid email".to_owned();
+        assert!(merge_signed_authorization_request(&outer, signed).is_none());
+    }
+
+    #[actix_web::test]
+    async fn preserves_acr_values_and_claims_in_pushed_authorization_requests() {
+        let form = serde_urlencoded::from_str::<PushedAuthorizationForm>(
+            "response_type=code&client_id=web&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&scope=openid&state=state&nonce=nonce&acr_values=urn%3Arobine-id%3Aacr%3Apassword%2Btotp&claims=%7B%22id_token%22%3A%7B%22acr%22%3A%7B%22essential%22%3Atrue%7D%7D%7D",
+        )
+        .expect("PAR form");
+        let (request, _, _, _) = form.into_request();
+        assert_eq!(
+            request.acr_values.as_deref(),
+            Some(crate::configuration::MFA_ACR)
+        );
+        assert_eq!(
+            request.claims.as_deref(),
+            Some(r#"{"id_token":{"acr":{"essential":true}}}"#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn login_errors_preserve_only_the_non_sensitive_identifier() {
+        let branding = Branding::default();
+        let messages = branding.messages(None);
+        let body = LoginTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id: "default",
+            client_name: "Client",
+            transaction: "opaque-browser-authorization-transaction",
+            csrf_token: "csrf",
+            identifier: "admin@example.com",
+            has_error: true,
+            error: Some("The email or password is incorrect."),
+            messages: &messages,
+            logo: None,
+            favicon: None,
+            font_family: None,
+            support_url: None,
+            privacy_url: None,
+            terms_url: None,
+        }
+        .render()
+        .expect("login template");
+
+        assert!(body.contains("value=\"admin@example.com\""));
+        assert!(body.contains("name=\"identifier\" type=\"text\""));
+        assert!(body.contains("id=\"login-error\""));
+        assert!(
+            body.contains(
+                "name=\"transaction\" value=\"opaque-browser-authorization-transaction\""
+            )
+        );
+        assert!(!body.contains("name=\"client_id\""));
+        assert!(!body.contains("name=\"redirect_uri\""));
+        assert!(!body.contains("name=\"state\""));
+        assert!(!body.contains("name=\"dpop_jkt\""));
+        assert!(body.contains("aria-invalid=\"true\""));
+        assert!(!body.contains("value=\"change-me\""));
+    }
+
+    #[actix_web::test]
     async fn security_headers_include_a_correlation_identifier() {
         let mut response = HttpResponse::Ok().finish();
         secure(&mut response);
@@ -1778,23 +8932,37 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-referrer")
         );
+        let redirect = redirect_response("https://app.example/callback?code=sensitive");
+        assert_eq!(
+            redirect
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
     }
 
     #[actix_web::test]
     async fn enforces_the_configured_confidential_client_secret_transport() {
+        let expected_secret = std::env::var("PATH").expect("test process PATH");
         let client = crate::configuration::Client {
             id: "confidential".to_owned(),
             name: "Confidential".to_owned(),
             client_type: "confidential".to_owned(),
             redirect_uris: vec!["https://app.example/callback".to_owned()],
             post_logout_redirect_uris: vec![],
+            resources: vec![],
             scopes: vec!["openid".to_owned()],
             grant_types: vec!["authorization_code".to_owned()],
             pkce_required: Some(false),
             nonce_required: Some(false),
             consent_required: Some(false),
+            introspection_allowed: false,
+            require_pushed_authorization_requests: false,
+            required_acr: None,
             authentication_method: Some("client_secret_post".to_owned()),
-            secret_reference: Some(json!("correct-secret")),
+            secret_reference: Some(json!({"provider": "env", "key": "PATH"})),
+            jwks: None,
             branding: None,
         };
 
@@ -1803,12 +8971,12 @@ mod tests {
             None,
             None,
             Some("confidential"),
-            Some("correct-secret")
+            Some(&expected_secret)
         ));
         assert!(!authenticate_client(
             &client,
             Some("confidential"),
-            Some("correct-secret"),
+            Some(&expected_secret),
             None,
             None
         ));
@@ -1826,15 +8994,44 @@ mod tests {
                 identifier: "subject@example.test".to_owned(),
                 password_hash: "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa"
                     .to_owned(),
+                totp_secret_reference: None,
                 name: None,
                 email: None,
                 claims: Default::default(),
+            });
+        snapshot
+            .configuration
+            .clients
+            .push(crate::configuration::Client {
+                id: "client".to_owned(),
+                name: "Client".to_owned(),
+                client_type: "public".to_owned(),
+                redirect_uris: vec!["https://app.example/callback".to_owned()],
+                post_logout_redirect_uris: vec![],
+                resources: vec![],
+                scopes: vec!["openid".to_owned()],
+                grant_types: vec!["authorization_code".to_owned()],
+                pkce_required: None,
+                nonce_required: None,
+                consent_required: None,
+                introspection_allowed: false,
+                require_pushed_authorization_requests: false,
+                required_acr: None,
+                authentication_method: None,
+                secret_reference: None,
+                jwks: None,
+                branding: None,
             });
         let mut grant = AccessGrant {
             issuer: "https://other.example/default".to_owned(),
             subject: "subject".to_owned(),
             client_id: "client".to_owned(),
             scopes: vec!["openid".to_owned()],
+            grant_type: "authorization_code".to_owned(),
+            resource: None,
+            dpop_jkt: None,
+            auth_time: Some(Utc::now().timestamp()),
+            mfa_verified: false,
             claims: json!({}),
             expires_at: Utc::now() + Duration::minutes(5),
         };
@@ -1842,5 +9039,223 @@ mod tests {
         assert!(!valid_user_info_grant(&snapshot, "default", &grant));
         grant.issuer = "https://id.example/default".to_owned();
         assert!(valid_user_info_grant(&snapshot, "default", &grant));
+        snapshot
+            .configuration
+            .clients
+            .retain(|client| client.id != "client");
+        assert!(!valid_user_info_grant(&snapshot, "default", &grant));
+    }
+
+    #[actix_web::test]
+    async fn invalidates_service_grants_when_the_active_policy_changes() {
+        let base = application();
+        let mut snapshot = (*base.snapshot()).clone();
+        snapshot.configuration.issuers[0]
+            .scopes
+            .push("service.read".to_owned());
+        snapshot
+            .configuration
+            .clients
+            .push(crate::configuration::Client {
+                id: "service".to_owned(),
+                name: "Service".to_owned(),
+                client_type: "confidential".to_owned(),
+                redirect_uris: vec![],
+                post_logout_redirect_uris: vec![],
+                resources: vec!["https://api.example/resource".to_owned()],
+                scopes: vec!["service.read".to_owned()],
+                grant_types: vec!["client_credentials".to_owned()],
+                pkce_required: None,
+                nonce_required: None,
+                consent_required: None,
+                introspection_allowed: false,
+                require_pushed_authorization_requests: false,
+                required_acr: None,
+                authentication_method: Some("client_secret_basic".to_owned()),
+                secret_reference: Some(json!({"provider": "env", "key": "SERVICE_SECRET"})),
+                jwks: None,
+                branding: None,
+            });
+        let grant = crate::database::IntrospectionGrant {
+            issuer: "https://id.example/default".to_owned(),
+            subject: "service".to_owned(),
+            client_id: "service".to_owned(),
+            scopes: vec!["service.read".to_owned()],
+            grant_type: "client_credentials".to_owned(),
+            resource: Some("https://api.example/resource".to_owned()),
+            dpop_jkt: None,
+            auth_time: None,
+            mfa_verified: false,
+            expires_at: Utc::now() + Duration::minutes(5),
+            issued_at: Utc::now(),
+        };
+
+        assert!(active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &grant
+        ));
+        snapshot
+            .configuration
+            .clients
+            .iter_mut()
+            .find(|client| client.id == "service")
+            .expect("service client")
+            .resources
+            .clear();
+        assert!(!active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &grant
+        ));
+        snapshot
+            .configuration
+            .clients
+            .iter_mut()
+            .find(|client| client.id == "service")
+            .expect("service client")
+            .resources
+            .push("https://api.example/resource".to_owned());
+        snapshot
+            .configuration
+            .clients
+            .iter_mut()
+            .find(|client| client.id == "service")
+            .expect("service client")
+            .grant_types
+            .clear();
+        assert!(!active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &grant
+        ));
+    }
+
+    #[actix_web::test]
+    async fn validates_token_exchange_subjects_against_current_policy() {
+        let base = application();
+        let mut snapshot = (*base.snapshot()).clone();
+        snapshot.configuration.issuers[0]
+            .scopes
+            .push("service.read".to_owned());
+        snapshot
+            .configuration
+            .clients
+            .push(crate::configuration::Client {
+                id: "broker".to_owned(),
+                name: "Broker".to_owned(),
+                client_type: "confidential".to_owned(),
+                redirect_uris: vec![],
+                post_logout_redirect_uris: vec![],
+                resources: vec!["https://api.example/resource".to_owned()],
+                scopes: vec!["service.read".to_owned()],
+                grant_types: vec![
+                    "client_credentials".to_owned(),
+                    TOKEN_EXCHANGE_GRANT.to_owned(),
+                ],
+                pkce_required: None,
+                nonce_required: None,
+                consent_required: None,
+                introspection_allowed: true,
+                require_pushed_authorization_requests: false,
+                required_acr: None,
+                authentication_method: Some("client_secret_basic".to_owned()),
+                secret_reference: Some(json!({"provider": "env", "key": "BROKER_SECRET"})),
+                jwks: None,
+                branding: None,
+            });
+        let issuer = snapshot.issuer("default").expect("issuer");
+        let client = snapshot.client("broker").expect("client");
+        let mut subject = AccessGrant {
+            issuer: issuer.url.clone(),
+            subject: client.id.clone(),
+            client_id: client.id.clone(),
+            scopes: vec!["service.read".to_owned()],
+            grant_type: "client_credentials".to_owned(),
+            resource: Some("https://api.example/resource".to_owned()),
+            dpop_jkt: None,
+            auth_time: None,
+            mfa_verified: false,
+            claims: json!({}),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+
+        assert!(active_token_exchange_subject(
+            &snapshot, issuer, client, &subject
+        ));
+        subject.resource = Some("https://unregistered.example/resource".to_owned());
+        assert!(!active_token_exchange_subject(
+            &snapshot, issuer, client, &subject
+        ));
+        subject.resource = Some("https://api.example/resource".to_owned());
+        subject.grant_type = TOKEN_EXCHANGE_GRANT.to_owned();
+        assert!(active_token_exchange_subject(
+            &snapshot, issuer, client, &subject
+        ));
+
+        snapshot
+            .configuration
+            .clients
+            .last_mut()
+            .expect("broker")
+            .grant_types
+            .retain(|grant| grant != TOKEN_EXCHANGE_GRANT);
+        assert!(!active_token_exchange_subject(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            snapshot.client("broker").expect("client"),
+            &subject
+        ));
+    }
+
+    #[actix_web::test]
+    async fn bounds_submitted_credentials_by_utf8_byte_length() {
+        assert!(valid_submitted_identifier("a"));
+        assert!(valid_submitted_identifier(&"é".repeat(160)));
+        assert!(!valid_submitted_identifier(""));
+        assert!(!valid_submitted_identifier(&"é".repeat(161)));
+
+        assert!(valid_submitted_password(&"a".repeat(72)));
+        assert!(!valid_submitted_password(""));
+        assert!(!valid_submitted_password(&"a".repeat(73)));
+        assert!(!valid_submitted_password(&"é".repeat(37)));
+    }
+
+    #[actix_web::test]
+    async fn rejects_oversized_authorization_and_logout_queries_before_storage() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/default/authorize?future_extension={}",
+                    "a".repeat(MAX_AUTHORIZATION_QUERY_BYTES)
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/default/logout?id_token_hint={}",
+                    "a".repeat(MAX_LOGOUT_HINT_BYTES + 1)
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = test::read_body(response).await;
+        assert!(
+            body.windows("exceed the supported length".len())
+                .any(|value| value == b"exceed the supported length")
+        );
     }
 }

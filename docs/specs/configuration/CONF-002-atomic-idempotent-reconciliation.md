@@ -39,7 +39,11 @@ A plan reports the candidate revision, whether it changes active state, resource
 
 ## Activation Semantics
 
-The MVP activates one validated immutable snapshot through a serialized GenServer call. Readers see either the previous or new snapshot, never an intermediate map. An equal fingerprint returns `unchanged`. A failed load or validation does not call activation. History is operational memory and resets on restart.
+The Rust runtime activates one validated immutable snapshot through a serialized write lock. Readers
+see either the previous or new snapshot, never an intermediate value. An equal fingerprint returns
+`unchanged`. A failed load or validation does not call activation. Reconciliation outcomes and safe
+diagnostics are emitted as structured operational events and counters; they reset on process
+restart unless the deployment exports them to an external telemetry backend.
 
 The default watcher interval is one second. It rebuilds the complete desired state rather than mutating one application in isolation, so duplicate IDs and cross-resource constraints are checked atomically. Removing an application file is a desired-state removal and follows the reconciliation plan on the next successful reload.
 
@@ -53,4 +57,8 @@ The default watcher interval is one second. It rebuilds the complete desired sta
 
 ## MVP Limitation
 
-Persistent resource reconciliation and cross-node coordination are not implemented. Atomicity applies to the in-process active configuration snapshot. A deployment MUST use a single configuration authority and restart or apply each node deliberately if it introduces multiple instances.
+Configuration activation remains local to each process. Shared protocol state is coordinated through
+PostgreSQL, but a multi-instance deployment MUST use one immutable inline configuration revision or
+the same read-only file authority for every node. Operators MUST roll a changed inline revision to
+every node deliberately; conventional file-backed nodes watch and validate the shared documents
+independently.

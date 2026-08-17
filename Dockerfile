@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY api api
 COPY assets assets
 COPY config config
+COPY deploy/config deploy/config
 COPY migrations migrations
 COPY priv priv
 COPY src src
@@ -18,30 +19,36 @@ RUN --mount=type=cache,id=robine-cargo-registry,target=/usr/local/cargo/registry
     cargo build --locked --release \
       --bin robine-id \
       --bin rotate_keys \
+      --bin prune_keys \
       --bin validate_config \
       --bin config_preview \
       --bin config_apply \
       --bin config_effective \
+      --bin robine-id-healthcheck \
+      --bin reencrypt_keys \
     && mkdir -p /out \
     && cp \
       target/release/robine-id \
       target/release/rotate_keys \
+      target/release/prune_keys \
       target/release/validate_config \
       target/release/config_preview \
       target/release/config_apply \
       target/release/config_effective \
+      target/release/robine-id-healthcheck \
+      target/release/reencrypt_keys \
       /out/
 
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --uid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin robine-id
 
 WORKDIR /app
 COPY --from=builder /out/ /usr/local/bin/
-COPY --from=builder /app/config /app/config
+COPY --from=builder /app/deploy/config /app/config
 
 USER robine-id
 
@@ -53,6 +60,8 @@ ENV HOST=0.0.0.0 \
 EXPOSE 4001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl --fail --silent --show-error http://127.0.0.1:4001/health/ready >/dev/null || exit 1
+  CMD ["/usr/local/bin/robine-id-healthcheck"]
+
+STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["/usr/local/bin/robine-id"]

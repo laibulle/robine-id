@@ -28,12 +28,12 @@ defmodule RobineIdWeb.AuthorizationControllerTest do
     assert html =~ ~s(data-password-toggle)
   end
 
-  test "uses configured ui_locales with message-by-message fallback", %{conn: conn} do
+  test "uses the configured ui_locale", %{conn: conn} do
     params = Map.put(authorization_params(), "ui_locales", "fr en")
     html = conn |> get(~p"/default/authorize?#{params}") |> html_response(200)
     assert html =~ "Heureux de vous revoir"
     assert html =~ "Adresse e-mail"
-    assert html =~ "Sign in to continue"
+    assert html =~ "Connectez-vous pour continuer avec"
     refute html =~ "sign_in.intro"
   end
 

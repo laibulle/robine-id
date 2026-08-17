@@ -2,7 +2,26 @@ defmodule RobineId.ExperienceTest do
   use ExUnit.Case, async: true
 
   alias RobineId.Configuration.Entities.Snapshot
+  alias RobineId.Experience.Entities.Theme
   alias RobineId.Test.Configuration.MemoryStore
+
+  test "falls back message by message when a locale is incomplete" do
+    theme = %Theme{
+      product_name: "Robine ID",
+      primary_color: "#176b70",
+      default_locale: "en",
+      revision: "test",
+      messages: %{
+        "en" => %{"sign_in.intro" => "Continue to the application"},
+        "fr" => %{"sign_in.title" => "Heureux de vous revoir"}
+      }
+    }
+
+    assert {:ok, messages} = RobineId.Experience.messages(theme, "fr")
+    assert messages["sign_in.title"] == "Heureux de vous revoir"
+    assert messages["sign_in.intro"] == "Continue to the application"
+    assert messages["sign_in.submit"] == "Continue"
+  end
 
   test "resolves global, issuer, then client branding with stable asset URLs" do
     data = %{

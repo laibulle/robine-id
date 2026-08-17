@@ -16,7 +16,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4001/health/ready"]
+      test: ["CMD", "/usr/local/bin/robine-id-healthcheck"]
       interval: 2s
       timeout: 3s
       retries: 20

@@ -12,7 +12,7 @@
       <nav class="landing-nav" aria-label="Primary navigation">
         <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
           {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo nav-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="brand-logo">{% endif %}
-          <span>Robine <span class="product-suffix">ID</span></span>
+          <span>{{ product_name }}</span>
         </a>
         <div class="landing-nav-actions">
           <a class="nav-text-link" href="/docs">Documentation</a>
@@ -24,7 +24,7 @@
         <p class="eyebrow">Identity, thoughtfully delivered</p>
         <h1 id="hero-title">A secure sign-in experience people will enjoy using.</h1>
         <p class="landing-lead">
-          {{ product_name }} is moving to a portable Rust runtime, with standards-oriented OIDC and configuration you can version with confidence.
+          {{ product_name }} runs on a portable Rust runtime, with standards-oriented OIDC and configuration you can version with confidence.
         </p>
         <div class="landing-actions">
           <a class="primary-link" href="/{{ issuer_id }}/.well-known/openid-configuration">Open discovery document</a>

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "mfa-web-client",
+  "name": "MFA Web Client",
+  "type": "public",
+  "redirect_uris": [
+    "https://app.example.test/callback"
+  ],
+  "post_logout_redirect_uris": [
+    "https://app.example.test/signed-out"
+  ],
+  "resources": [
+    "https://api.example.test"
+  ],
+  "scopes": [
+    "openid",
+    "profile",
+    "offline_access"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true,
+  "required_acr": "urn:robine-id:acr:password+totp"
+}

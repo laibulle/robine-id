@@ -5,11 +5,31 @@
 The supported self-hosted topology is the non-root Actix container behind Caddy plus PostgreSQL 17.
 Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4001`. The canonical
 `Dockerfile` contains only the Rust runtime and its operational commands; Phoenix is not present in
-the production image.
+the production image. Compose additionally makes the application root filesystem read-only, drops
+all Linux capabilities, and enables `no-new-privileges`; only a small temporary in-memory filesystem
+is writable. Docker and Compose poll readiness through the bounded native
+`robine-id-healthcheck` binary, so the runtime image does not carry `curl` just to call itself.
 
-PostgreSQL holds authorization transactions, access grants, sessions, rate-limit counters, schema
-migrations, and AES-256-GCM encrypted signing keys. Root and application configuration are mounted
-read-only and reload atomically. An invalid candidate leaves the last valid revision active.
+PostgreSQL holds pushed and interactive authorization transactions, access grants, rotating refresh-token families,
+sessions, rate-limit counters, schema migrations, and AES-256-GCM encrypted signing keys. Root and
+application configuration are mounted read-only and reload atomically. An invalid candidate leaves
+the last valid revision active.
+Pool acquisition and each PostgreSQL statement have independent five-second defaults through
+`DATABASE_ACQUIRE_TIMEOUT_MS` and `DATABASE_STATEMENT_TIMEOUT_MS`, so dependency stalls fail within
+a bounded request window.
+All database environment settings are validated strictly before the pool is created. A malformed
+URL, partial `PG*` credential set, missing/weak encryption secret, or invalid numeric bound stops
+startup with an allowlisted diagnostic that never echoes the submitted value.
+Actix process settings follow the same fail-closed rule. `PORT` accepts 1 through 65535;
+`ROBINE_ID_RELOAD_INTERVAL` accepts 0 or 100 through 60000 milliseconds;
+`DATABASE_CLEANUP_INTERVAL` accepts 0 or 60 through 86400 seconds; drain accepts 0 through 300000
+milliseconds; shutdown accepts 1 through 300 seconds; and proxy trust accepts only
+`true`/`false` or `1`/`0`. Zero disables the two periodic tasks.
+
+On SIGTERM or SIGINT, the Actix process immediately reports not-ready, remains live for
+`DRAIN_DELAY_MILLISECONDS` (3 seconds by default), then gracefully stops HTTP workers with
+`SHUTDOWN_TIMEOUT_SECONDS` (10 seconds by default). Compose allows 20 seconds before forcing the
+container, which exceeds both configured phases with margin.
 
 ## Required inputs
 
@@ -28,7 +48,7 @@ openssl rand -base64 48 # KEY_ENCRYPTION_SECRET
 
 `KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
 requires both the PostgreSQL backup and the matching encryption secret. Do not rotate this secret
-independently of stored signing keys.
+independently of stored signing keys; use the staged procedure below.
 
 Ensure the unprivileged application container can traverse its bind mounts:
 
@@ -47,11 +67,19 @@ make release-smoke
 ```
 
 `make release-smoke` creates an isolated Compose project on port 4011, builds the canonical image,
-checks migrations, readiness, documentation, discovery, CLI utilities, and the non-root user. It
-then completes login, consent, PKCE code exchange, UserInfo, replay rejection, and logout across two
-Actix containers sharing PostgreSQL. Finally, it takes a logical dump, recreates the database,
-restores the dump, and proves that the access grant and encrypted signing key remain usable. It
-deletes only its temporary containers, network, volume, and files.
+checks migrations, readiness, documentation, discovery, CLI utilities, the non-root user, and
+strict non-leaking rejection of invalid database and Actix server environments. It
+then pushes and consumes a single-use authorization request across instances, delivers and
+exchanges a form-posted code, issues and revokes a machine token, and completes login, consented offline access, PKCE code exchange, refresh rotation, UserInfo,
+introspection, revocation, replay rejection, and logout across two Actix containers sharing
+PostgreSQL. It sends SIGTERM to the peer, verifies not-ready/live drainage and a zero exit status,
+then rotates the signing key twice with the same idempotency key. Finally, it takes a
+logical dump, recreates the database, restores the dump, and proves that the access grant, active
+refresh family, and current and retained encrypted signing keys remain usable. The gate then
+re-encrypts active and retained keys under a new wrapping secret, removes the previous-secret
+fallback, and proves the JWKS is unchanged. It then expires and prunes retained keys while proving
+that the active key remains published. It deletes only its temporary containers, network, volume,
+and files.
 
 Confirm that:
 
@@ -60,6 +88,7 @@ Confirm that:
 - `.env.release` contains every environment-backed client secret;
 - `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` are independent and stored outside Git;
 - no other process owns port 4001;
+- the platform termination grace exceeds `DRAIN_DELAY_MILLISECONDS / 1000 + SHUTDOWN_TIMEOUT_SECONDS`;
 - a logical PostgreSQL backup exists before an upgrade.
 
 ## Deploy
@@ -79,7 +108,9 @@ curl --fail https://id.base59.dev/default/.well-known/openid-configuration
 ```
 
 The discovery document must advertise `https://id.base59.dev/default` and HTTPS endpoints. Complete
-a login, code exchange, UserInfo request, and logout through every configured relying application.
+a login, code exchange, UserInfo request, refresh rotation where configured, and logout through
+every configured relying application. For every service client, also issue, introspect, revoke, and
+re-introspect a `client_credentials` token with an allowed service scope.
 
 ## Configuration reload
 
@@ -131,7 +162,50 @@ docker compose --env-file .env.release -f compose.release.yml exec -T robine-id 
   rotate_keys default deployment-2026-08
 ```
 
-The active key changes once; retained public keys remain in JWKS for existing token verification.
+The active key changes once. At rotation time, Robine ID stores a retention deadline equal to the
+greater ID-token/JWT-access-token lifetime plus clock skew plus a five-minute safety margin. That captured deadline does not
+shrink if configuration changes later. Retained public keys remain in JWKS until it elapses.
+
+For scheduled rollover, set `token_policy.signing_key_rotation_interval` to 3,600 through
+31,536,000 seconds. The conventional server checks every five minutes and during startup. The age
+decision and update are serialized on the active PostgreSQL row, so replicas do not generate
+multiple active replacements. Keep the manual command for emergency or deployment-specific
+rotation.
+
+Conventional servers prune elapsed retained keys at startup and with hourly database maintenance.
+The operation is idempotent and never targets the active key. Run it explicitly when desired:
+
+```sh
+docker compose --env-file .env.release -f compose.release.yml exec -T robine-id \
+  prune_keys
+```
+
+The command prints the number of deleted retained keys. `make keys-prune` is the local-development
+equivalent. Backup and restore preserve both encrypted retained keys and their deadlines.
+
+## Encryption-secret rotation
+
+Rotate the wrapping secret without changing public keys or invalidating ID tokens:
+
+1. Generate a new independent secret of at least 32 bytes.
+2. Roll every application instance with the new value in `KEY_ENCRYPTION_SECRET` and the former
+   value in `KEY_ENCRYPTION_SECRET_PREVIOUS`. New keys are encrypted with the new secret while old
+   rows remain readable through the fallback.
+3. Run the canonical image command once:
+
+   ```sh
+   docker compose --env-file .env.release -f compose.release.yml run --rm --no-deps \
+     --entrypoint /usr/local/bin/reencrypt_keys robine-id
+   ```
+
+4. Verify readiness, JWKS, a new ID token, and retained-key validation.
+5. Remove `KEY_ENCRYPTION_SECRET_PREVIOUS` and roll every instance again.
+6. Take a new backup paired with the new secret. Keep pre-rotation backups paired with the former
+   secret until their retention period ends.
+
+`reencrypt_keys` locks and rewrites every active and retained row in one transaction. A malformed,
+matching, or weak previous secret fails without echoing either value; a wrong previous secret rolls
+the transaction back. Do not remove the fallback before the command and verification succeed.
 
 ## Rollback
 

@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -30,6 +30,8 @@ help:
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
 	@echo "  make release-smoke    Test production OIDC, multi-instance state, and PostgreSQL restore"
 	@echo "  make keys-rotate ROTATION_ID=<id> [ISSUER=default]"
+	@echo "  make keys-prune   Remove retained keys whose safe verification window elapsed"
+	@echo "  make keys-reencrypt NEW_KEY_ENCRYPTION_SECRET=<secret>  Re-encrypt signing keys"
 	@echo "  make build      Build $(VERSION_TAG) and $(LATEST_TAG)"
 	@echo "  make login      Authenticate with Docker Hub"
 	@echo "  make push       Push the already-built version and latest tags"
@@ -91,6 +93,17 @@ keys-rotate: dev-db
 	@test -n "$(ROTATION_ID)" || (echo "ROTATION_ID is required" >&2; exit 1)
 	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
 		cargo run --bin rotate_keys -- "$(ISSUER)" "$(ROTATION_ID)"
+
+keys-prune: dev-db
+	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
+		cargo run --bin prune_keys
+
+keys-reencrypt: dev-db
+	@test -n "$(NEW_KEY_ENCRYPTION_SECRET)" || (echo "NEW_KEY_ENCRYPTION_SECRET is required" >&2; exit 1)
+	@DATABASE_URL="$(DATABASE_URL)" \
+		KEY_ENCRYPTION_SECRET="$(NEW_KEY_ENCRYPTION_SECRET)" \
+		KEY_ENCRYPTION_SECRET_PREVIOUS="$(KEY_ENCRYPTION_SECRET)" \
+		cargo run --bin reencrypt_keys
 
 check-variables:
 	@test -n "$(DOCKERHUB_USER)" || (echo "DOCKERHUB_USER is required" >&2; exit 1)

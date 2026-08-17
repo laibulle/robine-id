@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="{{ messages.locale }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ messages.totp_title }} · {{ product_name }}</title>
+    {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="auth-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
+      <section class="auth-card" aria-labelledby="totp-title">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">{% endif %}
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="totp-title">{{ messages.totp_title }}</h1>
+        <p class="auth-intro">{{ messages.totp_intro }} <strong>{{ client_name }}</strong>.</p>
+
+        {% if let Some(error) = error %}<div id="totp-error" class="error-summary" role="alert" tabindex="-1" data-error-summary><strong>{{ messages.sign_in_error_title }}</strong><span>{{ error }}</span></div>{% endif %}
+
+        <form id="totp-form" method="post" action="{{ form_action }}" class="auth-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="{{ transaction_field }}" value="{{ transaction }}">
+          {% if let Some(action_value) = action_value %}<input type="hidden" name="action" value="{{ action_value }}">{% endif %}
+          <label for="totp_code">{{ messages.totp_code }}</label>
+          <input id="totp_code" name="totp_code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus{% if has_error %} aria-invalid="true" aria-describedby="totp-error"{% endif %}>
+          <button id="totp-submit" type="submit" class="primary-action">{{ messages.totp_submit }}</button>
+        </form>
+        {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
+          {% if let Some(url) = support_url %}<a id="totp-support-link" href="{{ url }}">{{ messages.support }}</a>{% endif %}
+          {% if let Some(url) = privacy_url %}<a id="totp-privacy-link" href="{{ url }}">{{ messages.privacy }}</a>{% endif %}
+          {% if let Some(url) = terms_url %}<a id="totp-terms-link" href="{{ url }}">{{ messages.terms }}</a>{% endif %}
+        </nav>{% endif %}
+      </section>
+    </main>
+  </body>
+</html>

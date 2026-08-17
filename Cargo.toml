@@ -16,6 +16,14 @@ path = "src/bin/server.rs"
 name = "vercel"
 path = "api/index.rs"
 
+[[bin]]
+name = "robine-id-healthcheck"
+path = "src/bin/healthcheck.rs"
+
+[[bin]]
+name = "reencrypt_keys"
+path = "src/bin/reencrypt_keys.rs"
+
 [dependencies]
 actix-web = "4.11"
 aes-gcm = "0.10"
@@ -35,16 +43,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 sha2 = "0.10"
+sha1 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "migrate"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 vercel_runtime = { version = "2.4", features = ["actix"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 actix-http = "3"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 
 [profile.release]
 codegen-units = 1

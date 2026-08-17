@@ -21,6 +21,8 @@ defmodule RobineId.Protocol.DiscoverProviderTest do
     assert metadata["issuer"] == "https://id.example.test/tenant"
     assert metadata["authorization_endpoint"] == "https://id.example.test/tenant/authorize"
     assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert metadata["token_endpoint_auth_signing_alg_values_supported"] == ["RS256"]
+    assert metadata["service_documentation"] == "https://id.example.test/docs"
   end
 
   test "does not disclose configured issuers when the identifier is unknown" do

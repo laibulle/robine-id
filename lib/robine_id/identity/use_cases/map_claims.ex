@@ -1,7 +1,7 @@
 defmodule RobineId.Identity.UseCases.MapClaims do
   @moduledoc "Maps configured identity fields into scope-constrained OIDC claims."
 
-  @reserved ~w(iss sub aud iat exp nonce)
+  @reserved ~w(iss sub aud iat exp nbf jti nonce auth_time at_hash c_hash acr amr azp)
 
   def execute(user, mappings, scopes) when is_map(mappings) and is_list(scopes) do
     mappings

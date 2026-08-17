@@ -39,7 +39,7 @@
           relying-application configuration.
         </p>
         <div class="docs-badges" aria-label="Supported capabilities">
-          <span>OpenID Connect</span><span>OAuth 2.0</span><span>PKCE S256</span><span>RS256</span>
+          <span>OpenID Connect</span><span>OAuth 2.0</span><span>PKCE S256</span><span>Resource Indicators</span><span>Private Key JWT</span><span>RS256</span>
         </div>
       </section>
 
@@ -91,9 +91,8 @@
 }</code></pre>
         </div>
         <p class="docs-note">
-          Confidential applications may use <code>client_secret_basic</code>
-          or <code>client_secret_post</code>. A secret can be a literal string or an environment
-          reference. Keep examples separate from production application files.
+          Confidential applications may use <code>client_secret_basic</code>, <code>client_secret_post</code>, or <code>private_key_jwt</code>. Shared secrets use an
+          environment reference; private-key clients register only their public RSA JWKs.
         </p>
       </section>
 
@@ -213,12 +212,13 @@
           </div>
         </div>
         <p>
-          The Rust production runtime stores authorization codes, access grants, rate limits,
-          sessions, and encrypted signing keys in PostgreSQL so they survive process restart.
+          The Rust production runtime stores authorization codes, access and refresh grants, rate
+          limits, sessions, and encrypted signing keys in PostgreSQL so they survive process restart.
         </p>
         <p>
-          Dynamic client registration, refresh tokens, MFA, federation, account recovery, token
-          introspection, token revocation, distributed stores, and high availability are outside the MVP.
+          Dynamic client registration, MFA, federation, account recovery, distributed stores other
+          than PostgreSQL, and provider-managed high availability are outside the MVP. The retained
+          Phoenix runtime remains a compatibility oracle; Actix is the production implementation.
         </p>
       </section>
 

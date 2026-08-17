@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ messages.locale }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Authorize {{ client_name }} · {{ product_name }}</title>
+    <title>{{ messages.consent_title }} · {{ client_name }} · {{ product_name }}</title>
     {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
   </head>
@@ -23,12 +23,12 @@
           <button id="consent-approve" type="submit" name="decision" value="approve" class="primary-action full-width">{{ messages.consent_approve }}</button>
           <button id="consent-deny" type="submit" name="decision" value="deny" class="secondary-action full-width">{{ messages.consent_deny }}</button>
         </form>
-        <p class="privacy-note">You can sign out at any time.</p>
-        <nav class="legal-links" aria-label="Legal and support">
-          {% if let Some(url) = support_url %}<a href="{{ url }}">Support</a>{% endif %}
-          {% if let Some(url) = privacy_url %}<a href="{{ url }}">Privacy</a>{% endif %}
-          {% if let Some(url) = terms_url %}<a href="{{ url }}">Terms</a>{% endif %}
-        </nav>
+        <p class="privacy-note">{{ messages.consent_sign_out_note }}</p>
+        {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
+          {% if let Some(url) = support_url %}<a id="consent-support-link" href="{{ url }}">{{ messages.support }}</a>{% endif %}
+          {% if let Some(url) = privacy_url %}<a id="consent-privacy-link" href="{{ url }}">{{ messages.privacy }}</a>{% endif %}
+          {% if let Some(url) = terms_url %}<a id="consent-terms-link" href="{{ url }}">{{ messages.terms }}</a>{% endif %}
+        </nav>{% endif %}
       </section>
     </main>
   </body>

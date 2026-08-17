@@ -4,6 +4,13 @@ services:
       context: .
     image: ${ROBINE_ID_IMAGE:-robine-id:0.1.0}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     env_file:
       - path: ${ROBINE_ID_ENV_FILE:-.env.release}
         required: true
@@ -17,7 +24,7 @@ services:
       ROBINE_ID_CONFIG: /config/robine_id.json
       ROBINE_ID_APPLICATIONS_DIR: /config/applications
     ports:
-      - "127.0.0.1:${ROBINE_ID_BIND_PORT:-4001}:4001"
+      - "${ROBINE_ID_BIND_ADDRESS:-127.0.0.1}:${ROBINE_ID_BIND_PORT:-4001}:4001"
     volumes:
       - ${ROBINE_ID_CONFIG_PATH:-./deploy/config/robine_id.json}:/config/robine_id.json:ro
       - ${ROBINE_ID_APPLICATIONS_PATH:-./deploy/config/applications}:/config/applications:ro
@@ -25,11 +32,12 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4001/health/ready"]
+      test: ["CMD", "/usr/local/bin/robine-id-healthcheck"]
       interval: 15s
       timeout: 5s
       start_period: 15s
       retries: 5
+    stop_grace_period: 20s
 
   postgres:
     image: postgres:17-alpine
