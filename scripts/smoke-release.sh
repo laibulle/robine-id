@@ -3391,19 +3391,22 @@ if header_value location "$logout_headers" | grep -q .; then
   printf '%s\n' 'front-channel logout unexpectedly skipped the iframe interstitial' >&2
   exit 1
 fi
-backchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
-printf '%s' "$backchannel_request" | grep -q '^POST /backchannel-logout?tenant=release HTTP/1.1$'
-backchannel_logout_token=$(
-  printf '%s\n' "$backchannel_request" | sed -n 's/^logout_token=//p' | tail -n 1
-)
-test -n "$backchannel_logout_token"
 docker run --rm \
   --network "container:$container_id" \
   --entrypoint /bin/sh postgres:17-alpine \
   -c "wget -q -O /dev/null 'http://127.0.0.1:$redirect_port/frontchannel-logout?tenant=release&iss=$issuer_url&sid=$id_token_sid'"
-frontchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
-printf '%s' "$frontchannel_request" | grep -q 'GET /frontchannel-logout?tenant=release&iss='
-printf '%s' "$frontchannel_request" | grep -q "sid=$id_token_sid HTTP/1.1"
+backchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
+printf '%s' "$backchannel_request" | grep -q '^POST /backchannel-logout?tenant=release HTTP/1.1$'
+printf '%s' "$backchannel_request" | grep -q 'GET /frontchannel-logout?tenant=release&iss='
+printf '%s' "$backchannel_request" | grep -q "sid=$id_token_sid HTTP/1.1"
+backchannel_logout_token=$(
+  printf '%s\n' "$backchannel_request" \
+    | sed -n \
+        -e 's/^logout_token=\(.*\)GET \/frontchannel-logout.*/\1/p' \
+        -e 's/^logout_token=\([^ ]*\)$/\1/p' \
+    | tail -n 1
+)
+test -n "$backchannel_logout_token"
 backchannel_header=$(
   decode_base64url "$(printf '%s' "$backchannel_logout_token" | cut -d. -f1)"
 )
