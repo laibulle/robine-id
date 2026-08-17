@@ -1795,6 +1795,7 @@ curl --fail --silent --output "$secret_par_response" \
   --data-urlencode 'client_id=release-secret-assertion-client' \
   --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/secret-assertion-callback" \
   --data-urlencode 'scope=openid' \
+  --data-urlencode 'state=secret-assertion-par-state' \
   --data-urlencode "client_assertion_type=$assertion_type" \
   --data-urlencode "client_assertion=$secret_par_assertion" \
   "$base_url/default/par"

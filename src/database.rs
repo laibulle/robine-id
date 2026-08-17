@@ -1060,7 +1060,7 @@ impl Database {
             database_transaction.commit().await?;
             return Ok(false);
         }
-        let registered = sqlx::query_scalar::<_, i64>(
+        let registered = sqlx::query_scalar::<_, i32>(
             "INSERT INTO mfa_recovery_code_uses (issuer, subject, code_hash_digest)
              VALUES ($1, $2, $3)
              ON CONFLICT DO NOTHING
