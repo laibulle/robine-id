@@ -18,6 +18,9 @@ an auto-submitted HTML form, keeping codes and protocol errors out of the browse
   not be used to select an error transport.
 - The selected mode MUST survive authentication, SSO reuse, consent, denial, PostgreSQL-backed
   pending authorization, and routing between instances.
+- The selected `ui_locales` preference MUST survive the same pending-authorization boundary. The
+  handoff page MUST use the resolved locale in its title, explanation, fallback action, HTML `lang`,
+  and `Content-Language` header for unsigned and JARM form responses.
 - A successful form response MUST use HTTP 200 and contain `code`, `state`, and `iss` as hidden
   form fields. A protocol failure safe to return to the registered redirect URI MUST contain
   `error`, `error_description`, optional `state`, and `iss` as hidden fields.
@@ -44,6 +47,7 @@ an auto-submitted HTML form, keeping codes and protocol errors out of the browse
   parameters when `form_post` was validly selected.
 - The generated CSP permits the registered RP origin and does not permit an unrelated origin.
 - Disabling JavaScript leaves a labeled submit button that completes delivery.
+- A French consent journey remains French on the final cross-instance form handoff.
 - Query mode remains protocol-compatible and remains the default.
 
 ## Standards

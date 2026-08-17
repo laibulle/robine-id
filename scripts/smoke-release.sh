@@ -1113,6 +1113,26 @@ curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"request_uri_parameter_supported":true'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"ui_locales_supported":\["en","fr"\]'
+accept_language_error="$temporary_directory/accept-language-error.html"
+accept_language_error_headers="$temporary_directory/accept-language-error.headers"
+test "$(
+  curl --silent --dump-header "$accept_language_error_headers" \
+    --output "$accept_language_error" --write-out '%{http_code}' \
+    --header 'Accept-Language: en;q=0.2, fr-FR;q=0.9' \
+    "$base_url/default/authorize"
+)" = '400'
+grep -qi '^content-language: fr' "$accept_language_error_headers"
+grep -q '<html lang="fr">' "$accept_language_error"
+grep -q 'Demande d’autorisation refusée' "$accept_language_error"
+accept_language_device="$temporary_directory/accept-language-device.html"
+accept_language_device_headers="$temporary_directory/accept-language-device.headers"
+curl --fail --silent --dump-header "$accept_language_device_headers" \
+  --output "$accept_language_device" \
+  --header 'Accept-Language: fr-CA, en;q=0.8' \
+  "$base_url/default/device"
+grep -qi '^content-language: fr' "$accept_language_device_headers"
+grep -q '<html lang="fr">' "$accept_language_device"
+grep -q 'Connecter un appareil' "$accept_language_device"
 discovery_headers="$temporary_directory/discovery.headers"
 curl --fail --silent --dump-header "$discovery_headers" --output /dev/null \
   "$base_url/.well-known/openid-configuration/default"
@@ -3052,6 +3072,7 @@ curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
   --data-urlencode "code_challenge=$challenge" \
   --data-urlencode 'code_challenge_method=S256' \
   --data-urlencode 'response_mode=form_post' \
+  --data-urlencode 'ui_locales=fr-FR' \
   --data-urlencode 'resource=https://api.release.example' \
   "$peer_url/default/authorize" >"$form_post_consent_page"
 grep -q 'id="consent-form"' "$form_post_consent_page"
@@ -3068,6 +3089,7 @@ curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
   --data-urlencode 'decision=approve' \
   "$base_url/default/authorize/consent"
 grep -qi '^cache-control: no-store' "$form_post_headers"
+grep -qi '^content-language: fr' "$form_post_headers"
 tr -d '\r' <"$form_post_headers" \
   | grep -qi "^content-security-policy: .*form-action http://127.0.0.1:$redirect_port;"
 if grep -qi '^location:' "$form_post_headers"; then
@@ -3075,6 +3097,8 @@ if grep -qi '^location:' "$form_post_headers"; then
   exit 1
 fi
 grep -q 'id="authorization-response-form"' "$form_post_body"
+grep -q '<html lang="fr">' "$form_post_body"
+grep -q 'Continuer vers votre application' "$form_post_body"
 grep -q "action=\"$redirect_uri\"" "$form_post_body"
 grep -q 'name="state" value="form-post-state"' "$form_post_body"
 grep -q "name=\"iss\" value=\"$issuer_url\"" "$form_post_body"
@@ -3158,19 +3182,25 @@ curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
   --data-urlencode "code_challenge=$challenge" \
   --data-urlencode 'code_challenge_method=S256' \
   --data-urlencode 'response_mode=form_post.jwt' \
+  --data-urlencode 'ui_locales=fr-FR' \
   "$base_url/default/authorize" >"$jarm_error_consent_page"
 jarm_error_transaction=$(hidden_value transaction "$jarm_error_consent_page")
 jarm_error_csrf=$(hidden_value csrf_token "$jarm_error_consent_page")
 test -n "$jarm_error_transaction"
 test -n "$jarm_error_csrf"
 jarm_error_body="$temporary_directory/jarm-error.html"
+jarm_error_headers="$temporary_directory/jarm-error.headers"
 curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --dump-header "$jarm_error_headers" \
   --output "$jarm_error_body" \
   --data-urlencode "transaction=$jarm_error_transaction" \
   --data-urlencode "csrf_token=$jarm_error_csrf" \
   --data-urlencode 'decision=deny' \
   "$peer_url/default/authorize/consent"
+grep -qi '^content-language: fr' "$jarm_error_headers"
 grep -q 'id="authorization-response-form"' "$jarm_error_body"
+grep -q '<html lang="fr">' "$jarm_error_body"
+grep -q 'Continuer vers votre application' "$jarm_error_body"
 jarm_error_response=$(hidden_value response "$jarm_error_body")
 test -n "$jarm_error_response"
 if grep -Eq 'name="(error|state|iss)"' "$jarm_error_body"; then
@@ -3235,13 +3265,16 @@ test "$replay_status" = '400'
 grep -q '"error":"invalid_grant"' "$temporary_directory/replay.json"
 
 client_id_logout_page="$temporary_directory/client-id-logout.html"
+client_id_logout_headers="$temporary_directory/client-id-logout.headers"
 curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --dump-header "$client_id_logout_headers" \
   --output "$client_id_logout_page" \
   --data-urlencode 'client_id=release-smoke-client' \
   --data-urlencode "post_logout_redirect_uri=$logout_uri" \
   --data-urlencode 'state=client-id-logout-state' \
   --data-urlencode 'ui_locales=fr-FR' \
   "$peer_url/default/logout"
+grep -qi '^content-language: fr' "$client_id_logout_headers"
 grep -q 'id="logout-form"' "$client_id_logout_page"
 grep -q '<html lang="fr">' "$client_id_logout_page"
 grep -q 'Se déconnecter ?' "$client_id_logout_page"

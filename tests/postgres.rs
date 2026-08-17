@@ -394,7 +394,12 @@ async fn persists_and_atomically_consumes_security_state() {
     );
 
     let pending = database
-        .issue_pending_authorization(&grant, "state")
+        .issue_pending_authorization(
+            &grant,
+            "state",
+            Some("fr-FR en"),
+            Some(r#"{"id_token":{"email":{"essential":true}}}"#),
+        )
         .await
         .expect("pending authorization");
     let consumed_pending = database
@@ -405,6 +410,11 @@ async fn persists_and_atomically_consumes_security_state() {
     assert_eq!(
         consumed_pending.response_mode.as_deref(),
         Some("form_post.jwt")
+    );
+    assert_eq!(consumed_pending.ui_locales.as_deref(), Some("fr-FR en"));
+    assert_eq!(
+        consumed_pending.requested_claims.as_deref(),
+        Some(r#"{"id_token":{"email":{"essential":true}}}"#)
     );
     assert_eq!(
         consumed_pending.resource.as_deref(),
@@ -423,6 +433,40 @@ async fn persists_and_atomically_consumes_security_state() {
             .consume_pending_authorization(&pending)
             .await
             .expect("replay pending")
+            .is_none()
+    );
+
+    let logout = database
+        .issue_logout_transaction(
+            &issuer,
+            Some("integration-client"),
+            Some("https://client.example/signed-out"),
+            Some("logout-state"),
+            Some("fr en"),
+        )
+        .await
+        .expect("issue logout transaction");
+    let consumed_logout = database
+        .consume_logout_transaction(&logout)
+        .await
+        .expect("consume logout transaction")
+        .expect("stored logout transaction");
+    assert_eq!(consumed_logout.issuer.as_deref(), Some(issuer.as_str()));
+    assert_eq!(
+        consumed_logout.client_id.as_deref(),
+        Some("integration-client")
+    );
+    assert_eq!(
+        consumed_logout.post_logout_redirect_uri.as_deref(),
+        Some("https://client.example/signed-out")
+    );
+    assert_eq!(consumed_logout.state.as_deref(), Some("logout-state"));
+    assert_eq!(consumed_logout.ui_locales.as_deref(), Some("fr en"));
+    assert!(
+        database
+            .consume_logout_transaction(&logout)
+            .await
+            .expect("replay logout transaction")
             .is_none()
     );
 
@@ -1968,7 +2012,7 @@ async fn persists_and_atomically_consumes_security_state() {
     assert_eq!(opbs.value().len(), 43);
     assert!(!opbs.http_only().unwrap_or(false));
 
-    let form_post_query = format!("{authorization_query}&response_mode=form_post");
+    let form_post_query = format!("{authorization_query}&response_mode=form_post&ui_locales=fr-FR");
     let form_post_response = actix_web::test::call_service(
         &app,
         actix_web::test::TestRequest::get()
@@ -1988,6 +2032,13 @@ async fn persists_and_atomically_consumes_security_state() {
             .and_then(|value| value.to_str().ok()),
         Some("no-store")
     );
+    assert_eq!(
+        form_post_response
+            .headers()
+            .get(actix_web::http::header::CONTENT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("fr")
+    );
     assert!(
         form_post_response
             .headers()
@@ -2003,6 +2054,8 @@ async fn persists_and_atomically_consumes_security_state() {
     assert!(form_post_body.contains("name=\"state\" value=\"sso-state\""));
     assert!(form_post_body.contains(&format!("name=\"iss\" value=\"{web_issuer}\"")));
     assert!(form_post_body.contains("name=\"session_state\""));
+    assert!(form_post_body.contains("<html lang=\"fr\">"));
+    assert!(form_post_body.contains("Continuer vers votre application"));
 
     let jarm_query = format!("{authorization_query}&response_mode=query.jwt");
     let jarm_response = actix_web::test::call_service(

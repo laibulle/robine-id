@@ -41,7 +41,9 @@ Selected users may additionally reference an operator-provisioned TOTP factor as
   `c_hash`, `acr`, `amr`, and `azp` MUST NOT be configured through identity mapping.
 - A mapped claim MUST be omitted when its required scope was not granted or its source value is nil.
 - `sub` MUST always use the stable configured user identifier and MUST not use the mutable login identifier or email address.
-- ID-token and UserInfo claims MUST derive from the same claims captured during authorization.
+- ID-token and UserInfo claims MUST derive from one server-side claim set. When consent is pending,
+  that set MUST be rebuilt from the active user attributes and mappings immediately before code
+  issuance so a revoked or changed attribute is not emitted from stale transaction state.
 
 ## Acceptance Criteria
 

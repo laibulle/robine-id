@@ -33,6 +33,34 @@ defmodule RobineId.RepoMigrationsTest do
     end
   end
 
+  test "pending authorizations retain the browser locale preference" do
+    %{rows: rows} = query!("PRAGMA table_info(pending_authorizations)")
+
+    assert Enum.any?(rows, fn row -> Enum.at(row, 1) == "ui_locales" end)
+  end
+
+  test "pending authorizations retain the original claims request" do
+    %{rows: rows} = query!("PRAGMA table_info(pending_authorizations)")
+
+    assert Enum.any?(rows, fn row -> Enum.at(row, 1) == "requested_claims" end)
+  end
+
+  test "logout transactions retain structured redirect bindings" do
+    %{rows: rows} = query!("PRAGMA table_info(logout_transactions)")
+    columns = MapSet.new(rows, &Enum.at(&1, 1))
+
+    assert MapSet.subset?(
+             MapSet.new([
+               "issuer",
+               "client_id",
+               "post_logout_redirect_uri",
+               "state",
+               "ui_locales"
+             ]),
+             columns
+           )
+  end
+
   defp query!(statement) do
     Ecto.Adapters.SQL.query!(Repo, statement, [])
   end

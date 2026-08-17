@@ -22,7 +22,7 @@ complete authorization success or error returned through an untrusted browser.
   `error_description`. Both MUST preserve non-empty `state` inside the signed JWT.
 - Query delivery MUST return only a `response` parameter in addition to any query already present
   on the registered redirect URI. Form delivery MUST render only a hidden `response` parameter and
-  retain the OIDC-008 no-store, escaping, CSP, and accessible fallback behavior.
+  retain the OIDC-008 no-store, escaping, CSP, localization, and accessible fallback behavior.
 - Signed response modes MUST survive direct GET, form POST, PAR, login, SSO, consent, and
   cross-instance transaction persistence without being rewritten to an unsigned mode.
 - If the database or signing key is unavailable, the provider MUST fail closed and MUST NOT emit an

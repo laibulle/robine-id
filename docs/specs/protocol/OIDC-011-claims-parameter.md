@@ -26,6 +26,10 @@ to require values that must be present before Robine ID issues an authorization 
   `value` or `values` is present, the actual value MUST match one of the accepted values. A request
   that cannot be satisfied MUST return `access_denied` to the already validated redirect URI and
   MUST NOT create an authorization code.
+- A consent transaction MUST retain the bounded original `claims` request separately from mapped
+  output values. At consumption, essential requirements MUST be evaluated again against the active
+  user and mappings, and emitted mapped values MUST be rebuilt from that active revision before an
+  authorization code is created.
 - An essential ID Token `acr` constraint applies to fresh credentials and reusable sessions. The
   returned `acr` and `amr` MUST describe the context actually achieved. An essential MFA value may
   strengthen a client without `required_acr`; application policy may independently require MFA.
@@ -43,5 +47,7 @@ to require values that must be present before Robine ID issues an authorization 
 - Malformed, oversized, structurally unknown, and contradictory requests fail closed.
 - Password-only and MFA authentication contexts are distinguished for essential `acr` values.
 - Essential mapped UserInfo values succeed only when the mapped scope and actual user value match.
+- Removing a mapping or changing a required user value while consent is pending prevents approval;
+  changing an optional value causes the newly active value, never the captured value, to be issued.
 - The production smoke journey requests essential MFA and receives an ID Token containing the
   matching `acr`, `amr`, and `auth_time` claims.

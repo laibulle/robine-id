@@ -33,6 +33,8 @@ fine-grained permissions without encoding resource-specific rights into OAuth sc
   include the effective `authorization_details`. Empty details MUST be omitted.
 - Stored grants MUST become inactive when their detail type or client authorization is removed from
   the active configuration.
+- Pending Device Flow confirmations MUST revalidate their stored details against the active type
+  definitions and client allow-list before displaying or recording browser approval.
 
 ## Acceptance Criteria
 

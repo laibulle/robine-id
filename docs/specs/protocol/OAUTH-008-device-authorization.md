@@ -44,8 +44,10 @@ instances.
   and MUST issue a rotating refresh token.
 - DPoP proof supplied at the token endpoint MUST bind the access token and, for a public client,
   its refresh-token family according to OAUTH-005.
-- Configuration changes that remove the client, user, grant, scope, or resource MUST invalidate an
-  outstanding device authorization before token issuance.
+- Configuration changes that remove the client, user, device or refresh grant, scope, resource, or
+  rich-authorization policy MUST invalidate an outstanding device authorization. Client, grant,
+  scope, resource, and rich-authorization policy MUST be revalidated before the browser displays or
+  accepts confirmation, not only when the device later polls for tokens.
 
 ## Acceptance Criteria
 

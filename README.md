@@ -169,7 +169,10 @@ The default favicon, light and dark marks, legacy SVG logo, stylesheet, scripts,
 bounded caching, weak content ETags, conditional GET, and bodyless HEAD responses on Actix and Vercel.
 The Askama theme also embeds complete English and French catalogs. `ui_locales=fr-FR` safely falls
 back to configured `fr`, while global, issuer, and client message maps can still override individual
-keys without recompiling either runtime.
+keys without recompiling either runtime. When `ui_locales` is omitted, bounded quality-ranked
+`Accept-Language` preferences select the browser locale; the inferred preference is retained across
+the opaque login, TOTP, and consent transaction. Every rendered HTML page returns a validated
+`Content-Language` matching its document `lang`, through both Actix and Vercel.
 Public text, SVG, metadata, documentation, and operational representations negotiate gzip, Brotli,
 deflate, or Zstandard through Actix when the client advertises support. Login, consent, token,
 UserInfo, logout, and other credential-bearing responses stay outside compression to avoid exposing
@@ -189,7 +192,16 @@ seconds and accepts 60 through 3600.
 Conventional servers reload file-backed configuration atomically every second by default. Invalid
 or partially written candidates are rejected while the last valid revision remains active;
 `ROBINE_ID_RELOAD_INTERVAL=0` disables watching; non-zero intervals must be 100 through 60000
-milliseconds. Inline/Vercel configuration is immutable.
+milliseconds. Inline/Vercel configuration is immutable. Pending consent is revalidated when it is
+consumed: disabling a user/client or removing its grant, redirect, scope, resource, PKCE/nonce, MFA,
+essential claim, or rich-authorization policy consumes the stale transaction without issuing a code
+or redirecting to a formerly registered URI. Mapped claims are rebuilt from active user attributes
+at that point, so pending consent cannot emit a superseded role or profile value. Logout
+confirmations receive the same reload safety: their
+issuer/client/URI/state bindings are stored separately and revalidated, so a removed client return
+URI is discarded while the local session is still ended.
+Pending Device Flow confirmations likewise recheck device/refresh grants, scopes, resources, and
+rich-authorization details before displaying or accepting browser approval.
 
 Rotate an issuer signing key with a stable deployment identifier:
 
@@ -472,7 +484,9 @@ Authorization responses use query redirects by default. Set `response_mode=form_
 success or redirectable error parameters in an Askama-rendered, auto-submitted HTML form. The page
 has a visible no-JavaScript fallback, disables caching, escapes every hidden value, and narrows its
 CSP `form-action` to the registered redirect origin. The selected mode survives PAR, SSO, consent,
-and routing between instances.
+and routing between instances. Its localized title, explanation, fallback action, HTML language,
+and `Content-Language` header retain the authorization request's `ui_locales` preference across the
+PostgreSQL consent transaction.
 
 Set `response_mode=jwt` or `query.jwt` to receive the complete success or error response as a
 short-lived RS256 JARM JWT in the `response` query parameter. `form_post.jwt` delivers that single
@@ -532,7 +546,10 @@ an `id_token_hint` or `client_id`; when both are sent they must identify the sam
 Signed hints remain usable after expiration for this confirmation-only purpose, but still require a
 valid issuer, retained RS256 key, and known audience. `state` is returned only after an exact
 registered redirect match, and the final confirmation is protected by CSRF and an opaque,
-single-use PostgreSQL transaction.
+single-use PostgreSQL transaction. That transaction stores issuer, client, return URI, state, and
+the bounded locale preference as separate bindings. Confirmation revalidates them against the active configuration; a disabled
+issuer/client or removed URI suppresses the client redirect but never preserves the local session.
+An active client retains its localized branding through the signed-out or front-channel page.
 
 When an application registers `backchannel_logout_uri`, successful browser or device authorization
 associates that RP with the opaque `sid` published in its ID Token. Confirming logout then sends a

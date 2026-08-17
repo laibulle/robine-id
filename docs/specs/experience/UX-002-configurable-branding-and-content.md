@@ -31,9 +31,18 @@ Operators can adapt Robine ID to their brand and audience entirely through confi
 - The default product name MUST be `Robine ID` and the default visual theme MUST remain complete without any operator-provided asset.
 - The default theme MUST ship complete English and French message catalogs and advertise both
   locales when locale configuration is omitted.
-- The requested locale MUST use the first `ui_locales` value matched case-insensitively by bounded
-  BCP 47 lookup. A regional request such as `fr-FR` MUST progressively fall back to a configured
-  `fr`; otherwise content MUST fall back to the configured default locale and then built-in English.
+- An explicit `ui_locales` parameter MUST take precedence. When it is absent, browser screens MUST
+  use quality-ranked `Accept-Language` preferences, then the configured default locale. The parsed
+  header MUST be bounded to 1 KiB, 32 candidates, eight retained tags, and 256 retained bytes;
+  wildcards, zero-quality entries, malformed tags, and malformed weights MUST be ignored.
+- The requested locale MUST use the first preference matched case-insensitively by bounded BCP 47
+  lookup. A regional request such as `fr-FR` MUST progressively fall back to a configured `fr`;
+  otherwise content MUST fall back to the configured default locale and then built-in English.
+- A locale inferred for an authorization request MUST be persisted in its opaque browser
+  transaction so login, TOTP, consent, and protocol-error screens cannot change language mid-flow.
+- Every rendered HTML document MUST emit a valid `Content-Language` equal to its HTML `lang` value.
+  Header derivation MUST reject malformed or non-language values, and JSON responses and redirects
+  MUST NOT acquire a representation-language header from browser preferences.
 - Message overrides MUST be maps of stable string keys to plain string values. Markup supplied in messages MUST be escaped.
 - Branding resolution MUST be performed independently for each request using the active configuration.
 
@@ -47,7 +56,9 @@ so an incomplete translation never exposes an internal key.
 
 ## Supported Message Keys
 
-The MVP defines stable keys for the sign-in title, identifier label, password label, submit action, consent title, consent approval, and consent denial. New user-visible strings SHOULD receive stable keys before becoming configurable.
+The built-in catalog exposes stable keys for sign-in, TOTP, consent, device verification, scopes,
+logout, signed-out, protocol-error, form-post handoff, navigation, and legal content. New
+user-visible strings SHOULD receive stable keys before becoming configurable.
 
 ## Acceptance Criteria
 
@@ -55,7 +66,8 @@ The MVP defines stable keys for the sign-in title, identifier label, password la
 - Applying the same branding configuration repeatedly does not create new asset records or change generated URLs.
 - An incomplete locale falls back per message without showing internal keys to users.
 - A minimal configuration renders every login, TOTP, consent, device, logout, error, scope, and
-  legal-navigation message in French for `ui_locales=fr` or `fr-FR`, with `lang="fr"`.
+  legal-navigation message in French for `ui_locales=fr` or `fr-FR`, with `lang="fr"`. The final
+  form-post handoff remains French after consent and cross-instance transaction consumption.
 - An insufficient-contrast primary color prevents configuration activation with a precise diagnostic.
 - Client branding overrides issuer and global values only for that client's authorization journey.
 - The complete default asset set is served identically by conventional Actix and Vercel routes.

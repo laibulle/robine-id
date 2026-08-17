@@ -39,6 +39,11 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
 - A client MUST allow the `authorization_code` grant.
 - Login MUST authenticate a configured local identity without disclosing whether the identifier exists.
 - Consent MUST be shown when `consent_required` is true. Approval issues a code; denial redirects with `access_denied` and the original `state`.
+- Consuming a pending consent MUST revalidate the active issuer, user, client, exact redirect URI,
+  authorization-code grant, scopes, resource, PKCE/nonce policy, authentication context, and rich
+  authorization details against the current configuration revision. A policy change that makes
+  any binding invalid MUST consume the transaction, issue no code, and fail locally without using
+  the formerly registered redirect URI.
 - A valid authenticated browser session MUST be reusable for SSO without collecting the password
   again. `prompt=login` and `prompt=select_account` force an interactive login screen;
   `prompt=consent` forces consent even when client policy normally skips it.
@@ -52,6 +57,10 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
   when both are present, the lower value is the effective maximum age.
 - A bounded `login_hint` MAY prefill the identifier field, MUST survive the no-JavaScript login
   form round trip, and MUST never bypass credential verification or appear in logs.
+- A bounded explicit `ui_locales` preference MUST select localized interaction content. When it is
+  omitted, a bounded quality-ranked `Accept-Language` preference MUST be inherited only after PAR
+  and signed Request Object resolution, then persisted inside the opaque browser authorization
+  transaction. The inferred locale MUST NOT participate in signed-parameter equality checks.
 - A bounded `id_token_hint` follows OIDC-012. It MAY identify the expected subject for SSO but MUST
   never replace verification of the issuer, audience, browser session, or current client policy.
 - A bounded `acr_values` parameter MAY list up to sixteen Authentication Context Class References

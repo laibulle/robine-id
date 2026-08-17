@@ -490,6 +490,9 @@ pub struct UiMessages {
     pub return_home: String,
     pub error_title: String,
     pub error_reference: String,
+    pub form_post_title: String,
+    pub form_post_intro: String,
+    pub form_post_submit: String,
     pub legal_navigation: String,
     pub support: String,
     pub privacy: String,
@@ -1020,6 +1023,12 @@ impl Branding {
             return_home: value("navigation.return_home", "Return home"),
             error_title: value("error.title", "Authorization request rejected"),
             error_reference: value("error.reference", "Reference"),
+            form_post_title: value("form_post.title", "Continue to your application"),
+            form_post_intro: value(
+                "form_post.intro",
+                "Your authorization response is ready. You will be redirected automatically.",
+            ),
+            form_post_submit: value("form_post.submit", "Continue securely"),
             legal_navigation: value("legal.navigation", "Legal and support"),
             support: value("legal.support", "Support"),
             privacy: value("legal.privacy", "Privacy"),
@@ -1126,6 +1135,11 @@ fn built_in_message(locale: &str, key: &str) -> Option<&'static str> {
         "navigation.return_home" => "Retour à l’accueil",
         "error.title" => "Demande d’autorisation refusée",
         "error.reference" => "Référence",
+        "form_post.title" => "Continuer vers votre application",
+        "form_post.intro" => {
+            "Votre réponse d’autorisation est prête. Vous allez être redirigé automatiquement."
+        }
+        "form_post.submit" => "Continuer en toute sécurité",
         "legal.navigation" => "Liens légaux et assistance",
         "legal.support" => "Assistance",
         "legal.privacy" => "Confidentialité",
@@ -2823,6 +2837,7 @@ mod tests {
         assert_eq!(messages.totp_submit, "Vérifier le code");
         assert_eq!(messages.consent_approve, "Autoriser");
         assert_eq!(messages.device_approved_title, "Appareil connecté");
+        assert_eq!(messages.form_post_submit, "Continuer en toute sécurité");
         assert_eq!(
             messages.scope_offline_access,
             "Rester connecté lorsque vous êtes absent"
@@ -2881,6 +2896,9 @@ mod tests {
             "navigation.return_home",
             "error.title",
             "error.reference",
+            "form_post.title",
+            "form_post.intro",
+            "form_post.submit",
             "legal.navigation",
             "legal.support",
             "legal.privacy",

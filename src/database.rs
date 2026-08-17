@@ -361,14 +361,25 @@ pub struct PendingAuthorization {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub response_mode: Option<String>,
+    pub ui_locales: Option<String>,
     pub resource: Option<String>,
     pub dpop_jkt: Option<String>,
     pub session_id: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub requested_claims: Option<String>,
     pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct LogoutTransaction {
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub post_logout_redirect_uri: Option<String>,
+    pub state: Option<String>,
+    pub ui_locales: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1625,14 +1636,16 @@ impl Database {
         &self,
         grant: &AuthorizationGrant,
         state: &str,
+        ui_locales: Option<&str>,
+        requested_claims: Option<&str>,
     ) -> Result<String, sqlx::Error> {
         let transaction = random_token();
         sqlx::query(
             "INSERT INTO pending_authorizations
              (transaction_hash, issuer, subject, client_id, redirect_uri, scopes, state,
-              nonce, code_challenge, response_mode, resource, dpop_jkt, session_id, auth_time,
-              mfa_verified, claims, authorization_details, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+              nonce, code_challenge, response_mode, ui_locales, resource, dpop_jkt, session_id,
+              auth_time, mfa_verified, claims, requested_claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
         )
         .bind(digest(&transaction))
         .bind(&grant.issuer)
@@ -1644,12 +1657,14 @@ impl Database {
         .bind(&grant.nonce)
         .bind(&grant.code_challenge)
         .bind(&grant.response_mode)
+        .bind(ui_locales)
         .bind(&grant.resource)
         .bind(&grant.dpop_jkt)
         .bind(&grant.session_id)
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
+        .bind(requested_claims)
         .bind(&grant.authorization_details)
         .bind(grant.expires_at)
         .execute(&self.pool)
@@ -1664,8 +1679,9 @@ impl Database {
         sqlx::query_as(
             "DELETE FROM pending_authorizations WHERE transaction_hash = $1
              RETURNING issuer, subject, client_id, redirect_uri, scopes, state, nonce,
-                       code_challenge, response_mode, resource, dpop_jkt, session_id, auth_time,
-                       mfa_verified, claims, authorization_details, expires_at",
+                       code_challenge, response_mode, ui_locales, resource, dpop_jkt, session_id,
+                       auth_time, mfa_verified, claims, requested_claims, authorization_details,
+                       expires_at",
         )
         .bind(digest(transaction))
         .fetch_optional(&self.pool)
@@ -1674,15 +1690,25 @@ impl Database {
 
     pub async fn issue_logout_transaction(
         &self,
-        return_to: Option<&str>,
+        issuer: &str,
+        client_id: Option<&str>,
+        post_logout_redirect_uri: Option<&str>,
+        state: Option<&str>,
+        ui_locales: Option<&str>,
     ) -> Result<String, sqlx::Error> {
         let transaction = random_token();
         sqlx::query(
-            "INSERT INTO logout_transactions (transaction_hash, return_to, expires_at)
-             VALUES ($1, $2, now() + interval '5 minutes')",
+            "INSERT INTO logout_transactions
+             (transaction_hash, issuer, client_id, post_logout_redirect_uri, state, ui_locales,
+              expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now() + interval '5 minutes')",
         )
         .bind(digest(&transaction))
-        .bind(return_to)
+        .bind(issuer)
+        .bind(client_id)
+        .bind(post_logout_redirect_uri)
+        .bind(state)
+        .bind(ui_locales)
         .execute(&self.pool)
         .await?;
         Ok(transaction)
@@ -1691,11 +1717,11 @@ impl Database {
     pub async fn consume_logout_transaction(
         &self,
         transaction: &str,
-    ) -> Result<Option<Option<String>>, sqlx::Error> {
-        sqlx::query_scalar(
+    ) -> Result<Option<LogoutTransaction>, sqlx::Error> {
+        sqlx::query_as(
             "DELETE FROM logout_transactions
              WHERE transaction_hash = $1 AND expires_at > now()
-             RETURNING return_to",
+             RETURNING issuer, client_id, post_logout_redirect_uri, state, ui_locales",
         )
         .bind(digest(transaction))
         .fetch_optional(&self.pool)

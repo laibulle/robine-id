@@ -24,6 +24,42 @@ pub struct EssentialClaim {
     pub accepted_values: Vec<Value>,
 }
 
+pub(crate) fn essential_claims_from_parameter(serialized: Option<&str>) -> Vec<EssentialClaim> {
+    let Some(claims) = serialized
+        .and_then(|claims| serde_json::from_str::<Value>(claims).ok())
+        .and_then(|claims| claims.as_object().cloned())
+    else {
+        return vec![];
+    };
+
+    [
+        ("id_token", ClaimDestination::IdToken),
+        ("userinfo", ClaimDestination::UserInfo),
+    ]
+    .into_iter()
+    .flat_map(|(section, destination)| {
+        claims
+            .get(section)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(move |requested| {
+                requested.iter().filter_map(move |(name, requirement)| {
+                    let requirement = requirement.as_object()?;
+                    requirement
+                        .get("essential")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        .then(|| EssentialClaim {
+                            destination,
+                            name: name.clone(),
+                            accepted_values: requested_claim_values(requirement),
+                        })
+                })
+            })
+    })
+    .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorizationError {
     pub code: &'static str,
@@ -711,41 +747,7 @@ impl AuthorizationRequest {
     }
 
     pub fn essential_claims(&self) -> Vec<EssentialClaim> {
-        let Some(claims) = self
-            .claims
-            .as_deref()
-            .and_then(|claims| serde_json::from_str::<Value>(claims).ok())
-            .and_then(|claims| claims.as_object().cloned())
-        else {
-            return vec![];
-        };
-
-        [
-            ("id_token", ClaimDestination::IdToken),
-            ("userinfo", ClaimDestination::UserInfo),
-        ]
-        .into_iter()
-        .flat_map(|(section, destination)| {
-            claims
-                .get(section)
-                .and_then(Value::as_object)
-                .into_iter()
-                .flat_map(move |requested| {
-                    requested.iter().filter_map(move |(name, requirement)| {
-                        let requirement = requirement.as_object()?;
-                        requirement
-                            .get("essential")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                            .then(|| EssentialClaim {
-                                destination,
-                                name: name.clone(),
-                                accepted_values: requested_claim_values(requirement),
-                            })
-                    })
-                })
-        })
-        .collect()
+        essential_claims_from_parameter(self.claims.as_deref())
     }
 
     pub fn authorization_details_value(
@@ -1268,7 +1270,7 @@ fn essential_claim_available(
             })
 }
 
-fn valid_pkce_challenge(challenge: &str) -> bool {
+pub(crate) fn valid_pkce_challenge(challenge: &str) -> bool {
     (43..=128).contains(&challenge.len())
         && challenge
             .bytes()
@@ -1711,7 +1713,7 @@ mod tests {
             discovery.pushed_authorization_request_endpoint,
             "https://id.example/default/par"
         );
-        assert_eq!(discovery.ui_locales_supported, vec!["en"]);
+        assert_eq!(discovery.ui_locales_supported, vec!["en", "fr"]);
         assert_eq!(
             discovery.token_endpoint_auth_methods_supported,
             vec![

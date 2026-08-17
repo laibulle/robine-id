@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ messages.locale }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Continue · {{ product_name }}</title>
+    <title>{{ messages.form_post_title }} · {{ product_name }}</title>
     {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
     <script defer src="/assets/app.js"></script>
@@ -13,11 +13,11 @@
       <section class="auth-card" aria-labelledby="form-post-title">
         {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">{% endif %}
         <p class="eyebrow">{{ product_name }}</p>
-        <h1 id="form-post-title">Continue to your application</h1>
-        <p class="auth-intro" aria-live="polite">Your authorization response is ready. You will be redirected automatically.</p>
+        <h1 id="form-post-title">{{ messages.form_post_title }}</h1>
+        <p class="auth-intro" aria-live="polite">{{ messages.form_post_intro }}</p>
         <form id="authorization-response-form" method="post" action="{{ redirect_uri }}" class="auth-form" data-auto-submit>
           {% for parameter in parameters %}<input type="hidden" name="{{ parameter.0 }}" value="{{ parameter.1 }}">{% endfor %}
-          <button id="authorization-response-submit" type="submit" class="primary-action">Continue securely</button>
+          <button id="authorization-response-submit" type="submit" class="primary-action">{{ messages.form_post_submit }}</button>
         </form>
       </section>
     </main>

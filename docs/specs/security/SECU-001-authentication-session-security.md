@@ -46,12 +46,19 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
   invalid shapes receive the same generic failure and dummy-hash work as an unknown identity.
 - Production MUST force HTTPS, emit HSTS, and mark cookies Secure. Development MAY relax Secure cookies only for loopback HTTP.
 - Authorization requests, identity claims, and consent transactions MUST remain server-side and be consumed atomically.
+- A consumed consent transaction MUST be revalidated against active issuer, user, client, redirect,
+  grant, scope, resource, PKCE/nonce, MFA, essential-claim, and authorization-detail policy. Mapped
+  output claims MUST be rebuilt from active user state. Revoked policy MUST fail locally rather
+  than sending a code or denial to a redirect no longer registered.
 - A rendered login form MUST carry only an opaque issuer-bound browser authorization transaction;
   it MUST NOT reflect redirect URIs, OAuth state, nonce, scope, PKCE, resource, request objects, or
   DPoP bindings. Failed authentication MUST consume and replace the transaction before retry.
 - OAuth parameters with security meaning MUST reject duplicate definitions so a proxy, client, and
   provider cannot select conflicting values from the same serialized request.
-- Post-logout redirects MUST be protected by exact registration and a verified ID-token hint.
+- Post-logout redirects MUST be protected by exact registration and a verified ID-token hint or
+  explicit active client. The single-use confirmation transaction MUST store structured
+  issuer/client/URI/state bindings and revalidate them against active policy before redirecting;
+  policy revocation MUST fail closed for the redirect without cancelling local logout.
 - A validated authenticated session MAY satisfy a later authorization request without another
   password check, except when prompt policy explicitly requires interaction or the user's current
   factor policy requires TOTP and the stored session did not verify it.

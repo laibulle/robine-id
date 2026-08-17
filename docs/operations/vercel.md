@@ -54,7 +54,10 @@ Default visual assets and `robots.txt` are compiled into the same Rust binary ra
 an invocation filesystem. They expose exact media types, bounded cache lifetimes, content-derived
 ETags, conditional GET, and bodyless HEAD responses through the same Actix adapter.
 The complete English/French Askama message catalogs are embedded as well; regional `ui_locales`
-lookup and configured per-key overrides therefore behave identically on warm and cold functions.
+lookup, bounded quality-ranked `Accept-Language` fallback, and configured per-key overrides therefore
+behave identically on conventional servers and warm or cold functions. The shared renderer derives
+the same validated `Content-Language` as each document's HTML `lang`; the adapter forwards it
+unchanged without adding it to redirects or JSON responses.
 Configured remote logo and favicon URLs remain supported without bundling their bytes; validation
 permits safe HTTPS targets and the rendered URL receives the semantic-revision cache key after any
 operator-supplied query parameters.

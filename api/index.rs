@@ -473,6 +473,51 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn forwards_accept_language_to_browser_errors() {
+        let application = Application::without_database(
+            Snapshot::load().expect("development configuration should load"),
+        );
+        let worker = ActixWorker::start(application).expect("Actix worker");
+        let response = worker
+            .dispatch(FunctionRequest {
+                method: "GET".to_owned(),
+                uri: "/default/authorize".to_owned(),
+                headers: vec![(
+                    "accept-language".to_owned(),
+                    b"en;q=0.2, fr-FR;q=0.9".to_vec(),
+                )],
+                body: vec![],
+                request_id: "vercel_accept_language.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel localized browser error");
+
+        assert_eq!(response.status(), 400);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-language")
+                .and_then(|value| value.to_str().ok()),
+            Some("fr")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("vercel_accept_language.123")
+        );
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("localized browser error body")
+            .to_bytes();
+        let body = std::str::from_utf8(&body).expect("UTF-8 localized browser error");
+        assert!(body.contains("<html lang=\"fr\">"));
+        assert!(body.contains("Demande d’autorisation refusée"));
+    }
+
+    #[actix_web::test]
     async fn preserves_protocol_method_negotiation_through_vercel() {
         let application = Application::without_database(
             Snapshot::load().expect("development configuration should load"),
@@ -2115,6 +2160,7 @@ mod tests {
             ),
             ("code_challenge_method", "S256"),
             ("response_mode", "form_post"),
+            ("ui_locales", "fr-FR"),
         ])
         .expect("form_post query");
         let worker =
@@ -2132,6 +2178,13 @@ mod tests {
             .expect("Vercel form_post response");
 
         assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-language")
+                .and_then(|value| value.to_str().ok()),
+            Some("fr")
+        );
         assert!(
             response
                 .headers()
@@ -2147,6 +2200,8 @@ mod tests {
         assert!(body.contains("name=\"error\" value=\"invalid_scope\""));
         assert!(body.contains("name=\"state\" value=\"vercel-form-post-state\""));
         assert!(body.contains("data-auto-submit"));
+        assert!(body.contains("<html lang=\"fr\">"));
+        assert!(body.contains("Continuer vers votre application"));
     }
 
     #[actix_web::test]

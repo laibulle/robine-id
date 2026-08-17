@@ -24,9 +24,18 @@ Robine ID ends the local authenticated session and optionally returns the browse
   Expiration alone MUST NOT invalidate a logout hint because confirmation remains mandatory.
 - The return URI MUST exactly match a `post_logout_redirect_uris` entry belonging to that audience client.
 - A supplied `state` MUST be appended unchanged only after the return URI is trusted.
+- The confirmation transaction MUST retain the issuer, client, raw registered return URI, and state
+  as separate server-side bindings rather than an opaque final destination. On consumption, the
+  active issuer URL, client assignment, client status, and exact return registration MUST be
+  revalidated. A stale or legacy binding MUST discard the redirect while still completing local
+  session logout.
 - A bounded `ui_locales` preference MUST select the localized confirmation content when available.
-  A bounded provider-defined `logout_hint` MAY be accepted but MUST NOT identify a redirect client
-  or bypass explicit confirmation.
+  The opaque transaction MUST preserve that bounded preference for the completion or
+  front-channel interstitial, and an active client MAY retain its branding across the confirmation.
+  When omitted, the confirmation, completion, and local error pages MUST use the same bounded
+  quality-ranked `Accept-Language` fallback as other browser interactions. A bounded
+  provider-defined `logout_hint` MAY be accepted but MUST NOT identify a redirect client or bypass
+  explicit confirmation.
 - Completion MUST revoke the authenticated session registration, clear the browser session, and drop the session cookie.
 - An invalid return request MUST fail locally and MUST NOT redirect to the supplied URI.
 - Empty optional logout parameters MUST be treated as omitted. ID-token hints MUST be limited to
@@ -43,6 +52,8 @@ Robine ID ends the local authenticated session and optionally returns the browse
 - After logout, the former session identifier is no longer accepted.
 - Logout without a return URI renders a complete branded confirmation page.
 - State is preserved on a validated post-logout redirect.
+- Disabling the issuer or client, changing the issuer URL, or removing the registered return URI
+  between initiation and confirmation prevents the redirect without preserving the local session.
 
 ## Non-Goals
 

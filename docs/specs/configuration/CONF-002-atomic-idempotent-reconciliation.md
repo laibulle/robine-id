@@ -21,6 +21,16 @@ Robine ID reconciles declared configuration into runtime and persistent state at
 - The running service MUST detect changes to the root or application documents and attempt a complete reload without restart.
 - A reload MUST validate the complete composed revision before activation. Invalid or partially written files MUST leave the last valid revision active.
 - Repeated observation of the same invalid inputs MUST NOT create unbounded duplicate failure events.
+- An activated revision MUST immediately govern pending consent consumption. Disabling a user or
+  client, or removing its authorization-code grant, redirect, scope, resource, authentication
+  context, essential claim availability/value, or authorization-detail policy MUST invalidate the
+  old pending authorization before any code or browser redirect is emitted. Non-essential mapped
+  claims MUST be rebuilt from the active user and mapping definitions at consumption.
+- An activated revision MUST also govern pending logout confirmation. A changed issuer URL,
+  disabled issuer or client, removed issuer assignment, or removed post-logout redirect MUST drop
+  the stale client redirect while local logout still completes.
+- Pending Device Flow verification MUST immediately adopt the active client grant, scope, resource,
+  offline-access, and rich-authorization policy before browser confirmation or token issuance.
 
 ## Acceptance Criteria
 
