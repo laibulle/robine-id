@@ -13,15 +13,16 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
 	@echo ""
 	@echo "  make dev        Start PostgreSQL and run the Rust development server"
-	@echo "  make dev-container  Build and run the Rust server entirely in Docker"
-	@echo "  make dev-db     Start the development PostgreSQL container"
+	@echo "  make dev-container  Build and run Rust and private PostgreSQL in Docker"
+	@echo "  make dev-db     Start PostgreSQL on the loopback development port"
 	@echo "  make dev-down   Stop the development PostgreSQL container"
+	@echo "  make compose-validate Validate development and release Compose models"
 	@echo "  make config-validate  Validate the effective Rust configuration"
 	@echo "  make config-preview [CONFIG=path]  Preview Rust configuration reconciliation"
 	@echo "  make config-apply [CONFIG=path]    Validate and atomically apply in the command runtime"
@@ -52,9 +53,9 @@ dev-container:
 
 dev-db:
 	@if docker info >/dev/null 2>&1; then \
-		docker compose -f compose.dev.yml up --detach --wait; \
+		docker compose -f compose.dev.yml -f compose.dev.host.yml up --detach --wait; \
 	else \
-		sg docker -c "docker compose -f compose.dev.yml up --detach --wait"; \
+		sg docker -c "docker compose -f compose.dev.yml -f compose.dev.host.yml up --detach --wait"; \
 	fi
 
 dev-down:
@@ -63,6 +64,11 @@ dev-down:
 	else \
 		sg docker -c "docker compose -f compose.dev.yml down"; \
 	fi
+
+compose-validate:
+	docker compose --profile runtime -f compose.dev.yml config --quiet
+	docker compose --profile runtime -f compose.dev.yml -f compose.dev.host.yml config --quiet
+	ROBINE_ID_ENV_FILE=.env.release.example docker compose -f compose.release.yml config --quiet
 
 config-validate:
 	cargo run --bin validate_config
@@ -109,7 +115,7 @@ check-variables:
 	@test -n "$(DOCKERHUB_USER)" || (echo "DOCKERHUB_USER is required" >&2; exit 1)
 	@test -n "$(VERSION)" || (echo "VERSION could not be read from Cargo.toml" >&2; exit 1)
 
-preflight: check-variables rust-preflight
+preflight: check-variables compose-validate rust-preflight
 	mix precommit
 	ROBINE_ID_CONFIG="$(CURDIR)/deploy/config/robine_id.json" \
 		ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/config/applications" \

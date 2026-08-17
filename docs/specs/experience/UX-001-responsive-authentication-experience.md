@@ -32,6 +32,10 @@ Robine ID provides a polished, fast, accessible authentication experience across
 - Consent MUST identify the client and explain every requested scope in plain language.
 - Destructive or denying actions MUST be visually distinguishable from the primary approving action.
 - Every form, key action, and error region MUST have a stable unique DOM identifier suitable for automated tests.
+- Landing, documentation, and Device verification navigation actions MUST use the same stable-ID
+  contract. ARIA tables MUST expose explicit column-header and cell roles.
+- The landing page and built-in documentation MUST support bodyless `HEAD` responses with the same
+  content length, language, media type, and non-cacheable policy as their `GET` representation.
 - Pages MUST have a unique descriptive title and one primary heading.
 - Enhanced form submissions MUST expose an accessible busy state, identify the active submit action visually,
   announce localized progress through a live status outside the busy form, and suppress duplicate

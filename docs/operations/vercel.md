@@ -22,7 +22,9 @@ and router for every invocation. A bounded 128-request channel provides back-pre
 semaphore permits at most 32 requests to execute concurrently on the worker's local Actix
 scheduler, while request-body collection remains on the Vercel Tokio runtime. A full queue or
 unavailable worker returns a security-hardened HTTP 503 with `Retry-After: 1`; it is also counted in
-HTTP metrics. Configuration, the SQL pool, migrations, metrics, and the route service are therefore
+HTTP metrics. A POST to token, PAR, or revocation exposes that retry signal to the browser only after
+one exact registered public-client origin passes the same policy as an oversized-request rejection;
+all other adapter-level 503 responses remain same-origin. Configuration, the SQL pool, migrations, metrics, and the route service are therefore
 initialized at most once per warm process.
 HTTP method counters and duration summaries use only `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`.
 Body-limit 413 and worker/queue 503 responses are recorded even when rejection happens before Actix;

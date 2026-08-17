@@ -289,16 +289,28 @@ fn invalid_setting(name: &str, requirement: &str) -> io::Error {
 
 #[cfg(unix)]
 async fn shutdown_signal() -> &'static str {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("SIGTERM handler installation failed");
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if let Err(error) = result {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut terminate) => tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(event = "shutdown", outcome = "signal_error", %error, "SIGINT handler failed");
+                }
+                "SIGINT"
+            }
+            _ = terminate.recv() => "SIGTERM",
+        },
+        Err(error) => {
+            tracing::error!(
+                event = "shutdown",
+                outcome = "signal_error",
+                %error,
+                "SIGTERM handler installation failed; retaining SIGINT shutdown support"
+            );
+            if let Err(error) = tokio::signal::ctrl_c().await {
                 tracing::error!(event = "shutdown", outcome = "signal_error", %error, "SIGINT handler failed");
             }
             "SIGINT"
         }
-        _ = terminate.recv() => "SIGTERM",
     }
 }
 

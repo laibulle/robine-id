@@ -25,9 +25,9 @@
         </form>
         <span id="device-code-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
         {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
-          {% if let Some(url) = support_url %}<a href="{{ url }}">{{ messages.support }}</a>{% endif %}
-          {% if let Some(url) = privacy_url %}<a href="{{ url }}">{{ messages.privacy }}</a>{% endif %}
-          {% if let Some(url) = terms_url %}<a href="{{ url }}">{{ messages.terms }}</a>{% endif %}
+          {% if let Some(url) = support_url %}<a id="device-code-support-link" href="{{ url }}">{{ messages.support }}</a>{% endif %}
+          {% if let Some(url) = privacy_url %}<a id="device-code-privacy-link" href="{{ url }}">{{ messages.privacy }}</a>{% endif %}
+          {% if let Some(url) = terms_url %}<a id="device-code-terms-link" href="{{ url }}">{{ messages.terms }}</a>{% endif %}
         </nav>{% endif %}
       </section>
     </main>

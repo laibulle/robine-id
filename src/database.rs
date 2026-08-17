@@ -664,7 +664,7 @@ impl Database {
         .bind(jkt)
         .execute(&mut *transaction)
         .await?;
-        let nonce = random_token();
+        let nonce = random_token()?;
         sqlx::query(
             "INSERT INTO oauth_dpop_nonces
              (nonce_hash, issuer, context, jkt, expires_at)
@@ -693,7 +693,7 @@ impl Database {
         &self,
         grant: &AuthorizationGrant,
     ) -> Result<String, sqlx::Error> {
-        let code = random_token();
+        let code = random_token()?;
         let hash = digest(&code);
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
@@ -750,7 +750,7 @@ impl Database {
                 "pushed authorization lifetime must contain 10 to 600 seconds".to_owned(),
             ));
         }
-        let token = random_token();
+        let token = random_token()?;
         let request_uri = format!("urn:ietf:params:oauth:request_uri:{token}");
         let request =
             serde_json::to_value(request).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
@@ -780,7 +780,7 @@ impl Database {
                 "browser authorization lifetime must contain 60 to 3600 seconds".to_owned(),
             ));
         }
-        let transaction = random_token();
+        let transaction = random_token()?;
         let request =
             serde_json::to_value(request).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
         sqlx::query(
@@ -836,7 +836,7 @@ impl Database {
                 "invalid TOTP challenge policy".to_owned(),
             ));
         }
-        let transaction = random_token();
+        let transaction = random_token()?;
         sqlx::query(
             "INSERT INTO totp_challenges
              (transaction_hash, issuer, subject, purpose, payload, expires_at)
@@ -922,6 +922,54 @@ impl Database {
         Ok(registered)
     }
 
+    pub async fn consume_recovery_challenge(
+        &self,
+        transaction: &str,
+        issuer: &str,
+        subject: &str,
+        purpose: &str,
+        code_hash_digest: &[u8],
+    ) -> Result<bool, sqlx::Error> {
+        if !valid_opaque_token(transaction)
+            || !matches!(purpose, "authorization" | "device")
+            || code_hash_digest.len() != 32
+        {
+            return Ok(false);
+        }
+        let mut database_transaction = self.pool.begin().await?;
+        let consumed = sqlx::query_scalar::<_, String>(
+            "DELETE FROM totp_challenges
+             WHERE transaction_hash = $1 AND issuer = $2 AND subject = $3 AND purpose = $4
+               AND expires_at > now()
+             RETURNING subject",
+        )
+        .bind(digest(transaction))
+        .bind(issuer)
+        .bind(subject)
+        .bind(purpose)
+        .fetch_optional(&mut *database_transaction)
+        .await?
+        .is_some();
+        if !consumed {
+            database_transaction.commit().await?;
+            return Ok(false);
+        }
+        let registered = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO mfa_recovery_code_uses (issuer, subject, code_hash_digest)
+             VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING
+             RETURNING 1",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .bind(code_hash_digest)
+        .fetch_optional(&mut *database_transaction)
+        .await?
+        .is_some();
+        database_transaction.commit().await?;
+        Ok(registered)
+    }
+
     pub async fn consume_pushed_authorization(
         &self,
         request_uri: &str,
@@ -973,8 +1021,8 @@ impl Database {
             ));
         }
         for _ in 0..5 {
-            let device_code = random_token();
-            let user_code = random_user_code();
+            let device_code = random_token()?;
+            let user_code = random_user_code()?;
             let result = sqlx::query(
                 "INSERT INTO device_authorizations
                  (device_code_hash, user_code_hash, issuer, client_id, scopes, resource,
@@ -1007,7 +1055,7 @@ impl Database {
         user_code: &str,
         issuer: &str,
     ) -> Result<Option<(String, DeviceAuthorization)>, sqlx::Error> {
-        let transaction = random_token();
+        let transaction = random_token()?;
         let authorization = sqlx::query_as::<_, DeviceAuthorization>(
             "UPDATE device_authorizations
              SET verification_hash = $1
@@ -1221,7 +1269,7 @@ impl Database {
     }
 
     pub async fn issue_access_token(&self, grant: &AccessGrant) -> Result<String, sqlx::Error> {
-        let token = random_token();
+        let token = random_token()?;
         self.store_access_token(&token, grant).await?;
         Ok(token)
     }
@@ -1308,8 +1356,8 @@ impl Database {
     }
 
     pub async fn issue_refresh_token(&self, grant: &RefreshGrant) -> Result<String, sqlx::Error> {
-        let token = random_token();
-        let family_id = digest(&random_token());
+        let token = random_token()?;
+        let family_id = digest(&random_token()?);
         self.insert_refresh_token(&token, &family_id, grant, &self.pool)
             .await?;
         Ok(token)
@@ -1393,7 +1441,7 @@ impl Database {
             .bind(digest(token))
             .execute(&mut *transaction)
             .await?;
-        let rotated = random_token();
+        let rotated = random_token()?;
         let grant = RefreshGrant {
             issuer: stored.issuer,
             subject: stored.subject,
@@ -1537,8 +1585,8 @@ impl Database {
         absolute_timeout_seconds: i64,
         mfa_verified: bool,
     ) -> Result<StartedSession, sqlx::Error> {
-        let token = random_token();
-        let session_id = random_token();
+        let token = random_token()?;
+        let session_id = random_token()?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(subject)
@@ -1639,7 +1687,7 @@ impl Database {
         ui_locales: Option<&str>,
         requested_claims: Option<&str>,
     ) -> Result<String, sqlx::Error> {
-        let transaction = random_token();
+        let transaction = random_token()?;
         sqlx::query(
             "INSERT INTO pending_authorizations
              (transaction_hash, issuer, subject, client_id, redirect_uri, scopes, state,
@@ -1696,7 +1744,7 @@ impl Database {
         state: Option<&str>,
         ui_locales: Option<&str>,
     ) -> Result<String, sqlx::Error> {
-        let transaction = random_token();
+        let transaction = random_token()?;
         sqlx::query(
             "INSERT INTO logout_transactions
              (transaction_hash, issuer, client_id, post_logout_redirect_uri, state, ui_locales,
@@ -1734,7 +1782,7 @@ impl Database {
         }
 
         let generated = generate_signing_key_async().await?;
-        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem);
+        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem)?;
         sqlx::query(
             "INSERT INTO signing_keys
              (issuer, kid, private_key_ciphertext, private_key_nonce, modulus, exponent)
@@ -1816,7 +1864,7 @@ impl Database {
         }
 
         let generated = generate_signing_key_async().await?;
-        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem);
+        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem)?;
 
         sqlx::query(
             "INSERT INTO retained_signing_keys
@@ -1891,7 +1939,7 @@ impl Database {
         }
 
         let generated = generate_signing_key_async().await?;
-        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem);
+        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem)?;
         let rotation_id = format!("automatic-{current_kid}");
         let retain_until = now + chrono::Duration::seconds(retention_seconds);
         sqlx::query(
@@ -1973,7 +2021,7 @@ impl Database {
                 &key.private_key_ciphertext,
                 &key.private_key_nonce,
             )?;
-            let (ciphertext, nonce) = self.encrypt_private_key(&private_key);
+            let (ciphertext, nonce) = self.encrypt_private_key(&private_key)?;
             sqlx::query(
                 "UPDATE signing_keys
                  SET private_key_ciphertext = $3, private_key_nonce = $4
@@ -1991,7 +2039,7 @@ impl Database {
                 &key.private_key_ciphertext,
                 &key.private_key_nonce,
             )?;
-            let (ciphertext, nonce) = self.encrypt_private_key(&private_key);
+            let (ciphertext, nonce) = self.encrypt_private_key(&private_key)?;
             sqlx::query(
                 "UPDATE retained_signing_keys
                  SET private_key_ciphertext = $3, private_key_nonce = $4
@@ -2022,15 +2070,15 @@ impl Database {
         stored.map(|key| self.decrypt_private_key(key)).transpose()
     }
 
-    fn encrypt_private_key(&self, private_key: &str) -> (Vec<u8>, Vec<u8>) {
+    fn encrypt_private_key(&self, private_key: &str) -> Result<(Vec<u8>, Vec<u8>), sqlx::Error> {
         let cipher = Aes256Gcm::new_from_slice(&self.key_encryption_key)
-            .expect("AES-256 key has the correct length");
+            .map_err(|_| cryptographic_failure("invalid signing key encryption key"))?;
         let mut nonce = [0_u8; 12];
-        getrandom::fill(&mut nonce).expect("operating system randomness is unavailable");
+        fill_random(&mut nonce)?;
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), private_key.as_bytes())
-            .expect("private key encryption failed");
-        (ciphertext, nonce.to_vec())
+            .map_err(|_| cryptographic_failure("signing key encryption failed"))?;
+        Ok((ciphertext, nonce.to_vec()))
     }
 
     fn private_digest(&self, value: &str) -> Vec<u8> {
@@ -2108,18 +2156,27 @@ fn database_url_from_components(
     Some(url.into())
 }
 
-fn random_token() -> String {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
-    URL_SAFE_NO_PAD.encode(bytes)
+fn cryptographic_failure(message: &'static str) -> sqlx::Error {
+    sqlx::Error::Protocol(message.to_owned())
 }
 
-fn random_user_code() -> String {
+fn fill_random(destination: &mut [u8]) -> Result<(), sqlx::Error> {
+    getrandom::fill(destination)
+        .map_err(|_| cryptographic_failure("operating system randomness is unavailable"))
+}
+
+fn random_token() -> Result<String, sqlx::Error> {
+    let mut bytes = [0_u8; 32];
+    fill_random(&mut bytes)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn random_user_code() -> Result<String, sqlx::Error> {
     const ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXY";
     let mut code = String::with_capacity(8);
     while code.len() < 8 {
         let mut bytes = [0_u8; 16];
-        getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
+        fill_random(&mut bytes)?;
         for byte in bytes.into_iter().filter(|byte| *byte < 240) {
             code.push(char::from(ALPHABET[usize::from(byte) % ALPHABET.len()]));
             if code.len() == 8 {
@@ -2127,7 +2184,7 @@ fn random_user_code() -> String {
             }
         }
     }
-    code
+    Ok(code)
 }
 
 fn format_user_code(code: &str) -> String {
@@ -2145,28 +2202,29 @@ fn digest(value: &str) -> Vec<u8> {
     Sha256::digest(value.as_bytes()).to_vec()
 }
 
-fn generate_signing_key() -> SigningKey {
+fn generate_signing_key() -> Result<SigningKey, sqlx::Error> {
     let mut rng = rand_core::OsRng;
-    let private = RsaPrivateKey::new(&mut rng, 2048).expect("RSA key generation failed");
+    let private = RsaPrivateKey::new(&mut rng, 2048)
+        .map_err(|_| cryptographic_failure("RSA signing key generation failed"))?;
     let public = private.to_public_key();
     let mut kid_bytes = [0_u8; 16];
-    getrandom::fill(&mut kid_bytes).expect("operating system randomness is unavailable");
+    fill_random(&mut kid_bytes)?;
 
-    SigningKey {
+    Ok(SigningKey {
         kid: URL_SAFE_NO_PAD.encode(kid_bytes),
         private_key_pem: private
             .to_pkcs8_pem(LineEnding::LF)
-            .expect("RSA PEM encoding failed")
+            .map_err(|_| cryptographic_failure("RSA signing key encoding failed"))?
             .to_string(),
         modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
         exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
-    }
+    })
 }
 
 async fn generate_signing_key_async() -> Result<SigningKey, sqlx::Error> {
     tokio::task::spawn_blocking(generate_signing_key)
         .await
-        .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+        .map_err(|_| cryptographic_failure("signing key generation task failed"))?
 }
 
 #[cfg(test)]
@@ -2320,7 +2378,7 @@ mod tests {
     #[test]
     fn generates_unambiguous_high_entropy_device_user_codes() {
         let codes = (0..128)
-            .map(|_| random_user_code())
+            .map(|_| random_user_code().expect("operating system entropy"))
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(codes.len(), 128);
         for code in codes {
@@ -2367,7 +2425,9 @@ mod tests {
         )
         .expect("current encryption configuration");
 
-        let (old_ciphertext, old_nonce) = old.encrypt_private_key("old private key");
+        let (old_ciphertext, old_nonce) = old
+            .encrypt_private_key("old private key")
+            .expect("old private key encryption");
         assert_eq!(
             staged
                 .decrypt_private_key_material(&old_ciphertext, &old_nonce)
@@ -2380,7 +2440,9 @@ mod tests {
                 .is_err()
         );
 
-        let (new_ciphertext, new_nonce) = staged.encrypt_private_key("new private key");
+        let (new_ciphertext, new_nonce) = staged
+            .encrypt_private_key("new private key")
+            .expect("new private key encryption");
         assert_eq!(
             current_only
                 .decrypt_private_key_material(&new_ciphertext, &new_nonce)

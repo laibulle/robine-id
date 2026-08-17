@@ -88,6 +88,7 @@ Run the complete quality gate and generate the coverage reports locally with:
 
 ```sh
 make rust-preflight
+make compose-validate
 make rust-integration
 make release-smoke
 ```
@@ -123,7 +124,10 @@ It listens on `127.0.0.1:4001` by default. `HOST`, `PORT` (1 through 65535), `RO
 `ROBINE_ID_APPLICATIONS_DIR` can override those defaults. `DATABASE_URL` selects a PostgreSQL
 database and `KEY_ENCRYPTION_SECRET` encrypts persisted RSA private keys with AES-256-GCM. The
 server applies embedded SQL migrations at startup. `make dev` starts the PostgreSQL 17 development
-container automatically; `make dev-down` stops it without deleting its named data volume.
+container automatically and publishes it only on `127.0.0.1:54329`; `make dev-down` stops it
+without deleting its named data volume. `make dev-container` keeps PostgreSQL private to the
+project-scoped Compose network because only the containerized application needs to reach it. It
+publishes only the application on `127.0.0.1:4001`.
 Set `TRUST_PROXY_HEADERS=true` (or `1`) only behind a trusted reverse proxy; `false`/`0` disables it,
 and Vercel enables forwarded-header handling automatically.
 Operational events are emitted as JSON with bounded fields; `RUST_LOG` overrides the validated
@@ -136,6 +140,8 @@ defaults and accepted range, preventing an acquired connection from waiting inde
 Database settings are strict: malformed URLs, partial `PG*` credentials, missing or weak encryption
 secrets, and numeric values outside their documented ranges stop application initialization with a
 non-secret diagnostic instead of silently selecting a fallback.
+Runtime entropy, signing-key generation, encoding, and encryption failures propagate as bounded
+errors rather than panicking the Actix or Vercel process or committing partial key state.
 Long-running servers remove expired protocol state hourly; `DATABASE_CLEANUP_INTERVAL` overrides the
 interval in seconds (`0` disables the task; otherwise it must be 60 through 86400).
 Conventional-server settings are strict too: an empty host, invalid port, malformed proxy boolean,
@@ -143,7 +149,11 @@ or interval outside its documented range stops startup without echoing the submi
 Use `make dev-container` to build and run both the Rust application and PostgreSQL in Docker. The
 Rust image is built from the canonical `Dockerfile`, runs as an unprivileged user, and includes a readiness
 health check implemented by the bounded `robine-id-healthcheck` Rust binary; the runtime image does
-not install `curl` solely for container health polling.
+not install `curl` solely for container health polling. In both development and release Compose,
+the application root filesystem is read-only, all Linux capabilities are dropped, privilege
+escalation is disabled, and only a bounded in-memory `/tmp` remains writable. The known development
+database password and host-published `make dev` database are development conveniences, not a
+production security boundary.
 
 The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
 discovery endpoints and `/docs`; strict declarative application loading; bcrypt authentication with database-backed
@@ -153,6 +163,11 @@ RFC 8628 device authorization; RS256 ID tokens; retained-key JWKS; per-issuer op
 introspection/revocation. Browser transactions, sessions, access/refresh tokens, rate limits, and
 encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
+The landing-page runtime badge uses the same drainage and PostgreSQL health decision as
+`/health/ready`, so it never presents an unavailable instance as ready.
+The landing page and built-in documentation expose bodyless `HEAD` alongside `GET`, preserving the
+HTML representation's content length, language, cache policy, and media type through Actix and
+Vercel.
 Authentication forms use one shared progressive enhancement for password visibility, accessible busy
 feedback, and duplicate-submit suppression. Login, TOTP, consent, device, and logout submissions remain
 fully functional without JavaScript, inert reveal controls stay hidden until enhancement is active,
@@ -182,7 +197,9 @@ UserInfo, logout, and other credential-bearing responses stay outside compressio
 secrets through compression side channels.
 Warm Vercel processes retain one Actix worker and route service behind a 128-request queue and a
 32-request concurrency limit, avoiding per-invocation Actix system/router construction and
-returning a secure retryable 503 instead of growing work without bound.
+returning a secure retryable 503 instead of growing work without bound. Registered public-browser
+token, PAR, and revocation callers can read its `Retry-After` signal only after the same strict
+single-origin policy used for adapter-level body-limit rejection has passed.
 Registered public-client redirect origins can call the token, PAR, and revocation endpoints from a
 browser through strict POST-only CORS policies. Revocation permits only `Content-Type` and never
 browser `Authorization`; confidential and unrelated origins are never granted CORS. Malformed and

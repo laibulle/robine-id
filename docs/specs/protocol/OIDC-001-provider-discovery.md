@@ -12,6 +12,8 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 
 - A configured issuer with `enabled: false` MUST be indistinguishable from an unknown issuer at
   both OIDC and RFC 8414 metadata routes and MUST NOT be returned through WebFinger.
+- Metadata construction MUST fail closed without panicking if an internally supplied issuer URL no
+  longer satisfies the validated configuration invariant.
 
 - The server MUST expose `/.well-known/openid-configuration` for every configured issuer.
 - The response MUST contain the issuer, authorization endpoint, token endpoint, user-info endpoint, JWKS URI, supported response types, supported subject types, supported signing algorithms, supported scopes, and supported claims.

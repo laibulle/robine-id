@@ -5,6 +5,7 @@ pub mod database;
 pub mod metrics;
 pub mod pairwise;
 pub mod protocol;
+pub mod recovery;
 pub mod tokens;
 pub mod totp;
 pub mod web;
@@ -92,17 +93,31 @@ impl Application {
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.snapshot
-            .read()
-            .expect("configuration snapshot lock poisoned")
-            .clone()
+        match self.snapshot.read() {
+            Ok(active) => active.clone(),
+            Err(poisoned) => {
+                tracing::error!(
+                    event = "configuration_snapshot_lock",
+                    outcome = "recovered",
+                    "recovered poisoned configuration snapshot read lock"
+                );
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     pub fn activate_snapshot(&self, snapshot: Snapshot) -> ReconciliationOutcome {
-        let mut active = self
-            .snapshot
-            .write()
-            .expect("configuration snapshot lock poisoned");
+        let mut active = match self.snapshot.write() {
+            Ok(active) => active,
+            Err(poisoned) => {
+                tracing::error!(
+                    event = "configuration_snapshot_lock",
+                    outcome = "recovered",
+                    "recovered poisoned configuration snapshot write lock"
+                );
+                poisoned.into_inner()
+            }
+        };
         if active.revision == snapshot.revision {
             ReconciliationOutcome::Unchanged
         } else {
@@ -358,5 +373,29 @@ mod tests {
             application.activate_snapshot(changed),
             ReconciliationOutcome::Unchanged
         );
+    }
+
+    #[test]
+    fn recovers_a_poisoned_atomic_snapshot_lock() {
+        let initial = Snapshot::load().expect("initial configuration");
+        let application = Application::without_database(initial.clone());
+        let lock = application.snapshot.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _active = lock.write().expect("snapshot write lock");
+                panic!("poison snapshot lock for recovery coverage");
+            })
+            .join()
+            .is_err()
+        );
+
+        assert_eq!(application.snapshot().revision, initial.revision);
+        let mut changed = initial;
+        changed.revision = "recovered-revision".to_owned();
+        assert_eq!(
+            application.activate_snapshot(changed),
+            ReconciliationOutcome::Activated
+        );
+        assert_eq!(application.snapshot().revision, "recovered-revision");
     }
 }

@@ -23,6 +23,12 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.
 - Browser cookies MUST contain only an opaque, high-entropy session credential; subject and policy state MUST remain server-side.
+- CSRF credentials, session-state salts, JWT identifiers, and generated request identifiers MUST
+  use fallible operating-system entropy. A failure MUST reject secret-bearing work or omit optional
+  session state without panicking; only non-security request correlation MAY use a bounded
+  process-local sequence fallback.
+- A persisted grant that no longer resolves to an active issuer or client MUST become invalid or
+  temporarily unavailable without panicking token issuance, introspection, or UserInfo.
 - The public OIDC `sid` MUST be a distinct opaque value and MUST NOT reveal or be accepted as the
   browser's session credential.
 - OIDC Session Management MUST keep the browser authentication credential `HttpOnly`. Its separate

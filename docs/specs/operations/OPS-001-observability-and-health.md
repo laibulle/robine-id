@@ -24,6 +24,9 @@ Robine ID exposes operational signals that make failures diagnosable without com
   browser, proxy, CDN, or orchestrator cannot reuse stale process state. Both endpoints MUST support
   bodyless `HEAD` with the same current status and representation length as `GET`.
 - A ready response MUST include the non-secret active revision fingerprint. A failure MUST return HTTP 503 with only `{"status":"not_ready"}`.
+- Any readiness indicator rendered on the landing page MUST derive from the same traffic-acceptance
+  and PostgreSQL health decision as `/health/ready`; it MUST NOT claim readiness while that probe
+  would return HTTP 503.
 - Receiving a shutdown signal MUST immediately make readiness return HTTP 503 while liveness remains HTTP 200 for the configured drain delay.
 - `robine_id_ready` MUST be `0` while the instance is draining.
 - Every HTTP request MUST receive or generate an `x-request-id`; public protocol errors MAY expose it as the correlation reference.
@@ -73,6 +76,7 @@ Audit is append-only from the application's perspective. The MVP adapter writes 
 - A draining instance becomes not-ready before it stops serving, remains live during the drain delay, and exits successfully after graceful shutdown.
 - Conventional Actix and Vercel probes return non-cacheable GET/HEAD responses; a HEAD request
   carries no response body and cannot mask a current readiness transition with cached state.
+- The landing-page status text and visual state agree with the current readiness decision.
 - Prometheus scrapes cannot be satisfied from a stale browser, proxy, or platform cache.
 - A token exchange can be correlated by request ID and safe client/issuer metadata without logging its code or tokens.
 - Operators can distinguish issuance failures by supported grant family without introducing

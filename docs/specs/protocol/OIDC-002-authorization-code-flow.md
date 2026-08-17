@@ -83,7 +83,9 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
 - Token success responses MUST set `Cache-Control: no-store` and `Pragma: no-cache`.
 - Browser token requests from a public client MUST support CORS only when `Origin` exactly matches
   an origin derived from that client's registered redirect URIs. Preflight MUST allow only POST and
-  `Content-Type`; confidential-client and unrelated origins MUST receive no cross-origin grant.
+  the `Content-Type` and `DPoP` request headers; confidential-client and unrelated origins MUST
+  receive no cross-origin grant. DPoP nonce challenges MUST expose `DPoP-Nonce` without making the
+  response cacheable.
 - Authorization and logout redirects carrying codes or state MUST also disable caching.
 - Every successful or redirected error authorization response MUST contain an `iss` parameter that
   exactly matches the selected issuer metadata, preventing authorization-server mix-up.

@@ -1,5 +1,7 @@
 use actix_web::{App, HttpResponse, body::MessageBody, body::to_bytes, test, web};
-use robine_id::{Application, initialize_tracing, metrics::HttpMethodClass, web as robine_web};
+use robine_id::{
+    Application, Snapshot, initialize_tracing, metrics::HttpMethodClass, web as robine_web,
+};
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,22 +92,16 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
     async move {
         let (parts, body) = request.into_parts();
         let snapshot = application.snapshot();
-        let oversized_cors_origin = if method == "POST" {
-            let mut origins = parts.headers.get_all("origin").iter();
-            let origin = origins.next().and_then(|value| value.to_str().ok());
-            origin
-                .filter(|_| origins.next().is_none())
-                .filter(|origin| {
-                    robine_web::public_client_cors_origin_allowed(
-                        &snapshot,
-                        parts.uri.path(),
-                        origin,
-                    )
-                })
-                .map(str::to_owned)
-        } else {
-            None
-        };
+        let oversized_cors_origin = adapter_rejection_cors_origin(
+            &snapshot,
+            &method,
+            parts.uri.path(),
+            parts
+                .headers
+                .get_all("origin")
+                .iter()
+                .map(|value| value.to_str().ok()),
+        );
         let body = match http_body_util::BodyExt::collect(http_body_util::Limited::new(
             body,
             MAX_REQUEST_BODY,
@@ -176,6 +172,22 @@ fn load_application() -> Result<Application, String> {
 
 fn vercel_configuration_explicit(vercel: bool, inline: bool, path: bool) -> bool {
     !vercel || inline || path
+}
+
+fn adapter_rejection_cors_origin<'a>(
+    snapshot: &Snapshot,
+    method: &str,
+    path: &str,
+    mut origins: impl Iterator<Item = Option<&'a str>>,
+) -> Option<String> {
+    if method != "POST" {
+        return None;
+    }
+    let origin = origins.next()??;
+    if origins.next().is_some() {
+        return None;
+    }
+    robine_web::public_client_cors_origin_allowed(snapshot, path, origin).then(|| origin.to_owned())
 }
 
 impl ActixWorker {
@@ -300,6 +312,17 @@ impl ActixWorker {
         let started_at = input.started_at;
         let method = HttpMethodClass::from_method(&input.method);
         let head = input.method == "HEAD";
+        let snapshot = self.application.snapshot();
+        let cors_origin = adapter_rejection_cors_origin(
+            &snapshot,
+            &input.method,
+            input.uri.split('?').next().unwrap_or(&input.uri),
+            input
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("origin"))
+                .map(|(_, value)| std::str::from_utf8(value).ok()),
+        );
         let (response, receiver) = oneshot::channel();
         if let Err(error) = self.sender.try_send(WorkerJob { input, response }) {
             let reason = match error {
@@ -315,7 +338,7 @@ impl ActixWorker {
                 reason,
                 "Vercel request rejected before Actix dispatch"
             );
-            return service_unavailable_response(&request_id, head);
+            return service_unavailable_response(&request_id, cors_origin.as_deref(), head);
         }
         match receiver.await {
             Ok(Ok(response)) => function_response_to_vercel(response),
@@ -329,7 +352,7 @@ impl ActixWorker {
                     diagnostic = %error,
                     "Actix worker could not produce a response"
                 );
-                service_unavailable_response(&request_id, head)
+                service_unavailable_response(&request_id, cors_origin.as_deref(), head)
             }
             Err(_) => {
                 self.application
@@ -341,7 +364,7 @@ impl ActixWorker {
                     reason = "worker_stopped",
                     "Actix worker stopped before completing a request"
                 );
-                service_unavailable_response(&request_id, head)
+                service_unavailable_response(&request_id, cors_origin.as_deref(), head)
             }
         }
     }
@@ -416,6 +439,7 @@ fn payload_too_large_response(
 
 fn service_unavailable_response(
     request_id: &str,
+    cors_origin: Option<&str>,
     head: bool,
 ) -> Result<Response<ResponseBody>, Error> {
     let body = serde_json::json!({"error": "temporarily_unavailable"}).to_string();
@@ -427,7 +451,20 @@ fn service_unavailable_response(
         .header("pragma", "no-cache")
         .header("retry-after", "1")
         .header("x-request-id", request_id)
-        .header("cross-origin-resource-policy", "same-origin");
+        .header(
+            "cross-origin-resource-policy",
+            if cors_origin.is_some() {
+                "cross-origin"
+            } else {
+                "same-origin"
+            },
+        );
+    if let Some(origin) = cors_origin {
+        builder = builder
+            .header("access-control-allow-origin", origin)
+            .header("access-control-expose-headers", "Retry-After")
+            .header("vary", "Origin");
+    }
     for &(name, value) in robine_web::SECURITY_HEADERS {
         builder = builder.header(name, value);
     }
@@ -442,7 +479,6 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header};
     use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
     use rand_core::OsRng;
-    use robine_id::Snapshot;
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 
     #[actix_web::test]
@@ -1137,6 +1173,40 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn restricts_adapter_rejection_cors_to_one_registered_public_origin() {
+        let snapshot = Snapshot::load().expect("development configuration should load");
+        let allowed = "http://localhost:4002";
+
+        assert_eq!(
+            adapter_rejection_cors_origin(
+                &snapshot,
+                "POST",
+                "/default/token",
+                [Some(allowed)].into_iter(),
+            )
+            .as_deref(),
+            Some(allowed)
+        );
+        for (method, path, origins) in [
+            ("GET", "/default/token", vec![Some(allowed)]),
+            ("POST", "/default/authorize", vec![Some(allowed)]),
+            (
+                "POST",
+                "/default/token",
+                vec![Some("https://unregistered.example")],
+            ),
+            ("POST", "/default/token", vec![Some(allowed), Some(allowed)]),
+            ("POST", "/default/token", vec![None]),
+        ] {
+            assert_eq!(
+                adapter_rejection_cors_origin(&snapshot, method, path, origins.into_iter(),),
+                None,
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[actix_web::test]
     async fn rejects_a_full_worker_queue_with_a_secure_retryable_response() {
         let application = Application::without_database(
             Snapshot::load().expect("development configuration should load"),
@@ -1226,6 +1296,40 @@ mod tests {
                 .metrics()
                 .render("overload-test", false)
                 .contains("robine_id_http_method_requests_total{method=\"HEAD\"} 1")
+        );
+
+        let response = worker
+            .dispatch(FunctionRequest {
+                method: "POST".to_owned(),
+                uri: "/default/token".to_owned(),
+                headers: vec![("origin".to_owned(), b"http://localhost:4002".to_vec())],
+                body: vec![],
+                request_id: "vercel_browser_overload.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("CORS-aware overload response");
+        assert_eq!(response.status(), 503);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:4002")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-expose-headers")
+                .and_then(|value| value.to_str().ok()),
+            Some("Retry-After")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("cross-origin")
         );
     }
 

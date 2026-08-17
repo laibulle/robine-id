@@ -20,6 +20,9 @@ Robine ID reconciles declared configuration into runtime and persistent state at
 - Operators MUST be able to validate and preview a change without applying it.
 - The running service MUST detect changes to the root or application documents and attempt a complete reload without restart.
 - A reload MUST validate the complete composed revision before activation. Invalid or partially written files MUST leave the last valid revision active.
+- A panic while holding the in-process snapshot lock MUST NOT permanently crash subsequent readers
+  or atomic activations; recovery MUST preserve the last complete `Arc` snapshot and emit a bounded
+  operational event.
 - Repeated observation of the same invalid inputs MUST NOT create unbounded duplicate failure events.
 - An activated revision MUST immediately govern pending consent consumption. Disabling a user or
   client, or removing its authorization-code grant, redirect, scope, resource, authentication

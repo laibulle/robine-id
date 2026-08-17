@@ -18,6 +18,8 @@ and secrets.
 - Configuration MAY reference environment variables using typed references; resolved secret values MUST not be written back to files or logs.
 - Defaults MUST be deterministic. Checked-in users, HTTP loopback URLs, and development secrets MUST be labeled development-only and replaced for production.
 - Unknown fields, invalid types, missing required values, duplicate identifiers, and incompatible options MUST fail validation.
+- Inline application serialization, semantic fingerprint serialization, and effective redaction
+  MUST propagate or safely represent failure without panicking or exposing unredacted configuration.
 - Resource collections, identifiers, URLs, locale/message maps, session policies, and rate-limit
   policies MUST remain within documented safe bounds so trusted configuration cannot create
   unbounded request or persistence behavior.

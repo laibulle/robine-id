@@ -219,8 +219,7 @@ impl DiscoveryDocument {
         let issuer = snapshot.issuer(issuer_id)?;
         let base = issuer.url.trim_end_matches('/').to_owned();
         let branding = snapshot.branding(Some(issuer_id), None);
-        let mut documentation_url =
-            url::Url::parse(&base).expect("validated issuer URL is parseable");
+        let mut documentation_url = url::Url::parse(&base).ok()?;
         documentation_url.set_path("/docs");
         documentation_url.set_query(None);
         documentation_url.set_fragment(None);
@@ -437,8 +436,7 @@ impl ProtectedResourceMetadata {
         let issuer = snapshot.issuer(issuer_id)?;
         let base = issuer.url.trim_end_matches('/').to_owned();
         let branding = snapshot.branding(Some(issuer_id), None);
-        let mut documentation_url =
-            url::Url::parse(&base).expect("validated issuer URL is parseable");
+        let mut documentation_url = url::Url::parse(&base).ok()?;
         documentation_url.set_path("/docs");
         documentation_url.set_query(None);
         documentation_url.set_fragment(None);
@@ -1342,6 +1340,15 @@ mod tests {
             },
             revision: "revision".to_owned(),
         }
+    }
+
+    #[test]
+    fn metadata_builders_fail_closed_for_an_internally_malformed_issuer_url() {
+        let mut malformed = snapshot();
+        malformed.configuration.issuers[0].url = "not an issuer URL".to_owned();
+
+        assert!(DiscoveryDocument::build(&malformed, "default").is_none());
+        assert!(ProtectedResourceMetadata::build(&malformed, "default").is_none());
     }
 
     #[test]

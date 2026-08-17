@@ -49,6 +49,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - ID tokens MUST be compact JWS values signed with RS256 and carry the active key's `kid` header.
 - `iat` and `exp` MUST use integer epoch seconds. `exp` MUST equal `iat` plus the configured ID-token lifetime.
 - Access tokens MUST be opaque, random bearer credentials; only their hashes MUST be used as runtime lookup keys.
+- Operating-system entropy, RSA generation, PEM encoding, or private-key encryption failure MUST
+  propagate as a bounded internal error without panicking the process or partially persisting a
+  credential or signing-key transition.
 - Access-token lifetime and ID-token lifetime MUST be independently configurable between 1 and 86,400 seconds.
 - Refresh-token lifetime MUST be independently configurable between 60 and 31,536,000 seconds.
 - JWKS MUST expose RSA public parameters and the metadata `kid`, `use=sig`, and `alg=RS256`; it MUST NOT expose private RSA parameters.
@@ -83,6 +86,8 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - After staged re-encryption, the same active and retained `kid` values remain usable with the new
   secret alone; the former secret can be removed.
 - A missing issuer key initializes one active key through an atomic database operation.
+- Token, device-code, session, nonce, and signing-key generation use fallible cryptographic helpers
+  rather than process-terminating assumptions.
 - A not-yet-due automatic check is a no-op; repeated or concurrent due checks produce one active
   replacement and one retained predecessor.
 

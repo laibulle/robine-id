@@ -10,25 +10,25 @@
   <body>
     <main class="docs-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
       <header class="docs-topbar">
-        <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
+        <a id="docs-brand-link" href="/" class="landing-brand" aria-label="{{ product_name }} home">
           {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo nav-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="brand-logo">{% endif %}
           <span>{{ product_name }}</span>
         </a>
         <nav class="docs-topnav" aria-label="Documentation navigation">
-          <a href="/">Home</a>
-          <a href="/{{ issuer_id }}/.well-known/openid-configuration">Discovery</a>
-          <a href="/health/ready">Status</a>
+          <a id="docs-home-link" href="/">Home</a>
+          <a id="docs-discovery-link" href="/{{ issuer_id }}/.well-known/openid-configuration">Discovery</a>
+          <a id="docs-status-link" href="/health/ready">Status</a>
         </nav>
       </header>
 
       <div class="docs-layout">
         <aside class="docs-sidebar" aria-label="On this page">
           <p class="docs-sidebar-title">Documentation</p>
-          <a href="#overview">Overview</a>
-          <a href="#quick-start">Quick start</a>
-          <a href="#authorization">Authorization</a>
-          <a href="#configuration">Configuration</a>
-          <a href="#operations">Operations</a>
+          <a id="docs-overview-link" href="#overview">Overview</a>
+          <a id="docs-quick-start-link" href="#quick-start">Quick start</a>
+          <a id="docs-authorization-link" href="#authorization">Authorization</a>
+          <a id="docs-configuration-link" href="#configuration">Configuration</a>
+          <a id="docs-operations-link" href="#operations">Operations</a>
         </aside>
 
         <article class="docs-content">
@@ -102,15 +102,15 @@ GET  /{{ issuer_id }}/logout</code></pre></div>
           <section id="operations" class="docs-section docs-section-last">
             <div class="docs-heading"><span>04</span><div><p>Production</p><h2>Operations</h2></div></div>
             <div class="endpoint-table" role="table" aria-label="Operational endpoints">
-              <div class="endpoint-row endpoint-header" role="row"><span>Endpoint</span><span>Purpose</span></div>
-              <div class="endpoint-row" role="row"><code>/health/live</code><span>Process liveness</span></div>
-              <div class="endpoint-row" role="row"><code>/health/ready</code><span>Configuration and PostgreSQL readiness</span></div>
-              <div class="endpoint-row" role="row"><code>/metrics</code><span>Bounded Prometheus operational metrics</span></div>
-              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/jwks.json</code><span>Current and retained public verification keys</span></div>
-              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/par</code><span>Validated single-use pushed authorization requests</span></div>
-              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/device_authorization</code><span>Input-constrained client authorization</span></div>
-              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/introspect</code><span>Authenticated access-token status</span></div>
-              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/revoke</code><span>Client-bound access-token revocation</span></div>
+              <div class="endpoint-row endpoint-header" role="row"><span role="columnheader">Endpoint</span><span role="columnheader">Purpose</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/health/live</code><span role="cell">Process liveness</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/health/ready</code><span role="cell">Configuration and PostgreSQL readiness</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/metrics</code><span role="cell">Bounded Prometheus operational metrics</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/{{ issuer_id }}/jwks.json</code><span role="cell">Current and retained public verification keys</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/{{ issuer_id }}/par</code><span role="cell">Validated single-use pushed authorization requests</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/{{ issuer_id }}/device_authorization</code><span role="cell">Input-constrained client authorization</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/{{ issuer_id }}/introspect</code><span role="cell">Authenticated access-token status</span></div>
+              <div class="endpoint-row" role="row"><code role="cell">/{{ issuer_id }}/revoke</code><span role="cell">Client-bound access-token revocation</span></div>
             </div>
             <div class="docs-callout docs-callout-warning"><strong>Back up PostgreSQL and encryption material together.</strong><span>Encrypted signing keys cannot be recovered without their matching encryption secret.</span></div>
           </section>

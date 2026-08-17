@@ -50,6 +50,8 @@ the shared durable store for protocol state and encrypted signing keys.
   spawning unbounded request work for every invocation. Saturation MUST return a non-sensitive,
   retryable response with the standard security headers.
 - The conventional server MUST handle SIGTERM and SIGINT by disabling readiness, waiting the configured drain delay, and then asking Actix to stop gracefully within a bounded timeout.
+- Failure to install one platform signal listener MUST emit an operational error and retain the
+  other supported graceful-shutdown path rather than panic a running process.
 - The orchestrator stop grace period MUST exceed the drain delay plus the Actix shutdown timeout.
 
 ## Release procedure
@@ -96,7 +98,9 @@ rotation. File-backed hot reload is a conventional-server feature; Vercel config
 - The Vercel release binary compiles from the same Actix routes.
 - Vercel adapter tests MUST prove sequential and concurrent requests reuse one warm Actix worker.
 - Vercel adapter tests MUST prove a full worker queue returns a correlated, secure HTTP 503 with a
-  bounded retry indication.
+  bounded retry indication. Registered public-browser token, PAR, and revocation requests MUST be
+  able to read that indication through the same exact-origin CORS policy, without granting CORS to
+  another method, path, duplicate origin, confidential client, or unrelated origin.
 - The automated release gate passes a pushed authorization request, form-post response, pending authorization, session, authorization code, user and service access
   grants, rotating refresh family with replay detection, introspection, revocation, and logout
   transaction between two instances sharing PostgreSQL.

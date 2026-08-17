@@ -25,6 +25,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
 const APP_CSS: &str = include_str!("../assets/css/app.css");
@@ -42,6 +43,7 @@ const PUSHED_REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 const MAX_ACTOR_CHAIN_DEPTH: usize = 8;
+static FALLBACK_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub const SECURITY_HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "nosniff"),
     ("x-frame-options", "DENY"),
@@ -192,6 +194,7 @@ struct HomeTemplate<'a> {
     primary_color: &'a str,
     issuer_id: &'a str,
     revision: &'a str,
+    runtime_ready: bool,
     logo: Option<&'a str>,
     favicon: Option<&'a str>,
     font_family: Option<&'a str>,
@@ -240,6 +243,7 @@ struct TotpTemplate<'a> {
     transaction_field: &'a str,
     action_value: Option<&'a str>,
     csrf_token: &'a str,
+    recovery_available: bool,
     has_error: bool,
     error: Option<&'a str>,
     messages: &'a crate::configuration::UiMessages,
@@ -249,6 +253,66 @@ struct TotpTemplate<'a> {
     support_url: Option<&'a str>,
     privacy_url: Option<&'a str>,
     terms_url: Option<&'a str>,
+}
+
+enum MfaProof {
+    Totp(i64),
+    Recovery(Vec<u8>),
+}
+
+async fn verify_mfa_submission(
+    user: &crate::configuration::User,
+    submitted: &str,
+) -> Result<Option<MfaProof>, ()> {
+    if submitted.len() == 6 && submitted.bytes().all(|byte| byte.is_ascii_digit()) {
+        let Some(reference) = user.totp_secret_reference.as_ref() else {
+            return Ok(None);
+        };
+        let secret = crate::totp::secret_from_reference(reference).map_err(|error| {
+            tracing::error!(?error, "configured TOTP secret is unavailable");
+        })?;
+        return Ok(crate::totp::verify(&secret, submitted, Utc::now().timestamp())
+            .map(MfaProof::Totp));
+    }
+    if user.recovery_code_hashes.is_empty() {
+        return Ok(None);
+    }
+    let hashes = user.recovery_code_hashes.clone();
+    let submitted = Zeroizing::new(submitted.to_owned());
+    web::block(move || crate::recovery::matching_fingerprint(&hashes, &submitted))
+        .await
+        .map(|fingerprint| fingerprint.map(MfaProof::Recovery))
+        .map_err(|error| {
+            tracing::error!(%error, "recovery-code verification worker failed");
+        })
+}
+
+async fn consume_mfa_challenge(
+    database: &Database,
+    transaction: &str,
+    issuer: &str,
+    subject: &str,
+    purpose: &str,
+    proof: MfaProof,
+) -> Result<bool, sqlx::Error> {
+    match proof {
+        MfaProof::Totp(counter) => {
+            database
+                .consume_totp_challenge(transaction, issuer, subject, purpose, counter)
+                .await
+        }
+        MfaProof::Recovery(fingerprint) => {
+            database
+                .consume_recovery_challenge(
+                    transaction,
+                    issuer,
+                    subject,
+                    purpose,
+                    &fingerprint,
+                )
+                .await
+        }
+    }
 }
 
 #[derive(Template)]
@@ -436,8 +500,8 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
         )
         .app_data(web::PayloadConfig::new(16 * 1024))
         .app_data(web::QueryConfig::default().error_handler(query_rejection))
-        .service(compressed_get!("/", home))
-        .service(compressed_get!("/docs", docs))
+        .service(compressed_get_head!("/", home))
+        .service(compressed_get_head!("/docs", docs))
         .service(compressed_get_head!("/health/live", live))
         .service(compressed_get_head!("/health/ready", ready))
         .service(compressed_get!("/metrics", metrics))
@@ -1009,7 +1073,8 @@ pub fn secure<B>(response: &mut HttpResponse<B>) {
     let embeddable = response.extensions().get::<EmbeddableResponse>().is_some();
     let headers = response.headers_mut();
     if !headers.contains_key("x-request-id")
-        && let Ok(request_id) = actix_web::http::header::HeaderValue::from_str(&random_token())
+        && let Some(request_id) = random_token()
+        && let Ok(request_id) = actix_web::http::header::HeaderValue::from_str(&request_id)
     {
         headers.insert(
             actix_web::http::header::HeaderName::from_static("x-request-id"),
@@ -1046,16 +1111,24 @@ pub fn correlation_id(request: &HttpRequest) -> String {
 }
 
 pub fn correlation_id_value(value: Option<&str>) -> String {
-    value
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 128
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        })
-        .map(str::to_owned)
-        .unwrap_or_else(random_token)
+    if let Some(value) = value.filter(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }) {
+        return value.to_owned();
+    }
+    random_token().unwrap_or_else(|| {
+        let sequence = FALLBACK_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            event = "request_correlation",
+            outcome = "entropy_unavailable",
+            "using bounded non-cryptographic request correlation fallback"
+        );
+        format!("request-id-unavailable-{sequence}")
+    })
 }
 
 pub fn set_correlation_id<B>(response: &mut HttpResponse<B>, request_id: &str) {
@@ -1077,13 +1150,16 @@ async fn home(request: HttpRequest, application: web::Data<Application>) -> impl
         );
     };
     let branding = snapshot.branding(Some(&issuer.id), None);
-    let mut response = html_response(
+    let runtime_ready = readiness_state(&application).await.0;
+    let mut response = html_response_for_request(
+        &request,
         StatusCode::OK,
         HomeTemplate {
             product_name: &branding.product_name,
             primary_color: &branding.primary_color,
             issuer_id: &issuer.id,
             revision: &snapshot.revision,
+            runtime_ready,
             logo: branding.logo.as_deref(),
             favicon: branding.favicon.as_deref(),
             font_family: branding.font_family.as_deref(),
@@ -1106,7 +1182,8 @@ async fn docs(request: HttpRequest, application: web::Data<Application>) -> impl
         );
     };
     let branding = snapshot.branding(Some(&issuer.id), None);
-    let mut response = html_response(
+    let mut response = html_response_for_request(
+        &request,
         StatusCode::OK,
         DocsTemplate {
             product_name: &branding.product_name,
@@ -1129,15 +1206,7 @@ async fn live(request: HttpRequest) -> impl Responder {
 }
 
 async fn ready(request: HttpRequest, application: web::Data<Application>) -> impl Responder {
-    let (ready, reason) = if !application.accepting_traffic() {
-        (false, "draining")
-    } else {
-        match application.database() {
-            Some(database) if database.healthy().await => (true, "ready"),
-            Some(_) => (false, "database_unavailable"),
-            None => (false, "database_not_configured"),
-        }
-    };
+    let (ready, reason) = readiness_state(&application).await;
     if application.metrics().readiness_changed(ready) {
         if ready {
             tracing::info!(
@@ -1166,6 +1235,18 @@ async fn ready(request: HttpRequest, application: web::Data<Application>) -> imp
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"status": "not_ready"}),
         )
+    }
+}
+
+async fn readiness_state(application: &Application) -> (bool, &'static str) {
+    if !application.accepting_traffic() {
+        (false, "draining")
+    } else {
+        match application.database() {
+            Some(database) if database.healthy().await => (true, "ready"),
+            Some(_) => (false, "database_unavailable"),
+            None => (false, "database_not_configured"),
+        }
     }
 }
 
@@ -1435,15 +1516,15 @@ async fn protected_resource_metadata(
     cacheable_json_response(&request, json!(document))
 }
 
-fn user_info_resource_metadata_url(issuer: &crate::configuration::Issuer) -> String {
-    let mut url = url::Url::parse(&issuer.url).expect("validated issuer URL is parseable");
+fn user_info_resource_metadata_url(issuer: &crate::configuration::Issuer) -> Option<String> {
+    let mut url = url::Url::parse(&issuer.url).ok()?;
     let issuer_path = url.path().trim_end_matches('/');
     url.set_path(&format!(
         "/.well-known/oauth-protected-resource{issuer_path}/userinfo"
     ));
     url.set_query(None);
     url.set_fragment(None);
-    url.to_string()
+    Some(url.to_string())
 }
 
 const OIDC_ISSUER_REL: &str = "http://openid.net/specs/connect/1.0/issuer";
@@ -2448,11 +2529,24 @@ async fn authorization_response(
     let mut response = match authorization {
         Ok(authorization) => match authorization.validate(&snapshot, issuer_id) {
             Ok(client) => {
+                let Some(issuer) = snapshot.issuer(issuer_id) else {
+                    tracing::error!(
+                        event = "authorization",
+                        outcome = "configuration_inconsistent",
+                        issuer_id,
+                        "validated authorization lost its active issuer"
+                    );
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "authorization policy is temporarily unavailable",
+                    );
+                };
                 let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
                 let messages = branding.messages(authorization.ui_locales.as_deref());
                 let hinted_subject = match authorization_id_token_hint_subject(
                     application.database(),
-                    snapshot.issuer(issuer_id).expect("validated issuer"),
+                    issuer,
                     client,
                     authorization.id_token_hint.as_deref(),
                 )
@@ -2513,11 +2607,7 @@ async fn authorization_response(
                 let user = match session_user {
                     Some(user) => match crate::pairwise::external_subject(
                         &snapshot,
-                        snapshot
-                            .issuer(issuer_id)
-                            .expect("validated authorization issuer")
-                            .url
-                            .trim_end_matches('/'),
+                        issuer.url.trim_end_matches('/'),
                         client,
                         &user.id,
                     ) {
@@ -2763,7 +2853,10 @@ async fn render_login(
             );
         }
     };
-    let csrf_token = random_token();
+    let csrf_token = match required_random_token("login_csrf") {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
     let mut response = html_response(
         StatusCode::OK,
         LoginTemplate {
@@ -2838,15 +2931,44 @@ async fn resume_authorization(
         )
         .await;
     }
+    let Some(issuer) = snapshot.issuer(issuer_id) else {
+        tracing::error!(
+            event = "authorization",
+            outcome = "configuration_inconsistent",
+            issuer_id,
+            "validated authorization lost its active issuer"
+        );
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization policy is temporarily unavailable",
+        );
+    };
     let grant = build_authorization_grant(
         snapshot,
-        issuer_id,
+        issuer,
+        client,
         authorization,
         user,
         auth_time,
         mfa_verified,
         session_id,
     );
+    let grant = match grant {
+        Ok(grant) => grant,
+        Err(error) => {
+            return authorization_request_error(
+                Some(database),
+                snapshot,
+                &snapshot.configuration.branding,
+                issuer_id,
+                authorization,
+                error,
+                &correlation_id(request),
+            )
+            .await;
+        }
+    };
     tracing::info!(
         event = "authentication_session",
         outcome = "reused",
@@ -2876,7 +2998,10 @@ async fn resume_authorization(
                 );
             }
         };
-        let csrf_token = random_token();
+        let csrf_token = match required_random_token("consent_csrf") {
+            Ok(token) => token,
+            Err(response) => return response,
+        };
         let scopes = consent_scopes(&grant.scopes, messages);
         let authorization_details =
             consent_authorization_details(snapshot, &grant.authorization_details);
@@ -2936,25 +3061,21 @@ async fn resume_authorization(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_authorization_grant(
     snapshot: &crate::configuration::Snapshot,
-    issuer_id: &str,
+    issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
     authorization: &AuthorizationRequest,
     user: &crate::configuration::User,
     auth_time: i64,
     mfa_verified: bool,
     session_id: Option<&str>,
-) -> AuthorizationGrant {
-    let issuer = snapshot.issuer(issuer_id).expect("validated issuer");
+) -> Result<AuthorizationGrant, crate::protocol::AuthorizationError> {
     let scopes = normalized_scopes(&authorization.scope);
     let claims = tokens::mapped_claims(snapshot, user, &scopes);
-    let client = snapshot
-        .client_for_issuer(issuer_id, &authorization.client_id)
-        .expect("validated authorization client");
-    let authorization_details = authorization
-        .authorization_details_value(snapshot, client)
-        .expect("validated authorization details");
-    AuthorizationGrant {
+    let authorization_details = authorization.authorization_details_value(snapshot, client)?;
+    Ok(AuthorizationGrant {
         issuer: issuer.url.trim_end_matches('/').to_owned(),
         subject: user.id.clone(),
         client_id: authorization.client_id.clone(),
@@ -2971,7 +3092,7 @@ fn build_authorization_grant(
         claims: json!(claims),
         authorization_details,
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.authorization_code_lifetime),
-    }
+    })
 }
 
 async fn complete_authentication(
@@ -3007,9 +3128,19 @@ async fn complete_authentication(
             );
         }
     };
-    let issuer = snapshot
-        .issuer(&issuer_id)
-        .expect("the authorization request validated its issuer");
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
+        tracing::error!(
+            event = "authorization",
+            outcome = "configuration_inconsistent",
+            issuer_id,
+            "validated sign-in lost its active issuer"
+        );
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization policy is temporarily unavailable",
+        );
+    };
     let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
     let messages = branding.messages(authorization.ui_locales.as_deref());
     let Some(database) = application.database() else {
@@ -3230,15 +3361,33 @@ async fn complete_authentication(
             .await;
         }
         if let Err(error) = crate::totp::secret_from_reference(reference) {
-            tracing::error!(?error, "configured TOTP secret is unavailable");
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "temporarily_unavailable",
-                "multi-factor authentication is unavailable",
+            if user.recovery_code_hashes.is_empty() {
+                tracing::error!(?error, "configured TOTP secret is unavailable");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "multi-factor authentication is unavailable",
+                );
+            }
+            tracing::warn!(
+                ?error,
+                event = "mfa_factor_availability",
+                outcome = "recovery_only",
+                issuer_id,
+                "TOTP is unavailable; configured recovery codes remain usable"
             );
         }
-        let payload = serde_json::to_value(&authorization)
-            .expect("validated authorization request serializes");
+        let payload = match serde_json::to_value(&authorization) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize the TOTP authorization challenge");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "multi-factor authentication is unavailable",
+                );
+            }
+        };
         let transaction = match database
             .issue_totp_challenge(
                 issuer.url.trim_end_matches('/'),
@@ -3268,6 +3417,7 @@ async fn complete_authentication(
             &authorization,
             &transaction,
             &csrf_token,
+            !user.recovery_code_hashes.is_empty(),
             None,
             StatusCode::OK,
         );
@@ -3296,6 +3446,7 @@ fn render_totp_challenge(
     authorization: &AuthorizationRequest,
     transaction: &str,
     csrf_token: &str,
+    recovery_available: bool,
     error: Option<&str>,
     status: StatusCode,
 ) -> HttpResponse {
@@ -3317,6 +3468,7 @@ fn render_totp_challenge(
             transaction_field: "mfa_transaction",
             action_value: None,
             csrf_token,
+            recovery_available,
             has_error: error.is_some(),
             error,
             messages: &messages,
@@ -3441,6 +3593,7 @@ async fn complete_totp_authentication(
                 &authorization,
                 &transaction,
                 &csrf_token,
+                !user.recovery_code_hashes.is_empty(),
                 Some(&messages.sign_in_rate_limited),
                 StatusCode::TOO_MANY_REQUESTS,
             );
@@ -3462,10 +3615,32 @@ async fn complete_totp_authentication(
             );
         }
     }
-    let secret = match crate::totp::secret_from_reference(reference) {
-        Ok(secret) => secret,
-        Err(error) => {
-            tracing::error!(?error, "configured TOTP secret is unavailable");
+    let proof = match verify_mfa_submission(user, &submitted_code).await {
+        Ok(Some(proof)) => proof,
+        Ok(None) => {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Failure);
+            tracing::warn!(
+                event = "authentication",
+                outcome = "failure",
+                issuer_id,
+                client_id = %client.id,
+                reason = "invalid_mfa_code"
+            );
+            return render_totp_challenge(
+                &request,
+                &snapshot,
+                &issuer_id,
+                client,
+                &authorization,
+                &transaction,
+                &csrf_token,
+                !user.recovery_code_hashes.is_empty(),
+                Some(&messages.totp_invalid_code),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            );
+        }
+        Err(()) => {
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "temporarily_unavailable",
@@ -3473,32 +3648,15 @@ async fn complete_totp_authentication(
             );
         }
     };
-    let Some(counter) = crate::totp::verify(&secret, &submitted_code, Utc::now().timestamp())
-    else {
-        application.metrics().authentication(false);
-        application.metrics().mfa(MfaOutcome::Failure);
-        tracing::warn!(
-            event = "authentication",
-            outcome = "failure",
-            issuer_id,
-            client_id = %client.id,
-            reason = "invalid_totp"
-        );
-        return render_totp_challenge(
-            &request,
-            &snapshot,
-            &issuer_id,
-            client,
-            &authorization,
-            &transaction,
-            &csrf_token,
-            Some(&messages.totp_invalid_code),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        );
-    };
-    match database
-        .consume_totp_challenge(&transaction, issuer_url, &user.id, "authorization", counter)
-        .await
+    match consume_mfa_challenge(
+        database,
+        &transaction,
+        issuer_url,
+        &user.id,
+        "authorization",
+        proof,
+    )
+    .await
     {
         Ok(true) => {}
         Ok(false) => {
@@ -3516,7 +3674,7 @@ async fn complete_totp_authentication(
             );
         }
         Err(error) => {
-            tracing::error!(%error, "failed to consume TOTP challenge");
+            tracing::error!(%error, "failed to consume MFA challenge");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "temporarily_unavailable",
@@ -3558,9 +3716,19 @@ async fn finish_authenticated_authorization(
             "authorization storage is unavailable",
         );
     };
-    let issuer = snapshot
-        .issuer(issuer_id)
-        .expect("the authorization request validated its issuer");
+    let Some(issuer) = snapshot.issuer(issuer_id) else {
+        tracing::error!(
+            event = "authorization",
+            outcome = "configuration_inconsistent",
+            issuer_id,
+            "validated authentication lost its active issuer"
+        );
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "authorization policy is temporarily unavailable",
+        );
+    };
     let hinted_subject = match authorization_id_token_hint_subject(
         Some(database),
         issuer,
@@ -3668,15 +3836,32 @@ async fn finish_authenticated_authorization(
     }
     let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
     let messages = branding.messages(authorization.ui_locales.as_deref());
-    let mut grant = build_authorization_grant(
+    let grant = build_authorization_grant(
         snapshot,
-        issuer_id,
+        issuer,
+        client,
         authorization,
         user,
         auth_time,
         mfa_verified,
         None,
     );
+    let mut grant = match grant {
+        Ok(grant) => grant,
+        Err(error) => {
+            application.metrics().authentication(false);
+            return authorization_request_error(
+                Some(database),
+                snapshot,
+                &snapshot.configuration.branding,
+                issuer_id,
+                authorization,
+                error,
+                &correlation_id(request),
+            )
+            .await;
+        }
+    };
     let session_policy = &snapshot.configuration.authentication.session;
     let session = match database
         .start_session_details(
@@ -4251,7 +4436,10 @@ async fn logout_confirmation_response(
             );
         }
     };
-    let csrf_token = random_token();
+    let csrf_token = match required_random_token("logout_csrf") {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
     let messages = branding.messages(query.ui_locales.as_deref());
     let mut response = html_response(
         StatusCode::OK,
@@ -4544,8 +4732,20 @@ fn set_frontchannel_content_security_policy(response: &mut HttpResponse, uris: &
         "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; frame-src {}; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         origins.join(" ")
     );
-    let value = actix_web::http::header::HeaderValue::from_str(&content_security_policy)
-        .expect("validated front-channel origins produce a valid CSP");
+    let value = match actix_web::http::header::HeaderValue::from_str(&content_security_policy) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(
+                event = "frontchannel_logout",
+                outcome = "csp_fallback",
+                %error,
+                "front-channel CSP construction failed closed"
+            );
+            actix_web::http::header::HeaderValue::from_static(
+                "default-src 'none'; frame-src 'none'; frame-ancestors 'none'",
+            )
+        }
+    };
     response
         .headers_mut()
         .insert(actix_web::http::header::CONTENT_SECURITY_POLICY, value);
@@ -4600,7 +4800,15 @@ async fn dispatch_backchannel_logout(
             }
         };
         let now = Utc::now().timestamp();
-        let jti = random_token();
+        let Some(jti) = random_token() else {
+            tracing::error!(
+                event = "backchannel_logout",
+                outcome = "entropy_unavailable",
+                client_id = %target.client_id,
+                "could not generate a back-channel logout token identifier"
+            );
+            continue;
+        };
         let logout_token = match tokens::issue_logout_token(
             &key,
             &tokens::LogoutTokenInput {
@@ -5162,6 +5370,18 @@ async fn device_authorization(
             "database unavailable",
         );
     };
+    let verification_uri = format!("{}/device", issuer.url.trim_end_matches('/'));
+    let complete_base = match url::Url::parse(&verification_uri) {
+        Ok(uri) => uri,
+        Err(error) => {
+            tracing::error!(%error, issuer_id, "failed to construct device verification URI");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "device authorization is temporarily unavailable",
+            );
+        }
+    };
     match database
         .issue_device_authorization(DeviceAuthorizationRequest {
             issuer: issuer.url.trim_end_matches('/'),
@@ -5178,9 +5398,7 @@ async fn device_authorization(
             application
                 .metrics()
                 .device_authorization(DeviceAuthorizationOutcome::Created);
-            let verification_uri = format!("{}/device", issuer.url.trim_end_matches('/'));
-            let mut complete = url::Url::parse(&verification_uri)
-                .expect("validated issuer creates a valid device verification URI");
+            let mut complete = complete_base;
             complete
                 .query_pairs_mut()
                 .append_pair("user_code", &user_code);
@@ -5423,7 +5641,10 @@ fn render_device_code_page(
         Some("rate_limited") => Some(messages.sign_in_rate_limited.as_str()),
         _ => None,
     };
-    let csrf_token = random_token();
+    let csrf_token = match required_random_token("device_code_csrf") {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
     let mut response = html_response(
         status,
         DeviceCodeTemplate {
@@ -5467,7 +5688,10 @@ fn render_device_confirmation(
     let scopes = consent_scopes(&authorization.scopes, &messages);
     let authorization_details =
         consent_authorization_details(snapshot, &authorization.authorization_details);
-    let csrf_token = random_token();
+    let csrf_token = match required_random_token("device_confirmation_csrf") {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
     let mut response = html_response(
         status,
         DeviceConfirmTemplate {
@@ -5591,9 +5815,9 @@ fn essential_claims_satisfied_for(
     mfa_verified: bool,
 ) -> bool {
     let mapped = tokens::mapped_claims(snapshot, user, scopes);
-    let issuer = snapshot
-        .issuer(issuer_id)
-        .expect("validated authorization issuer");
+    let Some(issuer) = snapshot.issuer(issuer_id) else {
+        return false;
+    };
     let external_subject = if essential_claims.iter().any(|claim| claim.name == "sub") {
         let Some(client) = snapshot.client_for_issuer(issuer_id, client_id) else {
             return false;
@@ -5688,6 +5912,7 @@ fn render_device_totp_challenge(
     client: &crate::configuration::Client,
     transaction: &str,
     csrf_token: &str,
+    recovery_available: bool,
     error: Option<&str>,
     status: StatusCode,
 ) -> HttpResponse {
@@ -5709,6 +5934,7 @@ fn render_device_totp_challenge(
             transaction_field: "mfa_transaction",
             action_value: Some("totp"),
             csrf_token,
+            recovery_available,
             has_error: error.is_some(),
             error,
             messages: &messages,
@@ -5850,6 +6076,7 @@ async fn complete_device_totp(
                 client,
                 transaction,
                 &form.csrf_token,
+                !user.recovery_code_hashes.is_empty(),
                 Some(&messages.sign_in_rate_limited),
                 StatusCode::TOO_MANY_REQUESTS,
             );
@@ -5884,6 +6111,7 @@ async fn complete_device_totp(
             client,
             transaction,
             &form.csrf_token,
+            !user.recovery_code_hashes.is_empty(),
             Some(&messages.totp_invalid_code),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -6216,18 +6444,36 @@ async fn decide_device_interaction(
         }
         if let Some(reference) = &user.totp_secret_reference {
             if let Err(error) = crate::totp::secret_from_reference(reference) {
-                tracing::error!(?error, "configured TOTP secret is unavailable");
-                return oauth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "temporarily_unavailable",
-                    "multi-factor authentication is unavailable",
+                if user.recovery_code_hashes.is_empty() {
+                    tracing::error!(?error, "configured TOTP secret is unavailable");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "multi-factor authentication is unavailable",
+                    );
+                }
+                tracing::warn!(
+                    ?error,
+                    event = "mfa_factor_availability",
+                    outcome = "recovery_only",
+                    issuer_id,
+                    "TOTP is unavailable; configured recovery codes remain usable"
                 );
             }
-            let payload = serde_json::to_value(DeviceTotpPayload {
+            let payload = match serde_json::to_value(DeviceTotpPayload {
                 device_transaction: transaction.to_owned(),
                 decision: if approved { "approve" } else { "deny" }.to_owned(),
-            })
-            .expect("device TOTP challenge serializes");
+            }) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::error!(%error, "failed to serialize the device TOTP challenge");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "multi-factor authentication is unavailable",
+                    );
+                }
+            };
             let mfa_transaction = match database
                 .issue_totp_challenge(
                     issuer.url.trim_end_matches('/'),
@@ -6256,6 +6502,7 @@ async fn decide_device_interaction(
                 client,
                 &mfa_transaction,
                 &form.csrf_token,
+                !user.recovery_code_hashes.is_empty(),
                 None,
                 StatusCode::OK,
             );
@@ -6678,7 +6925,11 @@ async fn exchange_token_inner(
             )
             .await
         }
-        _ => unreachable!("grant type checked above"),
+        _ => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            "grant_type is not supported",
+        ),
     }
 }
 
@@ -7406,7 +7657,7 @@ async fn exchange_client_credentials_grant(
         actor: None,
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
     };
-    match issue_access_credential(snapshot, issuer, database, &access_grant).await {
+    match issue_access_credential(snapshot, issuer, client, database, &access_grant).await {
         Ok((access_token, _key)) => {
             tracing::info!(
                 event = token_audit_event(TokenGrant::ClientCredentials),
@@ -7767,7 +8018,7 @@ async fn exchange_access_token_grant(
         actor: actor_claim,
         expires_at: now + Duration::seconds(expires_in),
     };
-    match issue_access_credential(snapshot, issuer, database, &exchanged_grant).await {
+    match issue_access_credential(snapshot, issuer, client, database, &exchanged_grant).await {
         Ok((access_token, _key)) => {
             tracing::info!(
                 event = token_audit_event(TokenGrant::TokenExchange),
@@ -7864,6 +8115,8 @@ enum AccessTokenIssuanceError {
     Storage(sqlx::Error),
     #[error("signed access token exceeds the configured transport bound")]
     TooLarge,
+    #[error("operating system randomness is unavailable")]
+    Entropy,
     #[error(transparent)]
     Pairwise(#[from] crate::pairwise::PairwiseSubjectError),
 }
@@ -7890,6 +8143,7 @@ async fn active_signing_key(
 async fn issue_access_credential(
     snapshot: &crate::configuration::Snapshot,
     issuer: &crate::configuration::Issuer,
+    client: &crate::configuration::Client,
     database: &Database,
     grant: &AccessGrant,
 ) -> Result<(String, Option<SigningKey>), AccessTokenIssuanceError> {
@@ -7908,9 +8162,6 @@ async fn issue_access_credential(
     let lifetime = (grant.expires_at.timestamp() - now).max(1);
     let scope = grant.scopes.join(" ");
     let claims = grant.claims.as_object().cloned().unwrap_or_default();
-    let client = snapshot
-        .client_for_issuer(&issuer.id, &grant.client_id)
-        .expect("token grant references a configured client");
     let external_subject = external_access_grant_subject(
         snapshot,
         &grant.issuer,
@@ -7919,6 +8170,7 @@ async fn issue_access_credential(
         grant.auth_time,
         &grant.subject,
     )?;
+    let jti = random_token().ok_or(AccessTokenIssuanceError::Entropy)?;
     let token = tokens::issue_access_token(
         &key,
         &tokens::AccessTokenInput {
@@ -7927,7 +8179,7 @@ async fn issue_access_credential(
             audience: grant.resource.as_deref().unwrap_or(&grant.client_id),
             client_id: &grant.client_id,
             scope: &scope,
-            jti: &random_token(),
+            jti: &jti,
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             dpop_jkt: grant.dpop_jkt.as_deref(),
@@ -7958,6 +8210,21 @@ async fn issue_token_response(
     refresh_token: Option<String>,
     grant_type: &'static str,
 ) -> HttpResponse {
+    let Some(client) = snapshot.client_for_issuer(issuer_id, &grant.client_id) else {
+        revoke_unissued_refresh_token(database, refresh_token.as_deref(), &grant).await;
+        tracing::error!(
+            event = "token_issuance",
+            outcome = "configuration_inconsistent",
+            issuer_id,
+            client_id = %grant.client_id,
+            "token grant no longer references an active configured client"
+        );
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "token policy is temporarily unavailable",
+        );
+    };
     let claims = grant.claims.as_object().cloned().unwrap_or_default();
     let now = Utc::now().timestamp();
     let access_grant = AccessGrant {
@@ -7976,7 +8243,7 @@ async fn issue_token_response(
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
     };
     let (access_token, access_token_key) =
-        match issue_access_credential(snapshot, issuer, database, &access_grant).await {
+        match issue_access_credential(snapshot, issuer, client, database, &access_grant).await {
             Ok(result) => result,
             Err(error) => {
                 revoke_unissued_refresh_token(database, refresh_token.as_deref(), &grant).await;
@@ -8008,9 +8275,6 @@ async fn issue_token_response(
         }
     };
     let at_hash = tokens::access_token_hash(&access_token);
-    let client = snapshot
-        .client_for_issuer(issuer_id, &grant.client_id)
-        .expect("token grant references a configured client");
     let external_subject =
         match crate::pairwise::external_subject(snapshot, &grant.issuer, client, &grant.subject) {
             Ok(subject) => subject,
@@ -8172,9 +8436,21 @@ async fn introspect_token(
     });
     let external_subject = match grant.as_ref() {
         Some(grant) => {
-            let token_client = snapshot
-                .client_for_issuer(&issuer.id, &grant.client_id)
-                .expect("active introspection grant references a configured client");
+            let Some(token_client) = snapshot.client_for_issuer(&issuer.id, &grant.client_id)
+            else {
+                tracing::error!(
+                    event = "token_introspection",
+                    outcome = "configuration_inconsistent",
+                    issuer_id,
+                    client_id = %grant.client_id,
+                    "active introspection grant no longer references a configured client"
+                );
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "token policy is temporarily unavailable",
+                );
+            };
             match external_access_grant_subject(
                 &snapshot,
                 &grant.issuer,
@@ -8196,9 +8472,8 @@ async fn introspect_token(
         }
         None => None,
     };
-    let response = grant.map_or_else(
-        || json!({"active": false}),
-        |grant| {
+    let response = match (grant, external_subject) {
+        (Some(grant), Some(external_subject)) => {
             let mut response = json!({
                 "active": true,
                 "scope": grant.scopes.join(" "),
@@ -8206,7 +8481,7 @@ async fn introspect_token(
                 "token_type": if grant.dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
                 "exp": grant.expires_at.timestamp(),
                 "iat": grant.issued_at.timestamp(),
-                "sub": external_subject.expect("active grant has an external subject"),
+                "sub": external_subject,
                 "iss": grant.issuer
             });
             if let Some(resource) = grant.resource
@@ -8247,8 +8522,9 @@ async fn introspect_token(
             }
             insert_authorization_details(&mut response, &grant.authorization_details);
             response
-        },
-    );
+        }
+        _ => json!({"active": false}),
+    };
     let token_type_hint = match form.token_type_hint.as_deref() {
         Some("access_token") => "access_token",
         Some(_) => "other",
@@ -8486,7 +8762,7 @@ async fn user_info_inner(
     let snapshot = application.snapshot();
     let resource_metadata = snapshot
         .issuer(&issuer_id)
-        .map(user_info_resource_metadata_url);
+        .and_then(user_info_resource_metadata_url);
     let credential = access_token_credential(&request);
     let (Some((scheme, token)), Some(database)) = (credential, application.database()) else {
         let mut response = invalid_bearer_response(resource_metadata.as_deref());
@@ -8515,6 +8791,31 @@ async fn user_info_inner(
             return response;
         }
     };
+    let (Some(issuer), Some(client)) = (
+        snapshot.issuer(&issuer_id),
+        snapshot.client_for_issuer(&issuer_id, &grant.client_id),
+    ) else {
+        tracing::error!(
+            event = "userinfo",
+            outcome = "configuration_inconsistent",
+            issuer_id,
+            client_id = %grant.client_id,
+            "validated UserInfo grant lost its active issuer or client"
+        );
+        let mut response = oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "UserInfo policy is temporarily unavailable",
+        );
+        add_user_info_cors(
+            &mut response,
+            &request,
+            &snapshot,
+            &issuer_id,
+            Some(&grant.client_id),
+        );
+        return response;
+    };
     if let Some(expected_jkt) = grant.dpop_jkt.as_deref() {
         if !scheme.eq_ignore_ascii_case("dpop") {
             let mut response = invalid_dpop_access_response(
@@ -8531,9 +8832,6 @@ async fn user_info_inner(
             );
             return response;
         }
-        let issuer = snapshot
-            .issuer(&issuer_id)
-            .expect("validated UserInfo issuer");
         match verified_dpop_endpoint_proof(
             &request,
             database,
@@ -8629,9 +8927,6 @@ async fn user_info_inner(
         return response;
     }
 
-    let client = snapshot
-        .client_for_issuer(&issuer_id, &grant.client_id)
-        .expect("validated UserInfo client");
     let external_subject =
         match crate::pairwise::external_subject(&snapshot, &grant.issuer, client, &grant.subject) {
             Ok(subject) => subject,
@@ -8666,9 +8961,6 @@ async fn user_info_inner(
     .unwrap_or_default();
     claims.insert("sub".to_owned(), json!(external_subject));
     let mut response = if client.userinfo_signed_response_alg.as_deref() == Some("RS256") {
-        let issuer = snapshot
-            .issuer(&issuer_id)
-            .expect("validated UserInfo issuer");
         let key = match active_signing_key(issuer, database, &grant.issuer).await {
             Ok(key) => key,
             Err(error) => {
@@ -10318,10 +10610,26 @@ fn redirect_response(location: impl Into<String>) -> HttpResponse {
         .finish()
 }
 
-fn random_token() -> String {
+fn random_token() -> Option<String> {
     let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::fill(&mut bytes).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn required_random_token(purpose: &'static str) -> Result<String, HttpResponse> {
+    random_token().ok_or_else(|| {
+        tracing::error!(
+            event = "cryptographic_entropy",
+            outcome = "unavailable",
+            purpose,
+            "operating system randomness is unavailable"
+        );
+        oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "secure random generation failed",
+        )
+    })
 }
 
 fn op_browser_state(session_id: &str) -> String {
@@ -10347,10 +10655,16 @@ fn calculate_session_state(
 fn new_session_state(client_id: &str, redirect_uri: &str, session_id: &str) -> Option<String> {
     let redirect = url::Url::parse(redirect_uri).ok()?;
     let origin = redirect.origin().ascii_serialization();
-    (origin != "null").then(|| {
-        let salt = random_token();
-        calculate_session_state(client_id, &origin, &op_browser_state(session_id), &salt)
-    })
+    if origin == "null" {
+        return None;
+    }
+    let salt = random_token()?;
+    Some(calculate_session_state(
+        client_id,
+        &origin,
+        &op_browser_state(session_id),
+        &salt,
+    ))
 }
 
 fn remaining_session_lifetime(auth_time: Option<i64>, absolute_timeout: i64) -> i64 {
@@ -10516,6 +10830,42 @@ fn html_response(status: StatusCode, body: askama::Result<String>) -> HttpRespon
         Err(error) => {
             tracing::error!(%error, "failed to render template");
             json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "internal_server_error"}),
+            )
+        }
+    }
+}
+
+fn html_response_for_request(
+    request: &HttpRequest,
+    status: StatusCode,
+    body: askama::Result<String>,
+) -> HttpResponse {
+    if request.method() != actix_web::http::Method::HEAD {
+        return html_response(status, body);
+    }
+    match body {
+        Ok(body) => {
+            let content_language = html_document_language(&body)
+                .and_then(|language| actix_web::http::header::HeaderValue::from_str(language).ok());
+            let mut response = HttpResponse::build(status)
+                .content_type("text/html; charset=utf-8")
+                .insert_header((actix_web::http::header::CONTENT_LENGTH, body.len()))
+                .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+                .insert_header((actix_web::http::header::PRAGMA, "no-cache"))
+                .finish();
+            if let Some(content_language) = content_language {
+                response
+                    .headers_mut()
+                    .insert(actix_web::http::header::CONTENT_LANGUAGE, content_language);
+            }
+            response
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to render template");
+            json_response_for_request(
+                request,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({"error": "internal_server_error"}),
             )
@@ -10811,9 +11161,15 @@ mod tests {
 
     #[actix_web::test]
     async fn localizes_device_verification_from_accept_language() {
+        let base = application();
+        let mut snapshot = (*base.snapshot()).clone();
+        snapshot.configuration.branding.support_url = Some("https://help.example".to_owned());
+        snapshot.configuration.branding.privacy_url =
+            Some("https://help.example/privacy".to_owned());
+        snapshot.configuration.branding.terms_url = Some("https://help.example/terms".to_owned());
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(application()))
+                .app_data(web::Data::new(Application::without_database(snapshot)))
                 .configure(configure),
         )
         .await;
@@ -10840,6 +11196,9 @@ mod tests {
         assert!(body.contains("<html lang=\"fr\">"), "{body}");
         assert!(body.contains("Connecter un appareil"), "{body}");
         assert!(body.contains("Code de l’appareil"), "{body}");
+        assert!(body.contains("id=\"device-code-support-link\""), "{body}");
+        assert!(body.contains("id=\"device-code-privacy-link\""), "{body}");
+        assert!(body.contains("id=\"device-code-terms-link\""), "{body}");
     }
 
     #[actix_web::test]
@@ -12277,6 +12636,21 @@ mod tests {
         assert!(body.contains("authorization_details"));
         assert!(body.contains("RP-Initiated Logout"));
         assert!(body.contains("/default/.well-known/openid-configuration"));
+        for id in [
+            "docs-brand-link",
+            "docs-home-link",
+            "docs-discovery-link",
+            "docs-status-link",
+            "docs-overview-link",
+            "docs-quick-start-link",
+            "docs-authorization-link",
+            "docs-configuration-link",
+            "docs-operations-link",
+        ] {
+            assert!(body.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+        assert!(body.contains("role=\"columnheader\""));
+        assert!(body.contains("role=\"cell\""));
     }
 
     #[actix_web::test]
@@ -12318,6 +12692,7 @@ mod tests {
         assert!(stylesheet.contains("form[aria-busy=\"true\"]"));
         assert!(stylesheet.contains("button.is-submitting::after"));
         assert!(stylesheet.contains(".visually-hidden"));
+        assert!(stylesheet.contains(".status-pill.is-not-ready"));
         assert!(stylesheet.contains("@media (max-width: 20rem)"));
         assert!(stylesheet.contains("@media (prefers-reduced-motion: reduce)"));
         assert!(!stylesheet.contains("min-width: 320px"));
@@ -12502,6 +12877,33 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("UTF-8 home page");
         assert!(body.contains("rel=\"icon\" href=\"/favicon.svg?rev=abc123\""));
         assert!(body.contains("--auth-font: Atkinson Hyperlegible, sans-serif"));
+        assert!(body.contains("id=\"runtime-status\" class=\"status-pill is-not-ready\""));
+        assert!(body.contains("Rust runtime not ready"));
+        assert!(!body.contains("Rust runtime ready"));
+        for id in [
+            "home-brand-link",
+            "home-docs-link",
+            "home-discovery-link",
+            "home-readiness-link",
+        ] {
+            assert!(body.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+
+        let ready_body = HomeTemplate {
+            product_name: "Robine ID",
+            primary_color: "#3156d3",
+            issuer_id: "default",
+            revision: "ready-revision",
+            runtime_ready: true,
+            logo: None,
+            favicon: None,
+            font_family: None,
+        }
+        .render()
+        .expect("ready home page");
+        assert!(ready_body.contains("id=\"runtime-status\" class=\"status-pill is-ready\""));
+        assert!(ready_body.contains("Rust runtime ready"));
+        assert!(!ready_body.contains("Rust runtime not ready"));
     }
 
     #[actix_web::test]
@@ -12556,6 +12958,7 @@ mod tests {
             transaction_field: "mfa_transaction",
             action_value: None,
             csrf_token: "csrf",
+            recovery_available: true,
             has_error: false,
             error: None,
             messages: &messages,
@@ -12594,6 +12997,7 @@ mod tests {
             transaction_field: "mfa_transaction",
             action_value: None,
             csrf_token: "csrf",
+            recovery_available: false,
             has_error: true,
             error: Some("Invalid code"),
             messages: &messages,
@@ -13429,8 +13833,8 @@ mod tests {
         .await;
 
         for (uri, allow) in [
-            ("/", "GET"),
-            ("/docs", "GET"),
+            ("/", "GET, HEAD"),
+            ("/docs", "GET, HEAD"),
             ("/metrics", "GET"),
             ("/default/check-session", "GET"),
             ("/default/check-session/origin", "GET"),
@@ -13473,6 +13877,61 @@ mod tests {
             assert_not_cacheable(&response);
             let body: Value = test::read_body_json(response).await;
             assert_eq!(body, json!({"error": "method_not_allowed"}), "{uri}");
+        }
+
+        for uri in ["/", "/docs"] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let content_type = response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .expect("HTML content type")
+                .to_owned();
+            let content_language = response
+                .headers()
+                .get(actix_web::http::header::CONTENT_LANGUAGE)
+                .and_then(|value| value.to_str().ok())
+                .expect("HTML content language")
+                .to_owned();
+            let body = test::read_body(response).await;
+
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::HEAD)
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some(content_type.as_str()),
+                "{uri}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_LANGUAGE)
+                    .and_then(|value| value.to_str().ok()),
+                Some(content_language.as_str()),
+                "{uri}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<usize>().ok()),
+                Some(body.len()),
+                "{uri}"
+            );
+            assert!(test::read_body(response).await.is_empty(), "{uri}");
         }
 
         for (requested_method, requested_headers) in
@@ -13647,7 +14106,18 @@ mod tests {
             .to_http_request();
         let generated = correlation_id(&unsafe_value);
         assert_ne!(generated, "contains spaces and user data");
-        assert!(!generated.is_empty());
+        assert_eq!(generated.len(), 43);
+        assert!(
+            generated
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
+        assert_eq!(
+            required_random_token("test_csrf")
+                .expect("operating system entropy")
+                .len(),
+            43
+        );
     }
 
     #[actix_web::test]
@@ -14362,6 +14832,7 @@ mod tests {
             enabled: true,
             issuer_ids: vec![],
             totp_secret_reference: None,
+            recovery_code_hashes: vec![],
             name: None,
             email: None,
             claims: serde_json::Map::from_iter([("department".to_owned(), json!("engineering"))]),
@@ -15142,6 +15613,7 @@ mod tests {
                 enabled: true,
                 issuer_ids: vec![],
                 totp_secret_reference: None,
+                recovery_code_hashes: vec![],
                 name: None,
                 email: None,
                 claims: Default::default(),
@@ -15640,6 +16112,7 @@ mod tests {
                 enabled: true,
                 issuer_ids: vec![],
                 totp_secret_reference: None,
+                recovery_code_hashes: vec![],
                 name: None,
                 email: None,
                 claims: Default::default(),

@@ -201,6 +201,8 @@ pub struct User {
     pub issuer_ids: Vec<String>,
     #[serde(default)]
     pub totp_secret_reference: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_code_hashes: Vec<String>,
     pub name: Option<String>,
     pub email: Option<String>,
     #[serde(default)]
@@ -455,6 +457,8 @@ pub struct UiMessages {
     pub totp_title: String,
     pub totp_intro: String,
     pub totp_code: String,
+    pub totp_code_or_recovery: String,
+    pub totp_recovery_intro: String,
     pub totp_submit: String,
     pub totp_invalid_code: String,
     pub totp_expired: String,
@@ -558,12 +562,12 @@ impl Snapshot {
                 .into_iter()
                 .enumerate()
                 .map(|(index, document)| {
-                    (
-                        PathBuf::from(format!("ROBINE_ID_APPLICATIONS_JSON[{index}]")),
-                        serde_json::to_string(&document).expect("JSON value serializes"),
-                    )
+                    let path = PathBuf::from(format!("ROBINE_ID_APPLICATIONS_JSON[{index}]"));
+                    serde_json::to_string(&document)
+                        .map(|contents| (path.clone(), contents))
+                        .map_err(|source| ConfigurationError::Json { path, source })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             return Self::from_application_sources(&root_path, &root_contents, applications);
         }
 
@@ -685,13 +689,19 @@ impl Snapshot {
             error => error,
         })?;
 
-        let canonical = canonicalize(
-            serde_json::to_value(&configuration).expect("configuration always serializes"),
-        );
+        let canonical = canonicalize(serde_json::to_value(&configuration).map_err(|source| {
+            ConfigurationError::Json {
+                path: root_path.to_owned(),
+                source,
+            }
+        })?);
         let mut fingerprint = Sha256::new();
-        fingerprint.update(
-            serde_json::to_vec(&canonical).expect("canonical configuration always serializes"),
-        );
+        fingerprint.update(serde_json::to_vec(&canonical).map_err(|source| {
+            ConfigurationError::Json {
+                path: root_path.to_owned(),
+                source,
+            }
+        })?);
 
         Ok(Self {
             configuration,
@@ -700,9 +710,18 @@ impl Snapshot {
     }
 
     pub fn redacted(&self) -> serde_json::Value {
-        redact_value(
-            serde_json::to_value(&self.configuration).expect("configuration always serializes"),
-        )
+        match serde_json::to_value(&self.configuration) {
+            Ok(value) => redact_value(value),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    event = "configuration_redaction",
+                    outcome = "failed",
+                    "effective configuration could not be serialized"
+                );
+                serde_json::json!({"error": "configuration_redaction_failed"})
+            }
+        }
     }
 
     pub fn issuer(&self, id: &str) -> Option<&Issuer> {
@@ -954,6 +973,14 @@ impl Branding {
                 "Enter the six-digit code from your authenticator app.",
             ),
             totp_code: value("totp.code", "Authentication code"),
+            totp_code_or_recovery: value(
+                "totp.code_or_recovery",
+                "Authentication or recovery code",
+            ),
+            totp_recovery_intro: value(
+                "totp.recovery_intro",
+                "You can also enter one of your unused recovery codes.",
+            ),
             totp_submit: value("totp.submit", "Verify code"),
             totp_invalid_code: value(
                 "totp.invalid_code",
@@ -1102,6 +1129,10 @@ fn built_in_message(locale: &str, key: &str) -> Option<&'static str> {
             "Saisissez le code à six chiffres de votre application d’authentification pour continuer avec"
         }
         "totp.code" => "Code d’authentification",
+        "totp.code_or_recovery" => "Code d’authentification ou de récupération",
+        "totp.recovery_intro" => {
+            "Vous pouvez aussi saisir l’un de vos codes de récupération inutilisés."
+        }
         "totp.submit" => "Vérifier le code",
         "totp.invalid_code" => "Ce code d’authentification est invalide. Saisissez un code actuel.",
         "totp.expired" => "Cette vérification a expiré. Reconnectez-vous pour continuer.",
@@ -1514,7 +1545,12 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         }
         if let Some(uri) = &client.frontchannel_logout_uri {
             validate_web_url(uri, "client front-channel logout URI")?;
-            let parsed = url::Url::parse(uri).expect("validated front-channel logout URI");
+            let parsed = url::Url::parse(uri).map_err(|_| {
+                ConfigurationError::Invalid(format!(
+                    "client {} has an invalid frontchannel_logout_uri",
+                    client.id
+                ))
+            })?;
             if parsed.scheme() == "http" && client.client_type != "confidential" {
                 return Err(ConfigurationError::Invalid(format!(
                     "client {} must be confidential to use an HTTP frontchannel_logout_uri",
@@ -1914,6 +1950,36 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
                 user.id
             )));
         }
+        if !user.recovery_code_hashes.is_empty() {
+            if user.totp_secret_reference.is_none() {
+                return Err(ConfigurationError::Invalid(format!(
+                    "user {} configures recovery codes without TOTP",
+                    user.id
+                )));
+            }
+            if user.recovery_code_hashes.len() > 16
+                || user
+                    .recovery_code_hashes
+                    .iter()
+                    .any(|hash| bcrypt_cost(hash).is_none())
+            {
+                return Err(ConfigurationError::Invalid(format!(
+                    "user {} recovery codes must contain at most 16 supported bcrypt hashes",
+                    user.id
+                )));
+            }
+            if user
+                .recovery_code_hashes
+                .iter()
+                .enumerate()
+                .any(|(index, hash)| user.recovery_code_hashes[..index].contains(hash))
+            {
+                return Err(ConfigurationError::Invalid(format!(
+                    "user {} recovery code hashes must be unique",
+                    user.id
+                )));
+            }
+        }
     }
     if !(1..=31_536_000).contains(&session.idle_timeout)
         || !(1..=31_536_000).contains(&session.absolute_timeout)
@@ -2274,6 +2340,7 @@ fn redact_value(value: serde_json::Value) -> serde_json::Value {
                             | "secret_reference"
                             | "pairwise_subject_salt_reference"
                             | "totp_secret_reference"
+                            | "recovery_code_hashes"
                             | "client_secret"
                             | "client_assertion"
                             | "private_key"
@@ -2869,6 +2936,8 @@ mod tests {
             "totp.title",
             "totp.intro",
             "totp.code",
+            "totp.code_or_recovery",
+            "totp.recovery_intro",
             "totp.submit",
             "totp.invalid_code",
             "totp.expired",
@@ -3094,6 +3163,7 @@ mod tests {
             enabled: true,
             issuer_ids: vec![],
             totp_secret_reference: None,
+            recovery_code_hashes: vec![],
             name: None,
             email: None,
             claims: Default::default(),
@@ -3845,6 +3915,8 @@ mod tests {
             "provider": "env",
             "key": "DEVELOPMENT_USER_TOTP_SECRET"
         }));
+        configuration.users[0].recovery_code_hashes =
+            vec![configuration.users[0].password_hash.clone()];
         validate(&configuration).expect("valid TOTP configuration");
         let snapshot = Snapshot {
             configuration: configuration.clone(),
@@ -3852,6 +3924,10 @@ mod tests {
         };
         assert_eq!(
             snapshot.redacted()["users"][0]["totp_secret_reference"],
+            serde_json::Value::String("[REDACTED]".to_owned())
+        );
+        assert_eq!(
+            snapshot.redacted()["users"][0]["recovery_code_hashes"],
             serde_json::Value::String("[REDACTED]".to_owned())
         );
 
@@ -3868,6 +3944,21 @@ mod tests {
         assert!(matches!(
             validate(&configuration),
             Err(ConfigurationError::Invalid(message)) if message.contains("invalid TOTP secret reference")
+        ));
+
+        configuration.users[0].totp_secret_reference = None;
+        assert!(matches!(
+            validate(&configuration),
+            Err(ConfigurationError::Invalid(message)) if message.contains("recovery codes without TOTP")
+        ));
+        configuration.users[0].totp_secret_reference = Some(serde_json::json!({
+            "provider": "env",
+            "key": "DEVELOPMENT_USER_TOTP_SECRET"
+        }));
+        configuration.users[0].recovery_code_hashes = vec!["not-a-bcrypt-hash".to_owned()];
+        assert!(matches!(
+            validate(&configuration),
+            Err(ConfigurationError::Invalid(message)) if message.contains("supported bcrypt hashes")
         ));
     }
 
