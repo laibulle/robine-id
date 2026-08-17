@@ -19,6 +19,10 @@ Robine ID reconciles declared configuration into runtime and persistent state at
 - The server MUST record a non-secret revision fingerprint, timestamp, outcome, and safe diagnostics for apply attempts.
 - Operators MUST be able to validate and preview a change without applying it.
 - The running service MUST detect changes to the root or application documents and attempt a complete reload without restart.
+- On Unix, `SIGHUP` MUST request that same complete reload immediately, even when periodic polling
+  is disabled. It MUST NOT bypass validation, activation locking, metrics, or diagnostic deduplication.
+- Polling and signal-triggered attempts MUST serialize the complete load, validation, and activation
+  sequence so an older concurrent read cannot overwrite a newer active revision.
 - A reload MUST validate the complete composed revision before activation. Invalid or partially written files MUST leave the last valid revision active.
 - A panic while holding the in-process snapshot lock MUST NOT permanently crash subsequent readers
   or atomic activations; recovery MUST preserve the last complete `Arc` snapshot and emit a bounded
@@ -59,12 +63,17 @@ diagnostics are emitted as structured operational events and counters; they rese
 restart unless the deployment exports them to an external telemetry backend.
 
 The default watcher interval is one second. It rebuilds the complete desired state rather than mutating one application in isolation, so duplicate IDs and cross-resource constraints are checked atomically. Removing an application file is a desired-state removal and follows the reconciliation plan on the next successful reload.
+Unix operators may send `SIGHUP` to use the identical pipeline immediately. Failure to install that
+listener leaves polling operational and emits a bounded operational error. Inline and Vercel
+configuration remains immutable per deployment.
 
 ## Additional Acceptance Criteria
 
 - The first valid apply activates one snapshot and records its fingerprint.
 - An equivalent apply returns `unchanged` even when JSON object keys or identified resource lists are reordered.
 - Invalid candidates leave the prior active snapshot readable.
+- Repeated polling and `SIGHUP` observations of one identical invalid candidate increment the failed
+  outcome only once until a valid load clears the failure state.
 - Preview never changes active revision or history.
 - Effective configuration never exposes secret-bearing fields.
 

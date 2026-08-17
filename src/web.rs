@@ -260,6 +260,15 @@ enum MfaProof {
     Recovery(Vec<u8>),
 }
 
+impl MfaProof {
+    fn factor(&self) -> &'static str {
+        match self {
+            Self::Totp(_) => "totp",
+            Self::Recovery(_) => "recovery_code",
+        }
+    }
+}
+
 async fn verify_mfa_submission(
     user: &crate::configuration::User,
     submitted: &str,
@@ -271,8 +280,9 @@ async fn verify_mfa_submission(
         let secret = crate::totp::secret_from_reference(reference).map_err(|error| {
             tracing::error!(?error, "configured TOTP secret is unavailable");
         })?;
-        return Ok(crate::totp::verify(&secret, submitted, Utc::now().timestamp())
-            .map(MfaProof::Totp));
+        return Ok(
+            crate::totp::verify(&secret, submitted, Utc::now().timestamp()).map(MfaProof::Totp),
+        );
     }
     if user.recovery_code_hashes.is_empty() {
         return Ok(None);
@@ -303,13 +313,7 @@ async fn consume_mfa_challenge(
         }
         MfaProof::Recovery(fingerprint) => {
             database
-                .consume_recovery_challenge(
-                    transaction,
-                    issuer,
-                    subject,
-                    purpose,
-                    &fingerprint,
-                )
+                .consume_recovery_challenge(transaction, issuer, subject, purpose, &fingerprint)
                 .await
         }
     }
@@ -3560,14 +3564,14 @@ async fn complete_totp_authentication(
             authorization.ui_locales.as_deref(),
         );
     };
-    let Some(reference) = user.totp_secret_reference.as_ref() else {
+    if user.totp_secret_reference.is_none() {
         return protocol_error_with_ui_locales(
             &snapshot.configuration.branding,
             "This verification is no longer valid",
             &correlation_id(&request),
             authorization.ui_locales.as_deref(),
         );
-    };
+    }
     let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
     let messages = branding.messages(authorization.ui_locales.as_deref());
     let remote_address = authentication_remote_address(&request, forwarded_headers_trusted());
@@ -3648,6 +3652,7 @@ async fn complete_totp_authentication(
             );
         }
     };
+    let factor = proof.factor();
     match consume_mfa_challenge(
         database,
         &transaction,
@@ -3683,6 +3688,15 @@ async fn complete_totp_authentication(
         }
     }
     application.metrics().mfa(MfaOutcome::Success);
+    tracing::info!(
+        event = "mfa_verification",
+        outcome = "success",
+        issuer_id,
+        client_id = %client.id,
+        subject_id = %user.id,
+        factor,
+        "multi-factor authentication completed"
+    );
     finish_authenticated_authorization(
         &request,
         &application,
@@ -6050,13 +6064,13 @@ async fn complete_device_totp(
             request,
         );
     };
-    let Some(reference) = user.totp_secret_reference.as_ref() else {
+    if user.totp_secret_reference.is_none() {
         return protocol_error_for_request(
             &snapshot.configuration.branding,
             "This verification is no longer valid",
             request,
         );
-    };
+    }
     let branding = snapshot.branding(Some(issuer_id), Some(&client.id));
     let messages = messages_for_request(&branding, request);
     let remote = authentication_remote_address(request, forwarded_headers_trusted());
@@ -6090,10 +6104,24 @@ async fn complete_device_totp(
             );
         }
     }
-    let secret = match crate::totp::secret_from_reference(reference) {
-        Ok(secret) => secret,
-        Err(error) => {
-            tracing::error!(?error, "configured TOTP secret is unavailable");
+    let proof = match verify_mfa_submission(user, submitted_code).await {
+        Ok(Some(proof)) => proof,
+        Ok(None) => {
+            application.metrics().authentication(false);
+            application.metrics().mfa(MfaOutcome::Failure);
+            return render_device_totp_challenge(
+                request,
+                snapshot,
+                issuer_id,
+                client,
+                transaction,
+                &form.csrf_token,
+                !user.recovery_code_hashes.is_empty(),
+                Some(&messages.totp_invalid_code),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            );
+        }
+        Err(()) => {
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "temporarily_unavailable",
@@ -6101,24 +6129,8 @@ async fn complete_device_totp(
             );
         }
     };
-    let Some(counter) = crate::totp::verify(&secret, submitted_code, Utc::now().timestamp()) else {
-        application.metrics().authentication(false);
-        application.metrics().mfa(MfaOutcome::Failure);
-        return render_device_totp_challenge(
-            request,
-            snapshot,
-            issuer_id,
-            client,
-            transaction,
-            &form.csrf_token,
-            !user.recovery_code_hashes.is_empty(),
-            Some(&messages.totp_invalid_code),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        );
-    };
-    match database
-        .consume_totp_challenge(transaction, issuer_url, &user.id, "device", counter)
-        .await
+    let factor = proof.factor();
+    match consume_mfa_challenge(database, transaction, issuer_url, &user.id, "device", proof).await
     {
         Ok(true) => {}
         Ok(false) => {
@@ -6140,6 +6152,15 @@ async fn complete_device_totp(
         }
     }
     application.metrics().mfa(MfaOutcome::Success);
+    tracing::info!(
+        event = "mfa_verification",
+        outcome = "success",
+        issuer_id,
+        client_id = %client.id,
+        subject_id = %user.id,
+        factor,
+        "device multi-factor authentication completed"
+    );
     let approved = match payload.decision.as_str() {
         "approve" => true,
         "deny" => false,
@@ -12973,8 +12994,10 @@ mod tests {
         .expect("TOTP template");
         assert!(body.contains("/assets/app.js"));
         assert!(body.contains("autocomplete=\"one-time-code\""));
-        assert!(body.contains("inputmode=\"numeric\""));
-        assert!(body.contains("pattern=\"[0-9]{6}\""));
+        assert!(body.contains("inputmode=\"text\""));
+        assert!(body.contains("maxlength=\"19\""));
+        assert!(body.contains("Authentication or recovery code"));
+        assert!(body.contains("unused recovery codes"));
         assert!(body.contains("required autofocus"));
         assert!(body.contains("data-submitting-label=\"Request in progress\""));
         assert!(body.contains("data-submit-status-id=\"totp-submit-status\""));
@@ -12982,6 +13005,37 @@ mod tests {
         assert!(!body.contains("Client <unsafe>"));
         assert!(body.contains("Client &#60;unsafe&#62;"));
         assert!(!body.to_ascii_lowercase().contains("secret"));
+    }
+
+    #[actix_web::test]
+    async fn accepts_a_configured_recovery_code_without_loading_the_totp_secret() {
+        let mut user = Snapshot::load()
+            .expect("development configuration")
+            .configuration
+            .users[0]
+            .clone();
+        let code = "2345-6789-ABCD-EFGH";
+        user.totp_secret_reference = Some(json!({
+            "provider": "env",
+            "key": "ROBINE_ID_INTENTIONALLY_MISSING_TOTP_SECRET"
+        }));
+        user.recovery_code_hashes = vec![
+            crate::recovery::hash_code(code)
+                .expect("valid recovery code")
+                .to_string(),
+        ];
+
+        let proof = verify_mfa_submission(&user, "2345-6789-abcd-efgh")
+            .await
+            .expect("recovery verification")
+            .expect("matching recovery code");
+        assert!(matches!(proof, MfaProof::Recovery(fingerprint) if fingerprint.len() == 32));
+        assert!(
+            verify_mfa_submission(&user, "2345-6789-ABCD-EFGJ")
+                .await
+                .expect("invalid recovery verification")
+                .is_none()
+        );
     }
 
     #[actix_web::test]
@@ -13012,6 +13066,8 @@ mod tests {
         .expect("TOTP error template");
         assert!(totp.contains("id=\"totp-error\""));
         assert!(totp.contains("aria-invalid=\"true\" aria-describedby=\"totp-error\""));
+        assert!(totp.contains("inputmode=\"numeric\""));
+        assert!(totp.contains("pattern=\"[0-9]{6}\""));
         assert!(!totp.contains("autofocus"));
 
         let logout = LogoutTemplate {

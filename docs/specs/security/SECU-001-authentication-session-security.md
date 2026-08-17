@@ -19,6 +19,9 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
   MAY emit only bounded fields such as endpoint and outcome.
 - Environment-resolved client and TOTP secrets MUST use zeroizing memory wrappers so transient
   buffers are overwritten when released.
+- Current and staged signing-key encryption secrets MUST use zeroizing wrappers while they are
+  validated and derived. Every in-memory derived wrapping-key copy MUST be cleared when its
+  database handle is dropped.
 - Failed-login responses MUST not disclose account existence by default.
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.

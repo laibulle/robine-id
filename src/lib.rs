@@ -5,13 +5,15 @@ pub mod database;
 pub mod metrics;
 pub mod pairwise;
 pub mod protocol;
+pub mod provisioning;
 pub mod recovery;
+pub mod secrets;
 pub mod tokens;
 pub mod totp;
 pub mod web;
 
 use std::sync::{
-    Arc, Once, RwLock,
+    Arc, Mutex, Once, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use thiserror::Error;
@@ -35,6 +37,8 @@ pub struct Application {
     database: Option<database::Database>,
     metrics: Arc<metrics::Metrics>,
     accepting_traffic: Arc<AtomicBool>,
+    last_configuration_error: Arc<Mutex<Option<String>>>,
+    configuration_reload_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +84,8 @@ impl Application {
             database: database::Database::from_env()?,
             metrics: Arc::new(metrics::Metrics::default()),
             accepting_traffic: Arc::new(AtomicBool::new(true)),
+            last_configuration_error: Arc::new(Mutex::new(None)),
+            configuration_reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -89,6 +95,8 @@ impl Application {
             database: None,
             metrics: Arc::new(metrics::Metrics::default()),
             accepting_traffic: Arc::new(AtomicBool::new(true)),
+            last_configuration_error: Arc::new(Mutex::new(None)),
+            configuration_reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -139,62 +147,120 @@ impl Application {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_millis(interval_milliseconds));
             ticker.tick().await;
-            let mut last_error = None;
             loop {
                 ticker.tick().await;
-                let loaded = tokio::task::spawn_blocking(Snapshot::load).await;
-                match loaded {
-                    Ok(Ok(snapshot)) => {
-                        let revision = snapshot.revision.clone();
-                        let outcome = application.activate_snapshot(snapshot);
-                        if outcome == ReconciliationOutcome::Activated {
-                            application.metrics.configuration_activated();
-                            tracing::info!(
-                                event = "configuration_reconciliation",
-                                outcome = "activated",
-                                %revision,
-                                "configuration activated"
-                            );
-                        } else {
-                            application.metrics.configuration_unchanged();
-                            tracing::debug!(
-                                event = "configuration_reconciliation",
-                                outcome = "unchanged",
-                                %revision,
-                                "configuration is unchanged"
-                            );
-                        }
-                        last_error = None;
-                    }
-                    Ok(Err(error)) => {
-                        let diagnostic = error.to_string();
-                        if last_error.as_deref() != Some(diagnostic.as_str()) {
-                            application.metrics.configuration_failed();
-                            tracing::error!(
-                                event = "configuration_reconciliation",
-                                outcome = "failed",
-                                diagnostic = %diagnostic,
-                                "configuration reload rejected; retaining active revision"
-                            );
-                            last_error = Some(diagnostic);
-                        }
-                    }
-                    Err(error) => {
-                        let diagnostic = error.to_string();
-                        if last_error.as_deref() != Some(diagnostic.as_str()) {
-                            application.metrics.configuration_failed();
-                            tracing::error!(
-                                event = "configuration_reconciliation",
-                                outcome = "failed",
-                                diagnostic = %diagnostic,
-                                "configuration reload task failed; retaining active revision"
-                            );
-                            last_error = Some(diagnostic);
-                        }
-                    }
-                }
+                let _ = application.reload_configuration("poll").await;
             }
         });
+    }
+
+    pub async fn reload_configuration(
+        &self,
+        trigger: &'static str,
+    ) -> Option<ReconciliationOutcome> {
+        self.reload_configuration_with(trigger, Snapshot::load)
+            .await
+    }
+
+    async fn reload_configuration_with<F>(
+        &self,
+        trigger: &'static str,
+        loader: F,
+    ) -> Option<ReconciliationOutcome>
+    where
+        F: FnOnce() -> Result<Snapshot, ConfigurationError> + Send + 'static,
+    {
+        let _reload_guard = self.configuration_reload_lock.lock().await;
+        match tokio::task::spawn_blocking(loader).await {
+            Ok(Ok(snapshot)) => {
+                self.clear_configuration_reload_error();
+                let revision = snapshot.revision.clone();
+                let outcome = self.activate_snapshot(snapshot);
+                if outcome == ReconciliationOutcome::Activated {
+                    self.metrics.configuration_activated();
+                    tracing::info!(
+                        event = "configuration_reconciliation",
+                        outcome = "activated",
+                        trigger,
+                        %revision,
+                        "configuration activated"
+                    );
+                } else {
+                    self.metrics.configuration_unchanged();
+                    tracing::debug!(
+                        event = "configuration_reconciliation",
+                        outcome = "unchanged",
+                        trigger,
+                        %revision,
+                        "configuration is unchanged"
+                    );
+                }
+                Some(outcome)
+            }
+            Ok(Err(error)) => {
+                self.record_configuration_reload_error(
+                    trigger,
+                    error.to_string(),
+                    "configuration reload rejected; retaining active revision",
+                );
+                None
+            }
+            Err(error) => {
+                self.record_configuration_reload_error(
+                    trigger,
+                    error.to_string(),
+                    "configuration reload task failed; retaining active revision",
+                );
+                None
+            }
+        }
+    }
+
+    fn clear_configuration_reload_error(&self) {
+        let mut last_error = match self.last_configuration_error.lock() {
+            Ok(last_error) => last_error,
+            Err(poisoned) => {
+                tracing::error!(
+                    event = "configuration_reconciliation",
+                    outcome = "lock_recovered",
+                    "recovered poisoned configuration reload state lock"
+                );
+                poisoned.into_inner()
+            }
+        };
+        *last_error = None;
+    }
+
+    fn record_configuration_reload_error(
+        &self,
+        trigger: &'static str,
+        diagnostic: String,
+        message: &'static str,
+    ) {
+        let mut last_error = match self.last_configuration_error.lock() {
+            Ok(last_error) => last_error,
+            Err(poisoned) => {
+                tracing::error!(
+                    event = "configuration_reconciliation",
+                    outcome = "lock_recovered",
+                    "recovered poisoned configuration reload state lock"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if last_error.as_deref() == Some(diagnostic.as_str()) {
+            return;
+        }
+        self.metrics.configuration_failed();
+        tracing::error!(
+            event = "configuration_reconciliation",
+            outcome = "failed",
+            trigger,
+            diagnostic = %diagnostic,
+            detail = message,
+            "configuration reload failed; retaining active revision"
+        );
+        *last_error = Some(diagnostic);
     }
 
     pub fn spawn_database_maintenance(&self, interval_seconds: u64) {
@@ -397,5 +463,111 @@ mod tests {
             ReconciliationOutcome::Activated
         );
         assert_eq!(application.snapshot().revision, "recovered-revision");
+    }
+
+    #[tokio::test]
+    async fn reload_pipeline_activates_valid_snapshots_and_deduplicates_failures() {
+        let initial = Snapshot::load().expect("initial configuration");
+        let application = Application::without_database(initial.clone());
+        let mut changed = initial.clone();
+        changed.revision = "signal-revision".to_owned();
+
+        assert_eq!(
+            application
+                .reload_configuration_with("test", move || Ok(changed))
+                .await,
+            Some(ReconciliationOutcome::Activated)
+        );
+        assert_eq!(application.snapshot().revision, "signal-revision");
+
+        for _ in 0..2 {
+            assert_eq!(
+                application
+                    .reload_configuration_with("test", || {
+                        Err(ConfigurationError::Invalid(
+                            "bounded test reload failure".to_owned(),
+                        ))
+                    })
+                    .await,
+                None
+            );
+        }
+        let metrics = application.metrics().render("signal-revision", true);
+        assert!(
+            metrics
+                .contains("robine_id_configuration_reconciliation_total{outcome=\"activated\"} 1")
+        );
+        assert!(
+            metrics.contains("robine_id_configuration_reconciliation_total{outcome=\"failed\"} 1")
+        );
+
+        let unchanged = application.snapshot().as_ref().clone();
+        assert_eq!(
+            application
+                .reload_configuration_with("test", move || Ok(unchanged))
+                .await,
+            Some(ReconciliationOutcome::Unchanged)
+        );
+        assert_eq!(
+            application
+                .reload_configuration_with("test", || {
+                    Err(ConfigurationError::Invalid(
+                        "bounded test reload failure".to_owned(),
+                    ))
+                })
+                .await,
+            None
+        );
+        let metrics = application.metrics().render("signal-revision", true);
+        assert!(
+            metrics
+                .contains("robine_id_configuration_reconciliation_total{outcome=\"unchanged\"} 1")
+        );
+        assert!(
+            metrics.contains("robine_id_configuration_reconciliation_total{outcome=\"failed\"} 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reload_triggers_cannot_reactivate_an_older_snapshot() {
+        let initial = Snapshot::load().expect("initial configuration");
+        let application = Application::without_database(initial.clone());
+        let mut older = initial.clone();
+        older.revision = "older-candidate".to_owned();
+        let mut newer = initial;
+        newer.revision = "newer-candidate".to_owned();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+
+        let older_application = application.clone();
+        let older_reload = tokio::spawn(async move {
+            older_application
+                .reload_configuration_with("poll", move || {
+                    let _ = started_sender.send(());
+                    let _ = release_receiver.blocking_recv();
+                    Ok(older)
+                })
+                .await
+        });
+        started_receiver.await.expect("older loader started");
+        assert!(application.configuration_reload_lock.try_lock().is_err());
+
+        let newer_application = application.clone();
+        let newer_reload = tokio::spawn(async move {
+            newer_application
+                .reload_configuration_with("SIGHUP", move || Ok(newer))
+                .await
+        });
+        release_sender.send(()).expect("release older loader");
+
+        assert_eq!(
+            older_reload.await.expect("older reload task"),
+            Some(ReconciliationOutcome::Activated)
+        );
+        assert_eq!(
+            newer_reload.await.expect("newer reload task"),
+            Some(ReconciliationOutcome::Activated)
+        );
+        assert_eq!(application.snapshot().revision, "newer-candidate");
     }
 }

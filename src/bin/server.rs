@@ -108,6 +108,7 @@ async fn main() -> io::Result<()> {
         .await
         .map_err(io::Error::other)?;
     application.spawn_configuration_reloader(settings.reload_interval_milliseconds);
+    spawn_configuration_reload_signal(application.clone());
     application.spawn_database_maintenance(settings.database_cleanup_interval_seconds);
     application.spawn_signing_key_rotation();
     let drain_delay_milliseconds = settings.drain_delay_milliseconds;
@@ -286,6 +287,45 @@ fn parse_boolean(name: &str, value: Option<&str>, default: bool) -> io::Result<b
 fn invalid_setting(name: &str, requirement: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("{name} {requirement}"))
 }
+
+#[cfg(unix)]
+fn spawn_configuration_reload_signal(application: Application) {
+    if env::var_os("VERCEL").is_some() || env::var_os("ROBINE_ID_CONFIG_JSON").is_some() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(hangup) => hangup,
+            Err(error) => {
+                tracing::error!(
+                    event = "configuration_reconciliation",
+                    outcome = "signal_error",
+                    %error,
+                    "SIGHUP handler installation failed; periodic reload remains available"
+                );
+                return;
+            }
+        };
+        while hangup.recv().await.is_some() {
+            tracing::info!(
+                event = "configuration_reconciliation",
+                outcome = "requested",
+                trigger = "SIGHUP",
+                "immediate configuration reload requested"
+            );
+            let _ = application.reload_configuration("SIGHUP").await;
+        }
+        tracing::error!(
+            event = "configuration_reconciliation",
+            outcome = "signal_error",
+            "SIGHUP stream ended; periodic reload remains available"
+        );
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_configuration_reload_signal(_application: Application) {}
 
 #[cfg(unix)]
 async fn shutdown_signal() -> &'static str {

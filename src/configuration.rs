@@ -984,7 +984,7 @@ impl Branding {
             totp_submit: value("totp.submit", "Verify code"),
             totp_invalid_code: value(
                 "totp.invalid_code",
-                "That authentication code is invalid. Try a current code.",
+                "That code is invalid. Try a current authenticator code or an unused recovery code.",
             ),
             totp_expired: value(
                 "totp.expired",
@@ -1134,7 +1134,9 @@ fn built_in_message(locale: &str, key: &str) -> Option<&'static str> {
             "Vous pouvez aussi saisir l’un de vos codes de récupération inutilisés."
         }
         "totp.submit" => "Vérifier le code",
-        "totp.invalid_code" => "Ce code d’authentification est invalide. Saisissez un code actuel.",
+        "totp.invalid_code" => {
+            "Ce code est invalide. Saisissez un code d’authentification actuel ou un code de récupération inutilisé."
+        }
         "totp.expired" => "Cette vérification a expiré. Reconnectez-vous pour continuer.",
         "consent.title" => "Autoriser l’accès ?",
         "consent.intro" => "Cette application demande l’autorisation de :",
@@ -1961,10 +1963,10 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
                 || user
                     .recovery_code_hashes
                     .iter()
-                    .any(|hash| bcrypt_cost(hash).is_none())
+                    .any(|hash| !crate::recovery::valid_hash(hash))
             {
                 return Err(ConfigurationError::Invalid(format!(
-                    "user {} recovery codes must contain at most 16 supported bcrypt hashes",
+                    "user {} recovery codes must contain at most 16 canonical SHA-256 hashes",
                     user.id
                 )));
             }
@@ -3915,8 +3917,11 @@ mod tests {
             "provider": "env",
             "key": "DEVELOPMENT_USER_TOTP_SECRET"
         }));
-        configuration.users[0].recovery_code_hashes =
-            vec![configuration.users[0].password_hash.clone()];
+        configuration.users[0].recovery_code_hashes = vec![
+            crate::recovery::hash_code("2345-6789-ABCD-EFGH")
+                .expect("valid recovery code")
+                .to_string(),
+        ];
         validate(&configuration).expect("valid TOTP configuration");
         let snapshot = Snapshot {
             configuration: configuration.clone(),
@@ -3955,10 +3960,10 @@ mod tests {
             "provider": "env",
             "key": "DEVELOPMENT_USER_TOTP_SECRET"
         }));
-        configuration.users[0].recovery_code_hashes = vec!["not-a-bcrypt-hash".to_owned()];
+        configuration.users[0].recovery_code_hashes = vec!["not-a-sha256-hash".to_owned()];
         assert!(matches!(
             validate(&configuration),
-            Err(ConfigurationError::Invalid(message)) if message.contains("supported bcrypt hashes")
+            Err(ConfigurationError::Invalid(message)) if message.contains("canonical SHA-256 hashes")
         ));
     }
 

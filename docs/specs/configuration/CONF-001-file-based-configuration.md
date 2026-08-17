@@ -55,6 +55,8 @@ compatibility but new applications MUST use individual documents.
 - `authentication.methods` requires `password` and may additionally contain `totp` once; session
   and rate-limit values are positive integers. A per-user TOTP factor uses only a strict environment
   `totp_secret_reference` and requires the global method to be enabled.
+  A TOTP-enabled user may also contain at most 16 unique, canonical `sha256:` values in
+  `recovery_code_hashes`; this entire field is secret-redacted and is invalid without the factor.
 - `storage` is optional legacy compatibility metadata; the Rust runtime persists all mutable state and encrypted signing keys in PostgreSQL.
 - `telemetry.log_level` is one of `debug`, `info`, `warning`, or `error`.
 

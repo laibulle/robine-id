@@ -39,11 +39,14 @@ container, which exceeds both configured phases with margin.
 - `robine_id_postgres`: persistent PostgreSQL data volume managed by Compose.
 
 Replace the checked-in development identity, bcrypt hash, and issuer before the first deployment.
+Generate each initial user credential with `make user-password BCRYPT_COST=12`, deliver the displayed
+password once, and copy only the emitted hash into configuration. All users in a revision must use
+the same cost.
 Generate independent secrets:
 
 ```sh
 openssl rand -base64 48 # POSTGRES_PASSWORD
-openssl rand -base64 48 # KEY_ENCRYPTION_SECRET
+make encryption-secret # KEY_ENCRYPTION_SECRET
 ```
 
 `KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
@@ -129,6 +132,18 @@ ROBINE_ID_CONFIG=/candidate/robine_id.json \
 ROBINE_ID_APPLICATIONS_DIR=/candidate/applications \
 cargo run --bin validate_config
 ```
+
+Request immediate activation after atomically replacing the watched files:
+
+```sh
+docker compose --env-file .env.release -f compose.release.yml \
+  kill --signal SIGHUP robine-id
+```
+
+`SIGHUP` uses the same serialized complete loader, validation, atomic snapshot swap, outcome metrics, and
+deduplicated safe diagnostics as polling. It remains available when
+`ROBINE_ID_RELOAD_INTERVAL=0`. A signal-listener failure is logged while periodic reload continues;
+inline and Vercel configurations remain immutable until a new deployment.
 
 ## Backup and restore
 

@@ -13,6 +13,9 @@ the shared durable store for protocol state and encrypted signing keys.
 
 - Production MUST provide PostgreSQL through `DATABASE_URL` or the documented `PG*` variables.
 - Production MUST provide `KEY_ENCRYPTION_SECRET` with at least 32 bytes of deployment-specific entropy.
+- The canonical operator generator MUST emit an environment-file-safe `KEY_ENCRYPTION_SECRET`
+  containing exactly 384 bits of operating-system entropy, zeroize its raw random buffer, and be
+  included in the production image.
 - A staged encryption-secret rotation MUST support a distinct, equally strong
   `KEY_ENCRYPTION_SECRET_PREVIOUS`, an atomic re-encryption command, and removal of the previous
   secret after verification.
@@ -52,6 +55,8 @@ the shared durable store for protocol state and encrypted signing keys.
 - The conventional server MUST handle SIGTERM and SIGINT by disabling readiness, waiting the configured drain delay, and then asking Actix to stop gracefully within a bounded timeout.
 - Failure to install one platform signal listener MUST emit an operational error and retain the
   other supported graceful-shutdown path rather than panic a running process.
+- Failure to install the Unix `SIGHUP` listener MUST retain periodic configuration reload. A valid
+  `SIGHUP` MUST trigger the same fail-closed atomic reload pipeline without affecting readiness.
 - The orchestrator stop grace period MUST exceed the drain delay plus the Actix shutdown timeout.
 
 ## Release procedure

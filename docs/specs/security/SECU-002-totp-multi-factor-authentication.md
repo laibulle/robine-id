@@ -17,20 +17,34 @@ placing the shared authenticator secret in versioned configuration or browser st
 - The referenced value MUST be unpadded RFC 4648 Base32 and decode to 160 through 512 bits. The
   effective configuration, diagnostics, HTML, metrics, and logs MUST never expose the reference or
   secret value.
+- The Rust operator command MUST generate an independent canonical unpadded Base32 secret containing
+  exactly 160 bits, display it only as command output, and zeroize both raw entropy and encoded value.
+- A TOTP-enabled user MAY declare up to 16 operator-generated `recovery_code_hashes`. Every entry
+  MUST be a canonical `sha256:` fingerprint, the complete field MUST be redacted from effective output, and
+  plaintext recovery codes MUST never enter configuration, logs, metrics, or browser state.
+- Recovery codes MUST use the canonical four-group unambiguous format with 80 bits of entropy.
+  Matching is case-insensitive, occurs only after password verification and rate limiting, and MUST
+  scan the bounded configured set in blocking-worker context rather than blocking an Actix worker.
 - Verification MUST implement RFC 6238 with HMAC-SHA-1, a 30-second time step, six decimal digits,
   and a window containing only the current, immediately previous, and immediately next step.
-- Password verification MUST complete before a TOTP challenge is created. A missing or malformed
-  operator secret MUST fail closed as a service-unavailable error, not silently downgrade to
-  password-only authentication.
+- Password verification MUST complete before an MFA challenge is created. A missing or malformed
+  operator secret MUST fail closed as a service-unavailable error unless that user has configured
+  recovery hashes; in that case only a valid unused recovery code may complete the challenge. The
+  runtime MUST never silently downgrade to password-only authentication.
 - Browser challenges MUST be opaque, issuer- and subject-bound, stored only by digest, expire no
   later than the originating browser or device authorization, contain no credential, and be
   consumed atomically after successful verification.
 - PostgreSQL MUST retain the greatest accepted time-step counter for each issuer and subject. A
   counter already accepted through any challenge, purpose, or application instance MUST be rejected
   and the attempted challenge consumed.
+- PostgreSQL MUST atomically bind each recovery-code hash fingerprint to its issuer and subject.
+  Concurrent or cross-instance reuse MUST fail, and a replay attempt MUST consume its outstanding
+  challenge just like a replayed TOTP time step.
 - TOTP attempts MUST share the independent network and issuer-bound account rate limits used by
   password authentication. User-visible failures MUST not reveal the shared secret or whether a replay,
   skew, or incorrect code caused rejection.
+- Successful MFA audit events MUST classify the bounded factor as `totp` or `recovery_code` without
+  recording the submitted value or its fingerprint.
 - Both Authorization Code and Device Authorization browser journeys MUST enforce TOTP for a
   configured user. A pre-existing password-only session MUST NOT bypass the second factor after a
   configuration revision enables TOTP for that user.
@@ -58,6 +72,8 @@ placing the shared authenticator secret in versioned configuration or browser st
   password alone, including through a session created before TOTP was enabled.
 - A current authenticator code completes authentication; malformed and out-of-window values return
   an accessible generic error without destroying a still-valid challenge.
+- An unused configured recovery code completes both Authorization Code and Device MFA, while its
+  second use fails even through another application instance.
 - Concurrent submissions of one challenge produce at most one success, and the same TOTP counter
   cannot complete a second challenge on the same or another instance.
 - The MFA context survives consent, code exchange, refresh rotation, token exchange, Device Flow
@@ -68,10 +84,13 @@ placing the shared authenticator secret in versioned configuration or browser st
 
 ## Operational Constraints
 
-Provisioning and recovery are operator-managed. Generate an independent random secret per user,
+Provisioning and recovery are operator-managed. Generate an independent random secret per user with
+the Rust `totp-secret` command,
 enroll it in that user's authenticator application over a trusted channel, store it in the
-deployment secret manager, and reference only the environment variable name. Self-service
-enrollment, QR-code display, recovery codes, factor reset, and WebAuthn are not part of this feature.
+deployment secret manager, and reference only the environment variable name. Generate recovery
+sets with the dedicated Rust operator command, deliver plaintext once, and retain only its emitted
+SHA-256 fingerprints. Self-service enrollment, QR-code display, factor reset, and WebAuthn are not part of
+this feature.
 
 Database restore includes TOTP replay counters and outstanding challenge state. Clock
 synchronization is required on the database and application hosts; operators should alert on clock

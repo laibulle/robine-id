@@ -97,6 +97,46 @@ async fn persists_and_atomically_consumes_security_state() {
             .expect("reload replayed TOTP challenge")
             .is_none()
     );
+    let recovery_fingerprint = [7_u8; 32];
+    let recovery_challenge = database
+        .issue_totp_challenge(&issuer, &subject, "authorization", &json!({}), 300)
+        .await
+        .expect("recovery challenge");
+    assert!(
+        database
+            .consume_recovery_challenge(
+                &recovery_challenge,
+                &issuer,
+                &subject,
+                "authorization",
+                &recovery_fingerprint,
+            )
+            .await
+            .expect("consume recovery code")
+    );
+    let replayed_recovery_challenge = database
+        .issue_totp_challenge(&issuer, &subject, "device", &json!({}), 300)
+        .await
+        .expect("replayed recovery challenge");
+    assert!(
+        !database
+            .consume_recovery_challenge(
+                &replayed_recovery_challenge,
+                &issuer,
+                &subject,
+                "device",
+                &recovery_fingerprint,
+            )
+            .await
+            .expect("reject replayed recovery code")
+    );
+    assert!(
+        database
+            .totp_challenge(&replayed_recovery_challenge, &issuer, "device")
+            .await
+            .expect("reload replayed recovery challenge")
+            .is_none()
+    );
     let assertion_expiry = Utc::now() + Duration::minutes(5);
     assert!(
         database

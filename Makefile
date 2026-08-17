@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -27,6 +27,10 @@ help:
 	@echo "  make config-preview [CONFIG=path]  Preview Rust configuration reconciliation"
 	@echo "  make config-apply [CONFIG=path]    Validate and atomically apply in the command runtime"
 	@echo "  make config-effective Print the redacted effective Rust configuration"
+	@echo "  make encryption-secret  Generate one production key-encryption secret"
+	@echo "  make user-password [BCRYPT_COST=12]  Generate one initial password and hash"
+	@echo "  make totp-secret  Generate one canonical 160-bit TOTP secret"
+	@echo "  make recovery-codes [COUNT=10]  Generate one MFA recovery-code set"
 	@echo "  make rust-preflight   Run Rust formatting, lint, tests, and configuration validation"
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
 	@echo "  make release-smoke    Test production OIDC, multi-instance state, and PostgreSQL restore"
@@ -81,6 +85,20 @@ config-apply:
 
 config-effective:
 	cargo run --bin config_effective
+
+encryption-secret:
+	cargo run --bin generate_encryption_secret
+
+BCRYPT_COST ?= 12
+user-password:
+	cargo run --bin generate_user_password -- "$(BCRYPT_COST)"
+
+totp-secret:
+	cargo run --bin generate_totp_secret
+
+COUNT ?= 10
+recovery-codes:
+	cargo run --bin generate_recovery_codes -- "$(COUNT)"
 
 rust-preflight: config-validate
 	cargo fmt --all -- --check

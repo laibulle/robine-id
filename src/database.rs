@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum DatabaseConfigurationError {
@@ -50,9 +51,9 @@ struct DatabaseEnvironment {
     pg_user: Option<String>,
     pg_password: Option<String>,
     postgres_password: Option<String>,
-    key_encryption_secret: Option<String>,
-    previous_key_encryption_secret: Option<String>,
-    secret_key_base: Option<String>,
+    key_encryption_secret: Option<Zeroizing<String>>,
+    previous_key_encryption_secret: Option<Zeroizing<String>>,
+    secret_key_base: Option<Zeroizing<String>>,
     maximum_connections: Option<String>,
     acquire_timeout_ms: Option<String>,
     statement_timeout_ms: Option<String>,
@@ -69,9 +70,11 @@ impl DatabaseEnvironment {
             pg_user: environment_value("PGUSER")?,
             pg_password: environment_value("PGPASSWORD")?,
             postgres_password: environment_value("POSTGRES_PASSWORD")?,
-            key_encryption_secret: environment_value("KEY_ENCRYPTION_SECRET")?,
-            previous_key_encryption_secret: environment_value("KEY_ENCRYPTION_SECRET_PREVIOUS")?,
-            secret_key_base: environment_value("SECRET_KEY_BASE")?,
+            key_encryption_secret: secret_environment_value("KEY_ENCRYPTION_SECRET")?,
+            previous_key_encryption_secret: secret_environment_value(
+                "KEY_ENCRYPTION_SECRET_PREVIOUS",
+            )?,
+            secret_key_base: secret_environment_value("SECRET_KEY_BASE")?,
             maximum_connections: environment_value("DATABASE_MAX_CONNECTIONS")?,
             acquire_timeout_ms: environment_value("DATABASE_ACQUIRE_TIMEOUT_MS")?,
             statement_timeout_ms: environment_value("DATABASE_STATEMENT_TIMEOUT_MS")?,
@@ -131,7 +134,11 @@ impl DatabaseEnvironment {
         {
             return Err(DatabaseConfigurationError::WeakPreviousEncryptionSecret);
         }
-        if self.previous_key_encryption_secret.as_deref() == Some(secret.as_str()) {
+        if self
+            .previous_key_encryption_secret
+            .as_deref()
+            .is_some_and(|previous| previous.as_str() == secret.as_str())
+        {
             return Err(DatabaseConfigurationError::MatchingEncryptionSecrets);
         }
         let default_connections = if self.vercel { 2 } else { 5 };
@@ -175,6 +182,12 @@ fn environment_value(name: &'static str) -> Result<Option<String>, DatabaseConfi
         Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(DatabaseConfigurationError::NonUnicode { name }),
     }
+}
+
+fn secret_environment_value(
+    name: &'static str,
+) -> Result<Option<Zeroizing<String>>, DatabaseConfigurationError> {
+    environment_value(name).map(|value| value.map(Zeroizing::new))
 }
 
 fn bounded_integer(
@@ -457,8 +470,8 @@ impl Database {
 
     fn configured(
         url: String,
-        secret: String,
-        previous_secret: Option<String>,
+        secret: Zeroizing<String>,
+        previous_secret: Option<Zeroizing<String>>,
         maximum_connections: u32,
         acquire_timeout_ms: u64,
         statement_timeout_ms: u64,
@@ -2125,6 +2138,13 @@ impl Database {
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        self.key_encryption_key.zeroize();
+        self.previous_key_encryption_key.zeroize();
+    }
+}
+
 fn valid_rotation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -2270,7 +2290,7 @@ mod tests {
 
         assert!(matches!(
             DatabaseEnvironment {
-                key_encryption_secret: Some("x".repeat(32)),
+                key_encryption_secret: Some("x".repeat(32).into()),
                 ..Default::default()
             }
             .build(),
@@ -2287,7 +2307,7 @@ mod tests {
         assert!(matches!(
             DatabaseEnvironment {
                 database_url: Some("postgres://database/robine_id".to_owned()),
-                key_encryption_secret: Some("weak".to_owned()),
+                key_encryption_secret: Some("weak".to_owned().into()),
                 ..Default::default()
             }
             .build(),
@@ -2296,8 +2316,8 @@ mod tests {
         assert!(matches!(
             DatabaseEnvironment {
                 database_url: Some("postgres://database/robine_id".to_owned()),
-                key_encryption_secret: Some("x".repeat(32)),
-                previous_key_encryption_secret: Some("weak".to_owned()),
+                key_encryption_secret: Some("x".repeat(32).into()),
+                previous_key_encryption_secret: Some("weak".to_owned().into()),
                 ..Default::default()
             }
             .build(),
@@ -2306,8 +2326,8 @@ mod tests {
         assert!(matches!(
             DatabaseEnvironment {
                 database_url: Some("postgres://database/robine_id".to_owned()),
-                key_encryption_secret: Some("x".repeat(32)),
-                previous_key_encryption_secret: Some("x".repeat(32)),
+                key_encryption_secret: Some("x".repeat(32).into()),
+                previous_key_encryption_secret: Some("x".repeat(32).into()),
                 ..Default::default()
             }
             .build(),
@@ -2316,7 +2336,7 @@ mod tests {
         assert!(matches!(
             DatabaseEnvironment {
                 database_url: Some("postgres://database/robine_id".to_owned()),
-                key_encryption_secret: Some("x".repeat(32)),
+                key_encryption_secret: Some("x".repeat(32).into()),
                 maximum_connections: Some("0".to_owned()),
                 ..Default::default()
             }
@@ -2342,8 +2362,8 @@ mod tests {
         assert!(
             DatabaseEnvironment {
                 database_url: Some("postgres://user:password@database/robine_id".to_owned()),
-                key_encryption_secret: Some("x".repeat(32)),
-                previous_key_encryption_secret: Some("y".repeat(32)),
+                key_encryption_secret: Some("x".repeat(32).into()),
+                previous_key_encryption_secret: Some("y".repeat(32).into()),
                 maximum_connections: Some("10".to_owned()),
                 acquire_timeout_ms: Some("2500".to_owned()),
                 statement_timeout_ms: Some("3000".to_owned()),
@@ -2357,7 +2377,7 @@ mod tests {
             DatabaseEnvironment {
                 pg_host: Some("database".to_owned()),
                 pg_password: Some("password".to_owned()),
-                key_encryption_secret: Some("x".repeat(32)),
+                key_encryption_secret: Some("x".repeat(32).into()),
                 vercel: true,
                 ..Default::default()
             }
@@ -2399,7 +2419,7 @@ mod tests {
         let new_secret = "new-key-encryption-secret-at-least-32-bytes".to_owned();
         let old = super::Database::configured(
             "postgres://database/robine_id".to_owned(),
-            old_secret.clone(),
+            old_secret.clone().into(),
             None,
             1,
             1_000,
@@ -2408,8 +2428,8 @@ mod tests {
         .expect("old encryption configuration");
         let staged = super::Database::configured(
             "postgres://database/robine_id".to_owned(),
-            new_secret.clone(),
-            Some(old_secret),
+            new_secret.clone().into(),
+            Some(old_secret.into()),
             1,
             1_000,
             1_000,
@@ -2417,7 +2437,7 @@ mod tests {
         .expect("staged encryption configuration");
         let current_only = super::Database::configured(
             "postgres://database/robine_id".to_owned(),
-            new_secret,
+            new_secret.into(),
             None,
             1,
             1_000,

@@ -4,10 +4,12 @@ use serde_json::Value;
 use sha1::Sha1;
 use std::env;
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const PERIOD_SECONDS: i64 = 30;
 const DIGITS: u32 = 6;
+const SECRET_BYTES: usize = 20;
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum TotpSecretError {
@@ -32,6 +34,14 @@ pub fn secret_from_reference(reference: &Value) -> Result<Zeroizing<Vec<u8>>, To
     decode_base32(&encoded)
         .map(Zeroizing::new)
         .ok_or(TotpSecretError::InvalidEncoding)
+}
+
+pub fn generate_secret() -> Result<Zeroizing<String>, getrandom::Error> {
+    let mut secret = [0_u8; SECRET_BYTES];
+    getrandom::fill(&mut secret)?;
+    let encoded = encode_base32(secret.as_slice());
+    secret.zeroize();
+    Ok(Zeroizing::new(encoded))
 }
 
 pub fn verify(secret: &[u8], submitted: &str, unix_time: i64) -> Option<i64> {
@@ -111,6 +121,29 @@ fn decode_base32(value: &str) -> Option<Vec<u8>> {
     (20..=64).contains(&output.len()).then_some(output)
 }
 
+fn encode_base32(value: &[u8]) -> String {
+    let mut output = String::with_capacity(value.len().saturating_mul(8).div_ceil(5));
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    for byte in value {
+        buffer = (buffer << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(char::from(
+                BASE32_ALPHABET[((buffer >> bits) & 31) as usize],
+            ));
+            buffer &= (1_u32 << bits).saturating_sub(1);
+        }
+    }
+    if bits > 0 {
+        output.push(char::from(
+            BASE32_ALPHABET[((buffer << (5 - bits)) & 31) as usize],
+        ));
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +188,20 @@ mod tests {
         assert_eq!(
             generate(secret, 1_234_567_890).as_deref(),
             Some(code.as_str())
+        );
+    }
+
+    #[test]
+    fn generates_independent_canonical_160_bit_secrets() {
+        let first = generate_secret().expect("TOTP secret");
+        let second = generate_secret().expect("TOTP secret");
+        assert_eq!(first.len(), 32);
+        assert_ne!(first.as_str(), second.as_str());
+        assert!(first.bytes().all(|byte| BASE32_ALPHABET.contains(&byte)));
+        assert_eq!(decode_base32(&first).map(|value| value.len()), Some(20));
+        assert_eq!(
+            encode_base32(b"12345678901234567890"),
+            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
         );
     }
 }

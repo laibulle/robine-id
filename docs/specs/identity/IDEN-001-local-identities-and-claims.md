@@ -30,6 +30,9 @@ Selected users may additionally reference an operator-provisioned TOTP factor as
   so account presence does not change the dominant password-verification work factor.
 - Optional standard sources are `name` and `email`; arbitrary additional sources MAY be stored in the user's `claims` map.
 - Clear-text passwords MUST NOT be accepted in configuration.
+- The Rust operator tool MUST generate a URL-safe 144-bit initial password, display it only as
+  command output, and emit a bcrypt `password_hash` at an explicitly bounded cost from 10 through
+  16. The plaintext MUST NOT be accepted as a command argument.
 - Clear-text TOTP secrets MUST NOT be accepted in configuration; only strict environment secret
   references MAY be attached to a user.
 - Authentication MUST trim the submitted identifier and perform a bcrypt verification.
@@ -57,6 +60,8 @@ Selected users may additionally reference an operator-provisioned TOTP factor as
   activation; the same identifier on two disjoint explicit tenant sets resolves independently.
 - Mixed bcrypt costs prevent activation, and an unknown identifier performs bcrypt work at the
   active revision's configured cost.
+- The operator generator emits a 24-character URL-safe password whose emitted bcrypt hash verifies
+  it at the requested cost; invalid costs fail before entropy generation or output.
 - Mapped `name`, `email`, and custom claims appear only when their configured scope is present.
 - Attempting to map a reserved protocol claim is rejected during configuration validation.
 - No effective-configuration or audit output contains password hashes.

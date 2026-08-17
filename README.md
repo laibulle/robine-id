@@ -213,7 +213,8 @@ seconds and accepts 60 through 3600.
 Conventional servers reload file-backed configuration atomically every second by default. Invalid
 or partially written candidates are rejected while the last valid revision remains active;
 `ROBINE_ID_RELOAD_INTERVAL=0` disables watching; non-zero intervals must be 100 through 60000
-milliseconds. Inline/Vercel configuration is immutable. Pending consent is revalidated when it is
+milliseconds. On Unix, `SIGHUP` requests the same validated reload immediately, even when watching
+is disabled. Inline/Vercel configuration is immutable. Pending consent is revalidated when it is
 consumed: disabling a user/client or removing its grant, redirect, scope, resource, PKCE/nonce, MFA,
 essential claim, or rich-authorization policy consumes the stale transaction without issuing a code
 or redirecting to a formerly registered URI. Mapped claims are rebuilt from active user attributes
@@ -294,6 +295,15 @@ The checked-in development configuration contains one public client and one deve
 - password: `change-me`
 
 These credentials are development-only and must be replaced in production.
+Generate a fresh 144-bit initial password and its configuration-safe bcrypt hash without putting
+the plaintext in a command argument or shell history:
+
+```sh
+make user-password BCRYPT_COST=12
+```
+
+Deliver the displayed password once through a trusted channel and retain only the emitted
+`password_hash`. Use the same cost for every user in one revision.
 All configured user password hashes in one revision must use the same bcrypt cost (10 through 16),
 which also determines the dummy verification work performed for unknown identifiers.
 Set `"enabled": false` on a local identity to suspend login and server-validated sessions or grants
@@ -332,12 +342,20 @@ bits; it is resolved only while verifying a code and is redacted from effective 
 }
 ```
 
-Generate and enroll an independent secret per user through a trusted operator workflow, for example
-`openssl rand 20 | base32 | tr -d '='`, then inject it into the server, container, or Vercel secret
+Generate an independent canonical 160-bit secret per user with `make totp-secret`, enroll it through
+a trusted operator workflow, then inject it into the server, container, or Vercel secret
 environment. TOTP uses six digits and 30-second steps. PostgreSQL prevents reuse of an accepted
 step across instances. ID tokens, user JWT access tokens, and active introspection responses report
 `amr=["pwd","otp"]` with `acr=urn:robine-id:acr:password+totp`; refresh and token exchange preserve
-that context. Self-service enrollment and recovery codes are not yet provided.
+that context.
+
+Generate an optional one-time recovery set with `make recovery-codes` (or set `COUNT`, from 1 through
+16). Give the displayed codes to the user once through a trusted channel and add only the emitted
+`recovery_code_hashes` array to that user. Each code carries 80 bits of entropy, is accepted
+case-insensitively after password verification, and is consumed atomically in PostgreSQL across all
+instances. The 80-bit codes are stored only as strict SHA-256 fingerprints, and effective
+configuration redacts the whole field. Replacing the complete hash array issues
+a new operator-managed set; self-service enrollment and factor reset are not provided.
 
 An Authorization Code or Device application can require MFA for every account by setting
 `"required_acr": "urn:robine-id:acr:password+totp"`, and can bound authentication freshness with
@@ -428,7 +446,7 @@ identifiers. See [`config/templates/pairwise-application.json`](config/templates
 
 HTTP issuer and redirect URLs are accepted only for loopback development hosts. Other URLs must use HTTPS. Unknown fields and incompatible values fail validation before activation.
 
-Every application document declares `schema_version: 1` and `kind: "oidc_application"`. The application watches the complete composed configuration and reloads it every second by default; `ROBINE_ID_RELOAD_INTERVAL` overrides that interval in milliseconds (`0` or 100 through 60000). A valid change activates atomically; an unchanged revision is ignored; an invalid or partially written file is recorded as a failed attempt while the last valid revision remains active.
+Every application document declares `schema_version: 1` and `kind: "oidc_application"`. The application watches the complete composed configuration and reloads it every second by default; `ROBINE_ID_RELOAD_INTERVAL` overrides that interval in milliseconds (`0` or 100 through 60000). On Unix, `SIGHUP` triggers the same complete reload immediately, including when polling is disabled. A valid change activates atomically; an unchanged revision is ignored; an invalid or partially written file is recorded as a failed attempt while the last valid revision remains active.
 
 ### Configuration commands
 
@@ -749,6 +767,9 @@ of rotation and across restarts.
 Production requires PostgreSQL connectivity and `KEY_ENCRYPTION_SECRET` with at least 32 bytes of
 deployment-specific entropy. `DATABASE_URL` is accepted for managed databases; the release Compose
 stack uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `POSTGRES_PASSWORD`.
+Generate the wrapping secret with `make encryption-secret`; it emits one environment-file-safe
+`KEY_ENCRYPTION_SECRET` containing 384 bits of operating-system entropy. Store that value with the
+matching database backups and do not commit it.
 
 ### Container release
 

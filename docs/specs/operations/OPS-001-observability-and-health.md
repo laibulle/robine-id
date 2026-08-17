@@ -36,6 +36,8 @@ Robine ID exposes operational signals that make failures diagnosable without com
 - Token endpoint audit events MUST classify ordinary grants as `token_issuance` and reserve
   `token_exchange` for RFC 8693; accepted DPoP diagnostics MUST expose endpoint/outcome without
   proof thumbprints, identifiers, or nonces.
+- Successful MFA events MUST expose only the bounded `totp` or `recovery_code` factor alongside
+  allowlisted issuer, client, and subject identifiers; submitted codes and fingerprints are forbidden.
 - Logs MUST avoid submitted identifiers unless explicitly classified and protected as personal data.
 - Telemetry metric labels MUST never contain subject identifiers, raw IP addresses, arbitrary URLs, tokens, codes, or exception messages.
 - Readiness failures MUST remain non-sensitive publicly while the server log retains an actionable internal cause.
