@@ -20,6 +20,8 @@ use std::{env, fmt::Write as _};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
 const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -499,6 +501,20 @@ pub struct ReencryptedSigningKeys {
     pub retained: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DatabaseMigrationStatus {
+    pub applied: usize,
+    pub expected: usize,
+    pub failed: usize,
+    pub current: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SigningKeyInventory {
+    pub active: usize,
+    pub retained: usize,
+}
+
 impl Database {
     pub fn from_env() -> Result<Option<Self>, DatabaseConfigurationError> {
         DatabaseEnvironment::read()?.build()
@@ -540,7 +556,7 @@ impl Database {
 
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         // Embed the complete migration set in both conventional and serverless binaries.
-        sqlx::migrate!().run(&self.pool).await?;
+        MIGRATOR.run(&self.pool).await?;
         self.cleanup_expired_state().await
     }
 
@@ -569,6 +585,40 @@ impl Database {
             .fetch_one(&self.pool)
             .await
             .is_ok()
+    }
+
+    pub async fn migration_status(&self) -> Result<DatabaseMigrationStatus, sqlx::Error> {
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>, bool)>(
+            "SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(migration_status_from_rows(&rows))
+    }
+
+    pub async fn signing_key_inventory(&self) -> Result<SigningKeyInventory, sqlx::Error> {
+        let active = sqlx::query_as::<_, EncryptedSigningKey>(
+            "SELECT issuer, kid, private_key_ciphertext, private_key_nonce
+             FROM signing_keys ORDER BY issuer",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let retained = sqlx::query_as::<_, EncryptedSigningKey>(
+            "SELECT issuer, kid, private_key_ciphertext, private_key_nonce
+             FROM retained_signing_keys ORDER BY issuer, kid",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for key in active.iter().chain(&retained) {
+            let _private_key = self.decrypt_private_key_material(
+                &key.private_key_ciphertext,
+                &key.private_key_nonce,
+            )?;
+        }
+        Ok(SigningKeyInventory {
+            active: active.len(),
+            retained: retained.len(),
+        })
     }
 
     pub async fn register_client_assertion(
@@ -2194,6 +2244,24 @@ impl Drop for Database {
     }
 }
 
+fn migration_status_from_rows(rows: &[(i64, Vec<u8>, bool)]) -> DatabaseMigrationStatus {
+    let expected = MIGRATOR.iter().count();
+    let current = rows.len() == expected
+        && rows.iter().zip(MIGRATOR.iter()).all(
+            |((version, checksum, success), migration)| {
+                *success
+                    && *version == migration.version
+                    && checksum.as_slice() == migration.checksum.as_ref()
+            },
+        );
+    DatabaseMigrationStatus {
+        applied: rows.iter().filter(|(_, _, success)| *success).count(),
+        expected,
+        failed: rows.iter().filter(|(_, _, success)| !*success).count(),
+        current,
+    }
+}
+
 fn valid_rotation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -2315,8 +2383,8 @@ async fn generate_signing_key_async() -> Result<SigningKey, sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatabaseConfigurationError, DatabaseEnvironment, database_url_from_components,
-        format_user_code, random_user_code, valid_rotation_id,
+        DatabaseConfigurationError, DatabaseEnvironment, MIGRATOR, database_url_from_components,
+        format_user_code, migration_status_from_rows, random_user_code, valid_rotation_id,
     };
 
     #[test]
@@ -2345,6 +2413,32 @@ mod tests {
             database_url_from_components("postgres", "invalid", "db", "user", "password").is_none()
         );
         assert!(database_url_from_components("postgres", "5432", "db", "user", "").is_none());
+    }
+
+    #[test]
+    fn migration_diagnostics_require_exact_successful_embedded_checksums() {
+        let rows = MIGRATOR
+            .iter()
+            .map(|migration| (migration.version, migration.checksum.to_vec(), true))
+            .collect::<Vec<_>>();
+        let current = migration_status_from_rows(&rows);
+        assert!(current.current);
+        assert_eq!(current.applied, current.expected);
+        assert_eq!(current.failed, 0);
+
+        let mut missing = rows.clone();
+        missing.pop();
+        assert!(!migration_status_from_rows(&missing).current);
+
+        let mut changed = rows.clone();
+        changed[0].1[0] ^= 0xff;
+        assert!(!migration_status_from_rows(&changed).current);
+
+        let mut failed = rows;
+        failed[0].2 = false;
+        let failed = migration_status_from_rows(&failed);
+        assert!(!failed.current);
+        assert_eq!(failed.failed, 1);
     }
 
     #[test]
