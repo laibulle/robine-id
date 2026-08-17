@@ -19,9 +19,16 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
   MAY emit only bounded fields such as endpoint and outcome.
 - Environment-resolved client and TOTP secrets MUST use zeroizing memory wrappers so transient
   buffers are overwritten when released.
+- Submitted passwords, MFA/recovery and CSRF codes, authorization and device codes,
+  refresh/access tokens, PKCE verifiers, client secrets/assertions, token-exchange subject/actor
+  tokens, logout hints, and decoded HTTP Basic secrets MUST remain in zeroizing wrappers for their
+  complete owned lifetime.
 - Current and staged signing-key encryption secrets MUST use zeroizing wrappers while they are
   validated and derived. Every in-memory derived wrapping-key copy MUST be cleared when its
   database handle is dropped.
+- `DATABASE_URL`, `PGPASSWORD`, `POSTGRES_PASSWORD`, and any component-built connection URL MUST
+  use zeroizing wrappers during configuration parsing. Percent-encoding a component password MUST
+  NOT place it in an ordinary owned string or a general-purpose URL object.
 - Failed-login responses MUST not disclose account existence by default.
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.

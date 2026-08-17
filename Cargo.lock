@@ -2072,6 +2072,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "p256",
+ "percent-encoding",
  "rand_core 0.6.4",
  "rsa",
  "rustls",

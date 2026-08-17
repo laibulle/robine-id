@@ -29,6 +29,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - Authorization codes and approved Device grants MUST satisfy active user/client MFA policy at
   first exchange. Refresh and Token Exchange MUST preserve, rather than upgrade, an established
   authentication context so downstream step-up decisions remain trustworthy.
+- Owned browser and OAuth credential copies created by form or Basic authentication decoding MUST
+  be zeroized after request processing; borrowed values in the HTTP request buffer MUST never be
+  copied into an ordinary owned string.
 - Signing keys MUST have unique `kid` values and public keys MUST be exposed through the configured JWKS endpoint.
 - Exactly one key MUST be active for signing per issuer and algorithm.
 - Previously active public keys MUST remain published after rotation so tokens issued by retained keys remain verifiable.

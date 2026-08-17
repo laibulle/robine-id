@@ -6,6 +6,7 @@ use aes_gcm::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rsa::{
     RsaPrivateKey,
     pkcs8::{EncodePrivateKey, LineEnding},
@@ -14,9 +15,30 @@ use rsa::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::env;
+use std::{env, fmt::Write as _};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
+
+const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'|');
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum DatabaseConfigurationError {
@@ -44,13 +66,13 @@ pub enum DatabaseConfigurationError {
 
 #[derive(Default)]
 struct DatabaseEnvironment {
-    database_url: Option<String>,
+    database_url: Option<Zeroizing<String>>,
     pg_host: Option<String>,
     pg_port: Option<String>,
     pg_database: Option<String>,
     pg_user: Option<String>,
-    pg_password: Option<String>,
-    postgres_password: Option<String>,
+    pg_password: Option<Zeroizing<String>>,
+    postgres_password: Option<Zeroizing<String>>,
     key_encryption_secret: Option<Zeroizing<String>>,
     previous_key_encryption_secret: Option<Zeroizing<String>>,
     secret_key_base: Option<Zeroizing<String>>,
@@ -63,13 +85,13 @@ struct DatabaseEnvironment {
 impl DatabaseEnvironment {
     fn read() -> Result<Self, DatabaseConfigurationError> {
         Ok(Self {
-            database_url: environment_value("DATABASE_URL")?,
+            database_url: secret_environment_value("DATABASE_URL")?,
             pg_host: environment_value("PGHOST")?,
             pg_port: environment_value("PGPORT")?,
             pg_database: environment_value("PGDATABASE")?,
             pg_user: environment_value("PGUSER")?,
-            pg_password: environment_value("PGPASSWORD")?,
-            postgres_password: environment_value("POSTGRES_PASSWORD")?,
+            pg_password: secret_environment_value("PGPASSWORD")?,
+            postgres_password: secret_environment_value("POSTGRES_PASSWORD")?,
             key_encryption_secret: secret_environment_value("KEY_ENCRYPTION_SECRET")?,
             previous_key_encryption_secret: secret_environment_value(
                 "KEY_ENCRYPTION_SECRET_PREVIOUS",
@@ -469,7 +491,7 @@ impl Database {
     }
 
     fn configured(
-        url: String,
+        url: Zeroizing<String>,
         secret: Zeroizing<String>,
         previous_secret: Option<Zeroizing<String>>,
         maximum_connections: u32,
@@ -493,7 +515,7 @@ impl Database {
                     Ok(())
                 })
             })
-            .connect_lazy(&url)
+            .connect_lazy(url.as_str())
             .map_err(|_| DatabaseConfigurationError::InvalidUrl)?;
         Ok(Self {
             pool,
@@ -2159,7 +2181,7 @@ fn database_url_from_components(
     database: &str,
     user: &str,
     password: &str,
-) -> Option<String> {
+) -> Option<Zeroizing<String>> {
     if [host, database, user, password]
         .iter()
         .any(|value| value.is_empty())
@@ -2167,13 +2189,24 @@ fn database_url_from_components(
         return None;
     }
     let port = port.parse::<u16>().ok()?;
-    let mut url = url::Url::parse("postgres://localhost/postgres").ok()?;
-    url.set_host(Some(host)).ok()?;
-    url.set_port(Some(port)).ok()?;
-    url.set_username(user).ok()?;
-    url.set_password(Some(password)).ok()?;
-    url.set_path(&format!("/{database}"));
-    Some(url.into())
+    let mut endpoint = url::Url::parse("postgres://localhost/postgres").ok()?;
+    endpoint.set_host(Some(host)).ok()?;
+    endpoint.set_port(Some(port)).ok()?;
+    endpoint.set_path(&format!("/{database}"));
+    let authority_and_path = endpoint.as_str().strip_prefix("postgres://")?;
+    let encoded_user = utf8_percent_encode(user, USERINFO_ENCODE_SET).to_string();
+    let encoded_password =
+        Zeroizing::new(utf8_percent_encode(password, USERINFO_ENCODE_SET).to_string());
+    let mut value = Zeroizing::new(String::with_capacity(
+        11 + encoded_user.len() + encoded_password.len() + authority_and_path.len(),
+    ));
+    write!(
+        value,
+        "postgres://{encoded_user}:{}@{authority_and_path}",
+        encoded_password.as_str()
+    )
+    .ok()?;
+    Some(value)
 }
 
 fn cryptographic_failure(message: &'static str) -> sqlx::Error {
@@ -2266,9 +2299,12 @@ mod tests {
         .expect("database URL");
 
         assert_eq!(
-            url,
+            url.as_str(),
             "postgres://robine%20user:p%40ss%3A%2Fword@postgres.internal:5433/robine_id"
         );
+        let parsed = url::Url::parse(url.as_str()).expect("generated PostgreSQL URL");
+        assert_eq!(parsed.username(), "robine%20user");
+        assert_eq!(parsed.password(), Some("p%40ss%3A%2Fword"));
     }
 
     #[test]
@@ -2298,7 +2334,7 @@ mod tests {
         ));
         assert!(matches!(
             DatabaseEnvironment {
-                database_url: Some("postgres://database/robine_id".to_owned()),
+                database_url: Some("postgres://database/robine_id".to_owned().into()),
                 ..Default::default()
             }
             .build(),
@@ -2306,7 +2342,7 @@ mod tests {
         ));
         assert!(matches!(
             DatabaseEnvironment {
-                database_url: Some("postgres://database/robine_id".to_owned()),
+                database_url: Some("postgres://database/robine_id".to_owned().into()),
                 key_encryption_secret: Some("weak".to_owned().into()),
                 ..Default::default()
             }
@@ -2315,7 +2351,7 @@ mod tests {
         ));
         assert!(matches!(
             DatabaseEnvironment {
-                database_url: Some("postgres://database/robine_id".to_owned()),
+                database_url: Some("postgres://database/robine_id".to_owned().into()),
                 key_encryption_secret: Some("x".repeat(32).into()),
                 previous_key_encryption_secret: Some("weak".to_owned().into()),
                 ..Default::default()
@@ -2325,7 +2361,7 @@ mod tests {
         ));
         assert!(matches!(
             DatabaseEnvironment {
-                database_url: Some("postgres://database/robine_id".to_owned()),
+                database_url: Some("postgres://database/robine_id".to_owned().into()),
                 key_encryption_secret: Some("x".repeat(32).into()),
                 previous_key_encryption_secret: Some("x".repeat(32).into()),
                 ..Default::default()
@@ -2335,7 +2371,7 @@ mod tests {
         ));
         assert!(matches!(
             DatabaseEnvironment {
-                database_url: Some("postgres://database/robine_id".to_owned()),
+                database_url: Some("postgres://database/robine_id".to_owned().into()),
                 key_encryption_secret: Some("x".repeat(32).into()),
                 maximum_connections: Some("0".to_owned()),
                 ..Default::default()
@@ -2361,7 +2397,11 @@ mod tests {
     async fn accepts_strict_url_and_component_database_environments() {
         assert!(
             DatabaseEnvironment {
-                database_url: Some("postgres://user:password@database/robine_id".to_owned()),
+                database_url: Some(
+                    "postgres://user:password@database/robine_id"
+                        .to_owned()
+                        .into(),
+                ),
                 key_encryption_secret: Some("x".repeat(32).into()),
                 previous_key_encryption_secret: Some("y".repeat(32).into()),
                 maximum_connections: Some("10".to_owned()),
@@ -2376,7 +2416,7 @@ mod tests {
         assert!(
             DatabaseEnvironment {
                 pg_host: Some("database".to_owned()),
-                pg_password: Some("password".to_owned()),
+                pg_password: Some("password".to_owned().into()),
                 key_encryption_secret: Some("x".repeat(32).into()),
                 vercel: true,
                 ..Default::default()
@@ -2418,7 +2458,7 @@ mod tests {
         let old_secret = "old-key-encryption-secret-at-least-32-bytes".to_owned();
         let new_secret = "new-key-encryption-secret-at-least-32-bytes".to_owned();
         let old = super::Database::configured(
-            "postgres://database/robine_id".to_owned(),
+            "postgres://database/robine_id".to_owned().into(),
             old_secret.clone().into(),
             None,
             1,
@@ -2427,7 +2467,7 @@ mod tests {
         )
         .expect("old encryption configuration");
         let staged = super::Database::configured(
-            "postgres://database/robine_id".to_owned(),
+            "postgres://database/robine_id".to_owned().into(),
             new_secret.clone().into(),
             Some(old_secret.into()),
             1,
@@ -2436,7 +2476,7 @@ mod tests {
         )
         .expect("staged encryption configuration");
         let current_only = super::Database::configured(
-            "postgres://database/robine_id".to_owned(),
+            "postgres://database/robine_id".to_owned().into(),
             new_secret.into(),
             None,
             1,

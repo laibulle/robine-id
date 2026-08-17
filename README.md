@@ -163,6 +163,8 @@ RFC 8628 device authorization; RS256 ID tokens; retained-key JWKS; per-issuer op
 introspection/revocation. Browser transactions, sessions, access/refresh tokens, rate limits, and
 encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
+Owned copies of submitted passwords, MFA/recovery and CSRF codes, OAuth tokens, PKCE verifiers, client
+secrets/assertions, and logout hints use zeroizing memory wrappers throughout request processing.
 The landing-page runtime badge uses the same drainage and PostgreSQL health decision as
 `/health/ready`, so it never presents an unavailable instance as ready.
 The landing page and built-in documentation expose bodyless `HEAD` alongside `GET`, preserving the
@@ -767,6 +769,8 @@ of rotation and across restarts.
 Production requires PostgreSQL connectivity and `KEY_ENCRYPTION_SECRET` with at least 32 bytes of
 deployment-specific entropy. `DATABASE_URL` is accepted for managed databases; the release Compose
 stack uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `POSTGRES_PASSWORD`.
+The runtime keeps direct and component-built connection URLs and database passwords in zeroizing
+transient storage while SQLx constructs its connection pool.
 Generate the wrapping secret with `make encryption-secret`; it emits one environment-file-safe
 `KEY_ENCRYPTION_SECRET` containing 384 bits of operating-system entropy. Store that value with the
 matching database backups and do not commit it.

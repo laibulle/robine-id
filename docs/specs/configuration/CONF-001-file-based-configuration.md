@@ -16,6 +16,8 @@ and secrets.
 - PostgreSQL connectivity and signing-key encryption MUST be supplied through deployment environment variables rather than committed configuration documents.
 - The supported file format and schema version MUST be explicit in every root configuration document.
 - Configuration MAY reference environment variables using typed references; resolved secret values MUST not be written back to files or logs.
+- Database connection URLs and passwords read from the environment MUST use zeroizing transient
+  storage during validation and pool construction.
 - Defaults MUST be deterministic. Checked-in users, HTTP loopback URLs, and development secrets MUST be labeled development-only and replaced for production.
 - Unknown fields, invalid types, missing required values, duplicate identifiers, and incompatible options MUST fail validation.
 - Inline application serialization, semantic fingerprint serialization, and effective redaction

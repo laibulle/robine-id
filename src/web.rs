@@ -871,7 +871,7 @@ struct AuthorizationPostForm {
     authorization_details: Option<String>,
     dpop_jkt: Option<String>,
     transaction: Option<String>,
-    csrf_token: Option<String>,
+    csrf_token: Option<SensitiveString>,
     identifier: Option<String>,
     password: Option<SensitiveString>,
     mfa_transaction: Option<String>,
@@ -928,7 +928,7 @@ struct DeviceVerificationQuery {
 #[derive(Deserialize)]
 struct DeviceInteractionForm {
     action: String,
-    csrf_token: String,
+    csrf_token: SensitiveString,
     #[serde(default)]
     user_code: Option<String>,
     #[serde(default)]
@@ -1060,7 +1060,7 @@ struct TokenStatusForm {
 #[derive(Deserialize)]
 struct ConsentForm {
     transaction: String,
-    csrf_token: String,
+    csrf_token: SensitiveString,
     decision: String,
 }
 
@@ -1077,7 +1077,7 @@ struct LogoutRequest {
 #[derive(Deserialize)]
 struct LogoutPostForm {
     transaction: Option<String>,
-    csrf_token: Option<String>,
+    csrf_token: Option<SensitiveString>,
     #[serde(flatten)]
     request: LogoutRequest,
 }
@@ -3123,7 +3123,7 @@ async fn complete_authentication(
     issuer_id: String,
     request: HttpRequest,
     authorization: AuthorizationRequest,
-    csrf_token: String,
+    csrf_token: SensitiveString,
     submitted_identifier: String,
     password: SensitiveString,
     application: web::Data<Application>,
@@ -3514,7 +3514,7 @@ async fn complete_totp_authentication(
     issuer_id: String,
     request: HttpRequest,
     transaction: String,
-    csrf_token: String,
+    csrf_token: SensitiveString,
     submitted_code: SensitiveString,
     application: web::Data<Application>,
 ) -> HttpResponse {
@@ -4605,7 +4605,7 @@ async fn complete_logout(
     issuer_id: String,
     request: &HttpRequest,
     transaction: String,
-    csrf_token: String,
+    csrf_token: SensitiveString,
     application: &Application,
 ) -> HttpResponse {
     let snapshot = application.snapshot();
@@ -14347,6 +14347,29 @@ mod tests {
             .append_header(("authorization", "Basic Y2xpZW50OnNlY3JldA=="))
             .to_http_request();
         assert!(basic_credentials(&multiple).is_err());
+    }
+
+    #[actix_web::test]
+    async fn deserializes_submitted_credentials_into_zeroizing_values() {
+        let login: AuthorizationPostForm = serde_urlencoded::from_str(
+            "csrf_token=csrf-secret&password=sensitive-password&totp_code=ABCD-EFGH-IJKL-MNOP",
+        )
+        .expect("sensitive login form");
+        assert_eq!(login.csrf_token.as_deref(), Some("csrf-secret"));
+        assert_eq!(login.password.as_deref(), Some("sensitive-password"));
+        assert_eq!(login.totp_code.as_deref(), Some("ABCD-EFGH-IJKL-MNOP"));
+
+        let token: TokenForm = serde_urlencoded::from_str(
+            "grant_type=authorization_code&code=opaque-code&refresh_token=opaque-refresh&client_secret=client-secret&client_assertion=signed-assertion&code_verifier=pkce-verifier&subject_token=subject-token&actor_token=actor-token",
+        )
+        .expect("sensitive token form");
+        assert_eq!(token.code.as_deref(), Some("opaque-code"));
+        assert_eq!(token.refresh_token.as_deref(), Some("opaque-refresh"));
+        assert_eq!(token.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(token.client_assertion.as_deref(), Some("signed-assertion"));
+        assert_eq!(token.code_verifier.as_deref(), Some("pkce-verifier"));
+        assert_eq!(token.subject_token.as_deref(), Some("subject-token"));
+        assert_eq!(token.actor_token.as_deref(), Some("actor-token"));
     }
 
     #[actix_web::test]

@@ -21,6 +21,8 @@ the shared durable store for protocol state and encrypted signing keys.
   secret after verification.
 - Partial database credentials, invalid connection URLs, non-Unicode environment values, and
   out-of-range pool/timeout settings MUST fail initialization without echoing secret values.
+- Transient database URL and password environment values MUST be zeroized immediately after SQLx
+  has constructed its connection options, including URLs assembled from individual `PG*` values.
 - `HOST` MUST be non-empty, `PORT` MUST be 1 through 65535, proxy trust MUST use an explicit
   boolean spelling, and reload, cleanup, drain, and shutdown intervals MUST remain inside their
   documented bounds. Invalid values MUST fail before the server binds and MUST NOT be echoed.
