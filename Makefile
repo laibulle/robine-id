@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective doctor deployment-secrets deployment-secret-files encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective doctor deployment-secrets deployment-secret-files encryption-secret metrics-token user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -31,6 +31,7 @@ help:
 	@echo "  make deployment-secrets  Generate independent release database/encryption secrets"
 	@echo "  make deployment-secret-files [SECRET_DIRECTORY=deploy/secrets]  Create protected secret files once"
 	@echo "  make encryption-secret  Generate one production key-encryption secret"
+	@echo "  make metrics-token  Generate one production metrics Bearer token"
 	@echo "  make user-password [BCRYPT_COST=12]  Generate one initial password and hash"
 	@echo "  make totp-secret  Generate one canonical 160-bit TOTP secret"
 	@echo "  make recovery-codes [COUNT=10]  Generate one MFA recovery-code set"
@@ -104,6 +105,9 @@ deployment-secret-files:
 
 encryption-secret:
 	cargo run --bin generate_encryption_secret
+
+metrics-token:
+	cargo run --bin generate_metrics_bearer_token
 
 BCRYPT_COST ?= 12
 user-password:

@@ -26,6 +26,9 @@ HTTP metrics. A POST to token, PAR, or revocation exposes that retry signal to t
 one exact registered public-client origin passes the same policy as an oversized-request rejection;
 all other adapter-level 503 responses remain same-origin. Configuration, the SQL pool, migrations, metrics, and the route service are therefore
 initialized at most once per warm process.
+The shared `/metrics` route optionally requires `METRICS_BEARER_TOKEN` or its `_FILE` source.
+Actix performs one strict Bearer parse and a constant-time comparison, so cold and warm Vercel
+invocations retain the same non-cacheable 401 challenge behavior as the conventional server.
 HTTP method counters and duration summaries use only `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`.
 Body-limit 413 and worker/queue 503 responses are recorded even when rejection happens before Actix;
 an arbitrary extension method can never become a Prometheus label or tracing-span value. These
@@ -77,6 +80,8 @@ deliberately outside that middleware; `Accept-Encoding` never enables compressio
 - `ROBINE_ID_CONFIG_JSON` or `ROBINE_ID_CONFIG`: an explicit production root configuration.
 - `ROBINE_ID_APPLICATIONS_JSON` or `ROBINE_ID_APPLICATIONS_DIR`: the complete application set.
 - Every environment variable referenced by a confidential application's `secret_reference`.
+- Optional `METRICS_BEARER_TOKEN`: a 32–256 character URL-safe credential generated with
+  `make metrics-token`; omit it only when metrics are intentionally public.
 
 Use `RUST_LOG=robine_id=info,vercel=info` when overriding the configuration log level so both
 library audit events and function-adapter request completions remain visible.

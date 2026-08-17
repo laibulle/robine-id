@@ -131,14 +131,14 @@ fn process_validates_metrics_file_tokens_without_disclosing_them() {
     fs::write(&invalid_path, format!("{invalid_token}\n")).expect("write invalid metrics token");
     let invalid_path_text = invalid_path.to_string_lossy().into_owned();
     let output = run_server(&[("METRICS_BEARER_TOKEN_FILE", &invalid_path_text)]);
-    let diagnostic = diagnostic(&output);
+    let invalid_diagnostic = diagnostic(&output);
 
     assert!(!output.status.success());
-    assert!(diagnostic.contains(
+    assert!(invalid_diagnostic.contains(
         "METRICS_BEARER_TOKEN must contain between 32 and 256 URL-safe ASCII characters"
     ));
-    assert!(!diagnostic.contains(invalid_token));
-    assert!(!diagnostic.contains(&invalid_path_text));
+    assert!(!invalid_diagnostic.contains(invalid_token));
+    assert!(!invalid_diagnostic.contains(&invalid_path_text));
     fs::remove_file(invalid_path).expect("remove invalid metrics token file");
 
     let valid_path = temporary_secret_path("valid-metrics-token-path-marker");
@@ -146,11 +146,11 @@ fn process_validates_metrics_file_tokens_without_disclosing_them() {
     fs::write(&valid_path, format!("{valid_token}\n")).expect("write valid metrics token");
     let valid_path_text = valid_path.to_string_lossy().into_owned();
     let output = run_server(&[("METRICS_BEARER_TOKEN_FILE", &valid_path_text)]);
-    let diagnostic = diagnostic(&output);
+    let valid_diagnostic = diagnostic(&output);
 
     assert!(!output.status.success());
-    assert!(!diagnostic.contains("METRICS_BEARER_TOKEN must contain"));
-    assert!(!diagnostic.contains(valid_token));
-    assert!(!diagnostic.contains(&valid_path_text));
+    assert!(!valid_diagnostic.contains("METRICS_BEARER_TOKEN must contain"));
+    assert!(!valid_diagnostic.contains(valid_token));
+    assert!(!valid_diagnostic.contains(&valid_path_text));
     fs::remove_file(valid_path).expect("remove valid metrics token file");
 }

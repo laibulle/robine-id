@@ -1299,7 +1299,9 @@ docker run --detach --name "$backchannel_container" \
   -c "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n' | nc -l -p $redirect_port; done" \
   >/dev/null
 docker run --rm --entrypoint /bin/sh "$image" -c \
-  'test -x /usr/local/bin/robine-id-healthcheck && test -x /usr/local/bin/robine-id-doctor && ! command -v curl'
+  'test -x /usr/local/bin/robine-id-healthcheck && test -x /usr/local/bin/robine-id-doctor && test -x /usr/local/bin/generate_metrics_bearer_token && ! command -v curl'
+docker run --rm --entrypoint /usr/local/bin/generate_metrics_bearer_token "$image" \
+  | grep -Eq '^METRICS_BEARER_TOKEN=[A-Za-z0-9_-]{64}$'
 embedded_configuration="$temporary_directory/embedded-config.json"
 docker run --rm --entrypoint /usr/local/bin/config_effective "$image" \
   >"$embedded_configuration"

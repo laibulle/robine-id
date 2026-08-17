@@ -136,6 +136,10 @@ Set `TRUST_PROXY_HEADERS=true` (or `1`) only behind a trusted reverse proxy; `fa
 and Vercel enables forwarded-header handling automatically.
 Operational events are emitted as JSON with bounded fields; `RUST_LOG` overrides the validated
 `telemetry.log_level` when platform-specific filtering is required.
+`METRICS_BEARER_TOKEN` optionally protects `GET /metrics`; the mutually exclusive
+`METRICS_BEARER_TOKEN_FILE` form supports mounted secrets. The value must contain 32–256
+URL-safe ASCII characters and is held in zeroizing memory. Generate a 384-bit value with
+`make metrics-token`. Without either setting, metrics remain public for backwards compatibility.
 `DATABASE_MAX_CONNECTIONS` defaults to five on the server and two per Vercel instance.
 `DATABASE_ACQUIRE_TIMEOUT_MS` bounds pool waits (five seconds conventionally, two seconds on
 Vercel) and accepts values from 100 through 30000 milliseconds.
@@ -776,6 +780,8 @@ of rotation and across restarts.
   label; UserInfo metrics contain no identity dimensions. HTTP volume and latency are split only
   across `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`, never raw paths or extension methods. The
   metrics response emits `Cache-Control: no-store` and `Pragma: no-cache`.
+  When a metrics token is configured, the route requires exactly one matching Bearer credential,
+  compares it in constant time, and returns a non-cacheable Bearer challenge otherwise.
 - SIGTERM and SIGINT disable readiness immediately, preserve liveness during the configurable drain delay, then stop Actix gracefully.
 - `make doctor` (or `robine-id-doctor` inside the image) performs a read-only configuration,
   PostgreSQL, exact migration-checksum, and encrypted-key diagnostic. It emits bounded JSON and
@@ -793,7 +799,8 @@ The runtime keeps direct and component-built connection URLs and database passwo
 transient storage while SQLx constructs its connection pool.
 Every sensitive database input also accepts a mutually exclusive file source: `DATABASE_URL_FILE`,
 `PGPASSWORD_FILE`, `POSTGRES_PASSWORD_FILE`, `KEY_ENCRYPTION_SECRET_FILE`,
-`KEY_ENCRYPTION_SECRET_PREVIOUS_FILE`, or `SECRET_KEY_BASE_FILE`. Secret files are bounded to
+`KEY_ENCRYPTION_SECRET_PREVIOUS_FILE`, `SECRET_KEY_BASE_FILE`, or
+`METRICS_BEARER_TOKEN_FILE`. Secret files are bounded to
 16 KiB and loaded into zeroizing memory. This supports Docker/Swarm/Kubernetes secret mounts
 without exposing the values through the container environment.
 Generate the wrapping secret with `make encryption-secret`; it emits one environment-file-safe
@@ -802,6 +809,8 @@ matching database backups and do not commit it.
 For a new release deployment, prefer `make deployment-secrets`: it emits independent 384-bit
 `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` assignments ready for `.env.release`, without a
 host OpenSSL dependency.
+Generate the optional metrics credential with `make metrics-token`; it emits an independent,
+environment-file-safe `METRICS_BEARER_TOKEN` containing 384 bits of operating-system entropy.
 
 ### Container release
 

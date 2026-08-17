@@ -16,6 +16,13 @@ Robine ID exposes operational signals that make failures diagnosable without com
 - Metrics MUST cover request rate, latency, error rate, authentication outcomes, token issuance, PAR
   and device-authorization outcomes, rate limiting, and configuration reconciliation.
 - Telemetry MUST use bounded-cardinality labels and MUST NOT include credentials, tokens, authorization codes, raw personal data, or client secrets.
+- Metrics protection MUST be optionally configurable through mutually exclusive
+  `METRICS_BEARER_TOKEN` and `METRICS_BEARER_TOKEN_FILE` sources. A configured value MUST contain
+  32–256 URL-safe ASCII characters, remain in zeroizing memory, and be compared in constant time.
+- When metrics protection is configured, `GET /metrics` MUST accept exactly one matching
+  case-insensitive Bearer scheme and reject missing, malformed, duplicate, or incorrect credentials
+  with HTTP 401, `WWW-Authenticate: Bearer realm="metrics"`, and the standard no-store policy.
+  Omitting both sources MUST preserve unauthenticated scraping for backwards compatibility.
 - Audit events MUST be emitted for security-relevant actions and configuration changes.
 - Operator-facing errors MUST identify actionable causes while public errors remain non-sensitive.
 - `GET /health/live` MUST return HTTP 200 with `{"status":"live"}` whenever the Actix endpoint can serve requests.
@@ -58,6 +65,8 @@ authentication outcomes, bounded MFA challenge/success/failure/rejection outcome
 outcomes, configuration reconciliation, readiness, and the active semantic revision. The endpoint
 emits `Cache-Control: no-store` plus `Pragma: no-cache` and contains no raw URL,
 client, subject, address, token, code, or exception label.
+The canonical 384-bit metrics-token generator MUST use operating-system entropy, emit only an
+environment-file-safe assignment, and be available both through Make and inside the release image.
 
 `robine_id_http_method_requests_total` and
 `robine_id_http_method_request_duration_seconds` MUST classify requests only as `GET`, `POST`,
@@ -89,6 +98,8 @@ Audit is append-only from the application's perspective. The MVP adapter writes 
   carries no response body and cannot mask a current readiness transition with cached state.
 - The landing-page status text and visual state agree with the current readiness decision.
 - Prometheus scrapes cannot be satisfied from a stale browser, proxy, or platform cache.
+- Actix and Vercel MUST both reject an unauthenticated protected scrape and serve the same metrics
+  after a valid Bearer credential without reflecting that credential in the response.
 - A token exchange can be correlated by request ID and safe client/issuer metadata without logging its code or tokens.
 - Operators can distinguish issuance failures by supported grant family without introducing
   client-, subject-, credential-, or attacker-controlled metric labels.

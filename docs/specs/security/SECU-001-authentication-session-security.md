@@ -19,6 +19,8 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
   MAY emit only bounded fields such as endpoint and outcome.
 - Environment- or file-resolved client, TOTP, and pairwise-subject secrets MUST use zeroizing
   memory wrappers so transient buffers are overwritten when released.
+- An optional metrics Bearer credential MUST follow the same bounded direct-or-file secret-source
+  policy, remain zeroizing for the application lifetime, and never appear in logs or responses.
 - Submitted passwords, MFA/recovery and CSRF codes, authorization and device codes,
   refresh/access tokens, PKCE verifiers, client secrets/assertions, token-exchange subject/actor
   tokens, logout hints, and decoded HTTP Basic secrets MUST remain in zeroizing wrappers for their

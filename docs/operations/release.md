@@ -60,6 +60,10 @@ make deployment-secrets
 
 Copy both emitted assignments into `.env.release`. Each value contains an independent 384 bits of
 operating-system entropy and uses only environment-file-safe Base64URL characters.
+Optionally run `make metrics-token` and store its independent 384-bit assignment in the same
+secret manager. Once configured, every scrape must send
+`Authorization: Bearer $METRICS_BEARER_TOKEN`; missing, malformed, duplicate, and incorrect
+credentials receive a non-cacheable HTTP 401 challenge.
 
 To keep the database password and wrapping key out of the container environment, use the optional
 Compose secrets overlay instead. The canonical file generator creates both independent values,
@@ -167,6 +171,10 @@ curl --fail http://127.0.0.1:4001/metrics
 curl --fail https://id.base59.dev/.well-known/openid-configuration/default
 curl --fail https://id.base59.dev/.well-known/oauth-authorization-server/default
 ```
+
+If metrics authentication is enabled, add
+`--header "Authorization: Bearer $METRICS_BEARER_TOKEN"` to the metrics request. Prefer keeping
+the route private at the reverse proxy as an additional network boundary.
 
 The discovery document must advertise `https://id.base59.dev/default` and HTTPS endpoints. Complete
 a login, code exchange, UserInfo request, refresh rotation where configured, and logout through

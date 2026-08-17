@@ -54,6 +54,12 @@ pub fn generate_database_password() -> Result<Zeroizing<String>, SecretGeneratio
     generate_deployment_secret()
 }
 
+/// Generates a URL-safe bearer credential suitable for the optional metrics
+/// endpoint protection.
+pub fn generate_metrics_bearer_token() -> Result<Zeroizing<String>, SecretGenerationError> {
+    generate_deployment_secret()
+}
+
 /// Creates the two canonical Compose secret files without replacing existing
 /// material. On Unix, the destination directory is restricted to mode `0700`
 /// and each newly created file to mode `0600`.
@@ -204,9 +210,12 @@ mod tests {
     fn generates_independent_env_safe_384_bit_secrets() {
         let first = generate_key_encryption_secret().expect("key encryption secret");
         let second = generate_database_password().expect("database password");
+        let third = generate_metrics_bearer_token().expect("metrics bearer token");
 
         assert_eq!(first.len(), 64);
         assert_ne!(first.as_str(), second.as_str());
+        assert_ne!(first.as_str(), third.as_str());
+        assert_ne!(second.as_str(), third.as_str());
         assert!(
             first
                 .bytes()
@@ -216,6 +225,13 @@ mod tests {
             URL_SAFE_NO_PAD
                 .decode(first.as_bytes())
                 .expect("canonical base64url secret")
+                .len(),
+            DEPLOYMENT_SECRET_BYTES
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(third.as_bytes())
+                .expect("canonical metrics bearer token")
                 .len(),
             DEPLOYMENT_SECRET_BYTES
         );
