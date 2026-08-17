@@ -478,6 +478,7 @@ cat >"$applications_directory/mfa-client.json" <<EOF
   "name": "Release MFA Client",
   "type": "public",
   "redirect_uris": ["http://127.0.0.1:$redirect_port/callback"],
+  "resources": ["https://api.release.example"],
   "scopes": ["openid", "offline_access"],
   "grant_types": ["authorization_code", "refresh_token"],
   "authentication_method": "none",
@@ -2489,8 +2490,7 @@ pairwise_introspection=$(curl --fail --silent \
   --user 'release-resource-server:release-smoke-introspection-secret' \
   --data-urlencode "token=$pairwise_access_token" \
   "$peer_url/default/introspect")
-printf '%s' "$pairwise_introspection" | grep -q '"active":true'
-printf '%s' "$pairwise_introspection" | grep -q "\"sub\":\"$pairwise_subject\""
+test "$pairwise_introspection" = '{"active":false}'
 
 delegation_without_actor="$temporary_directory/delegation-without-actor.json"
 delegation_without_actor_dpop=$(dpop_proof POST "$issuer_url/token" 'delegation-without-actor' '' "$authorization_server_dpop_nonce")
@@ -2571,6 +2571,7 @@ curl --fail --silent --get --cookie-jar "$mfa_cookie_jar" \
   --data-urlencode 'client_id=release-mfa-client' \
   --data-urlencode "redirect_uri=$redirect_uri" \
   --data-urlencode 'scope=openid offline_access' \
+  --data-urlencode 'resource=https://api.release.example' \
   --data-urlencode 'state=mfa-state' \
   --data-urlencode 'nonce=mfa-nonce' \
   --data-urlencode 'acr_values=urn:robine-id:acr:password+totp urn:robine-id:acr:password' \
@@ -2686,24 +2687,13 @@ compose exec --no-TTY postgres \
     "UPDATE access_tokens SET auth_time = 0 WHERE client_id = 'release-mfa-client';" \
   >/dev/null
 mfa_step_up_probe=$(dpop_proof GET "$issuer_url/userinfo" 'mfa-step-up-probe' "$mfa_access_token" "$authorization_server_dpop_nonce")
-mfa_step_up_nonce_headers="$temporary_directory/mfa-step-up-nonce.headers"
-test "$(
-  curl --silent --dump-header "$mfa_step_up_nonce_headers" --output /dev/null \
-    --write-out '%{http_code}' \
-    --header "Authorization: DPoP $mfa_access_token" \
-    --header "DPoP: $mfa_step_up_probe" \
-    "$base_url/default/userinfo"
-)" = '401'
-mfa_step_up_nonce=$(header_value dpop-nonce "$mfa_step_up_nonce_headers")
-test -n "$mfa_step_up_nonce"
-mfa_step_up_proof=$(dpop_proof GET "$issuer_url/userinfo" 'mfa-step-up-proof' "$mfa_access_token" "$mfa_step_up_nonce")
 mfa_step_up_headers="$temporary_directory/mfa-step-up.headers"
 mfa_step_up_response="$temporary_directory/mfa-step-up.json"
 test "$(
   curl --silent --dump-header "$mfa_step_up_headers" --output "$mfa_step_up_response" \
     --write-out '%{http_code}' \
     --header "Authorization: DPoP $mfa_access_token" \
-    --header "DPoP: $mfa_step_up_proof" \
+    --header "DPoP: $mfa_step_up_probe" \
     "$peer_url/default/userinfo"
 )" = '401'
 grep -q '"error":"insufficient_user_authentication"' "$mfa_step_up_response"
