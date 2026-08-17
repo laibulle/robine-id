@@ -47,6 +47,15 @@ the shared durable store for protocol state and encrypted signing keys.
 - The service MUST run as a non-root OS user.
 - The conventional application container MUST use a read-only root filesystem, drop Linux
   capabilities, and prevent privilege escalation.
+- Conventional application and PostgreSQL services MUST use an init shim and a finite 256-process
+  PID cgroup limit. The application's only writable root-filesystem mount MUST remain a bounded
+  `/tmp` tmpfs with `noexec`, `nosuid`, and `nodev` restrictions.
+- PostgreSQL MUST use a read-only root filesystem and prevent privilege escalation. Its writable
+  mounts MUST be limited to the durable data volume plus bounded `/tmp` and
+  `/var/run/postgresql` tmpfs mounts carrying `noexec`, `nosuid`, and `nodev`.
+- Conventional application and PostgreSQL services MUST use an explicit `json-file` log driver
+  capped at three 10 MiB segments per container so standard output cannot consume unbounded host
+  storage under the canonical Compose deployment.
 - Release Compose MUST attach PostgreSQL exclusively to an `internal` database network with no
   published port. Robine ID MUST join that network plus a distinct application network whose
   gateway remains available for standards-required outbound callbacks. No other release service
@@ -117,6 +126,9 @@ rotation. File-backed hot reload is a conventional-server feature; Vercel config
   without reproducing the submitted value.
 - Compose proves the application container is non-root, read-only, capability-free, and protected
   by `no-new-privileges`.
+- The release gate MUST inspect both service containers for the init shim and exact PID limit, and
+  MUST verify their exact log rotation policy, both read-only-root settings, PostgreSQL privilege
+  protection, and every restrictive application and PostgreSQL tmpfs mount option at runtime.
 - The release gate MUST prove PostgreSQL has exactly one internal network and zero host port
   bindings, while each Robine ID instance joins that database network and exactly one non-internal
   application network.

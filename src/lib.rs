@@ -19,8 +19,11 @@ use std::sync::{
 };
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 const SIGNING_KEY_ROTATION_CHECK_INTERVAL_SECONDS: u64 = 300;
+const MINIMUM_METRICS_BEARER_TOKEN_BYTES: usize = 32;
+const MAXIMUM_METRICS_BEARER_TOKEN_BYTES: usize = 256;
 
 pub use configuration::{ConfigurationError, Snapshot};
 
@@ -30,6 +33,18 @@ pub enum ApplicationLoadError {
     Configuration(#[from] ConfigurationError),
     #[error(transparent)]
     Database(#[from] database::DatabaseConfigurationError),
+    #[error(transparent)]
+    Metrics(#[from] MetricsConfigurationError),
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum MetricsConfigurationError {
+    #[error(transparent)]
+    SecretSource(#[from] secret_source::SecretSourceError),
+    #[error(
+        "METRICS_BEARER_TOKEN must contain between 32 and 256 URL-safe ASCII characters"
+    )]
+    InvalidToken,
 }
 
 #[derive(Clone)]
@@ -37,6 +52,7 @@ pub struct Application {
     snapshot: Arc<RwLock<Arc<Snapshot>>>,
     database: Option<database::Database>,
     metrics: Arc<metrics::Metrics>,
+    metrics_bearer_token: Option<Arc<Zeroizing<String>>>,
     accepting_traffic: Arc<AtomicBool>,
     last_configuration_error: Arc<Mutex<Option<String>>>,
     configuration_reload_lock: Arc<tokio::sync::Mutex<()>>,
@@ -76,14 +92,16 @@ pub fn initialize_tracing(application: &Application) {
 
 impl Application {
     pub fn load() -> Result<Self, ApplicationLoadError> {
-        Self::new(Snapshot::load()?).map_err(Into::into)
+        Self::new(Snapshot::load()?)
     }
 
-    pub fn new(snapshot: Snapshot) -> Result<Self, database::DatabaseConfigurationError> {
+    pub fn new(snapshot: Snapshot) -> Result<Self, ApplicationLoadError> {
+        let metrics_bearer_token = metrics_bearer_token_from_environment()?;
         Ok(Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             database: database::Database::from_env()?,
             metrics: Arc::new(metrics::Metrics::default()),
+            metrics_bearer_token: metrics_bearer_token.map(Arc::new),
             accepting_traffic: Arc::new(AtomicBool::new(true)),
             last_configuration_error: Arc::new(Mutex::new(None)),
             configuration_reload_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -95,10 +113,21 @@ impl Application {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             database: None,
             metrics: Arc::new(metrics::Metrics::default()),
+            metrics_bearer_token: None,
             accepting_traffic: Arc::new(AtomicBool::new(true)),
             last_configuration_error: Arc::new(Mutex::new(None)),
             configuration_reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    pub fn without_database_with_metrics_bearer_token(
+        snapshot: Snapshot,
+        token: Zeroizing<String>,
+    ) -> Result<Self, MetricsConfigurationError> {
+        validate_metrics_bearer_token(&token)?;
+        let mut application = Self::without_database(snapshot);
+        application.metrics_bearer_token = Some(Arc::new(token));
+        Ok(application)
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -361,6 +390,12 @@ impl Application {
         &self.metrics
     }
 
+    pub fn metrics_bearer_token(&self) -> Option<&str> {
+        self.metrics_bearer_token
+            .as_deref()
+            .map(|token| token.as_str())
+    }
+
     pub fn accepting_traffic(&self) -> bool {
         self.accepting_traffic.load(Ordering::Acquire)
     }
@@ -416,9 +451,54 @@ impl Application {
     }
 }
 
+fn metrics_bearer_token_from_environment(
+) -> Result<Option<Zeroizing<String>>, MetricsConfigurationError> {
+    let token = secret_source::from_environment("METRICS_BEARER_TOKEN")?;
+    if let Some(token) = token.as_deref() {
+        validate_metrics_bearer_token(token)?;
+    }
+    Ok(token)
+}
+
+fn validate_metrics_bearer_token(token: &str) -> Result<(), MetricsConfigurationError> {
+    if !(MINIMUM_METRICS_BEARER_TOKEN_BYTES..=MAXIMUM_METRICS_BEARER_TOKEN_BYTES)
+        .contains(&token.len())
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(MetricsConfigurationError::InvalidToken);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_bearer_tokens_are_bounded_and_header_safe() {
+        for token in [
+            "",
+            "short",
+            &"a".repeat(MAXIMUM_METRICS_BEARER_TOKEN_BYTES + 1),
+            "contains spaces despite being long enough",
+            "contains.a.dot.despite.being.long.enough",
+            "éééééééééééééééééééééééééééééééé",
+        ] {
+            assert_eq!(
+                validate_metrics_bearer_token(token),
+                Err(MetricsConfigurationError::InvalidToken)
+            );
+        }
+        assert!(validate_metrics_bearer_token(&"a".repeat(32)).is_ok());
+        assert!(
+            validate_metrics_bearer_token(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn activates_a_new_configuration_revision_atomically() {

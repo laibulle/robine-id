@@ -1110,7 +1110,7 @@ curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q "\"pushed_authorization_request_endpoint\":\"$issuer_url/par\""
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q '"request_uri_parameter_supported":true'
+  | grep -q '"request_uri_parameter_supported":false'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"ui_locales_supported":\["en","fr"\]'
 accept_language_error="$temporary_directory/accept-language-error.html"
@@ -1233,7 +1233,18 @@ grep -Eq '"failed"[[:space:]]*:[[:space:]]*0' "$doctor_report"
 container_id=$(compose ps --quiet robine-id)
 postgres_container_id=$(compose ps --quiet postgres)
 test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = "robine-id"
+test "$(docker inspect --format '{{.HostConfig.Init}}' "$container_id")" = "true"
+test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$container_id")" = "256"
+test "$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$container_id")" = "json-file"
+test "$(docker inspect --format '{{index .HostConfig.LogConfig.Config "max-size"}}' "$container_id")" = "10m"
+test "$(docker inspect --format '{{index .HostConfig.LogConfig.Config "max-file"}}' "$container_id")" = "3"
 test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
+tmpfs_options=$(docker inspect --format '{{index .HostConfig.Tmpfs "/tmp"}}' "$container_id")
+printf '%s\n' "$tmpfs_options" | grep -Eq '(^|,)size=(16m|16777216)(,|$)'
+printf '%s\n' "$tmpfs_options" | grep -Eq '(^|,)mode=1777(,|$)'
+printf '%s\n' "$tmpfs_options" | grep -Eq '(^|,)noexec(,|$)'
+printf '%s\n' "$tmpfs_options" | grep -Eq '(^|,)nosuid(,|$)'
+printf '%s\n' "$tmpfs_options" | grep -Eq '(^|,)nodev(,|$)'
 docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id" | grep -q '"ALL"'
 docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" \
   | grep -q 'no-new-privileges'
@@ -1250,6 +1261,26 @@ test "$(printf '%s\n' "$application_network" | wc -l | tr -d ' ')" = '1'
 test "$(docker network inspect --format '{{.Internal}}' "$database_network")" = 'true'
 test "$(docker network inspect --format '{{.Internal}}' "$application_network")" = 'false'
 test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$postgres_container_id")" = '0'
+test "$(docker inspect --format '{{.HostConfig.Init}}' "$postgres_container_id")" = 'true'
+test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$postgres_container_id")" = '256'
+test "$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$postgres_container_id")" = 'json-file'
+test "$(docker inspect --format '{{index .HostConfig.LogConfig.Config "max-size"}}' "$postgres_container_id")" = '10m'
+test "$(docker inspect --format '{{index .HostConfig.LogConfig.Config "max-file"}}' "$postgres_container_id")" = '3'
+test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$postgres_container_id")" = 'true'
+test "$(docker inspect --format '{{len .HostConfig.Tmpfs}}' "$postgres_container_id")" = '2'
+postgres_tmp_options=$(docker inspect --format '{{index .HostConfig.Tmpfs "/tmp"}}' "$postgres_container_id")
+postgres_run_options=$(docker inspect --format '{{index .HostConfig.Tmpfs "/var/run/postgresql"}}' "$postgres_container_id")
+printf '%s\n' "$postgres_tmp_options" | grep -Eq '(^|,)size=(16m|16777216)(,|$)'
+printf '%s\n' "$postgres_tmp_options" | grep -Eq '(^|,)mode=1777(,|$)'
+printf '%s\n' "$postgres_run_options" | grep -Eq '(^|,)size=(16m|16777216)(,|$)'
+printf '%s\n' "$postgres_run_options" | grep -Eq '(^|,)mode=3775(,|$)'
+for postgres_tmpfs_options in "$postgres_tmp_options" "$postgres_run_options"; do
+  printf '%s\n' "$postgres_tmpfs_options" | grep -Eq '(^|,)noexec(,|$)'
+  printf '%s\n' "$postgres_tmpfs_options" | grep -Eq '(^|,)nosuid(,|$)'
+  printf '%s\n' "$postgres_tmpfs_options" | grep -Eq '(^|,)nodev(,|$)'
+done
+docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$postgres_container_id" \
+  | grep -q 'no-new-privileges'
 image=$(docker inspect --format '{{.Config.Image}}' "$container_id")
 docker run --detach --name "$backchannel_container" \
   --network "container:$container_id" \
@@ -1335,8 +1366,10 @@ fi
 docker create --name "$peer_container" \
   --network "$application_network" \
   --publish "$bind_address::4001" \
+  --init \
+  --pids-limit 256 \
   --read-only \
-  --tmpfs /tmp:size=16m,mode=1777 \
+  --tmpfs /tmp:size=16m,mode=1777,noexec,nosuid,nodev \
   --security-opt no-new-privileges \
   --cap-drop ALL \
   --env HOST=0.0.0.0 \

@@ -16,13 +16,13 @@ fn run_doctor(environment: &[(&str, &str)], arguments: &[&str]) -> Output {
 fn doctor_requires_database_configuration_and_rejects_arguments() {
     let missing_database = run_doctor(&[], &[]);
     assert!(!missing_database.status.success());
-    assert!(
-        String::from_utf8_lossy(&missing_database.stderr).contains("DATABASE_URL is required")
-    );
+    assert!(String::from_utf8_lossy(&missing_database.stderr).contains("DATABASE_URL is required"));
 
     let unexpected_argument = run_doctor(&[], &["unexpected"]);
     assert!(!unexpected_argument.status.success());
-    assert!(String::from_utf8_lossy(&unexpected_argument.stderr).contains("usage: robine-id-doctor"));
+    assert!(
+        String::from_utf8_lossy(&unexpected_argument.stderr).contains("usage: robine-id-doctor")
+    );
 }
 
 #[test]

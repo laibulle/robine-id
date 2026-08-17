@@ -6,9 +6,16 @@ services:
     image: robine-id-rust:dev
     container_name: robine-id-rust-dev
     restart: unless-stopped
+    init: true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     read_only: true
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -38,6 +45,19 @@ services:
     image: postgres:17-alpine
     container_name: robine-id-postgres-dev
     restart: unless-stopped
+    init: true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+      - /var/run/postgresql:size=16m,mode=3775,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_DB: robine_id
       POSTGRES_USER: robine_id

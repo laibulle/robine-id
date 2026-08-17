@@ -41,6 +41,15 @@ Robine ID exposes operational signals that make failures diagnosable without com
 - Logs MUST avoid submitted identifiers unless explicitly classified and protected as personal data.
 - Telemetry metric labels MUST never contain subject identifiers, raw IP addresses, arbitrary URLs, tokens, codes, or exception messages.
 - Readiness failures MUST remain non-sensitive publicly while the server log retains an actionable internal cause.
+- The canonical image MUST include a read-only `robine-id-doctor` command. It MUST validate the
+  active configuration, database connectivity, the exact version/success/checksum sequence of all
+  embedded migrations, and decryptability of every active and retained signing key without
+  applying migrations, creating keys, pruning rows, or starting HTTP.
+- Doctor output MUST be bounded JSON containing only status, semantic revision, active object
+  counts, migration counts/currentness, and signing-key counts/coverage. Connection or inspection
+  failures MUST return a non-zero status without emitting URLs, paths, credentials, key material,
+  SQL text, or database exception details. A configured issuer with no lazily created key MAY be
+  reported as missing without making an otherwise current deployment fail.
 
 ## Metric Contract
 
@@ -89,6 +98,9 @@ Audit is append-only from the application's perspective. The MVP adapter writes 
   contract while retaining the equivalent JSON representation length.
 - UserInfo success is audited only after the response is fully deliverable, and its aggregate
   metric exposes no identity or credential dimensions.
+- Operators can run one image-native, read-only diagnostic before or after deployment and detect
+  an unreachable database, pending/changed/failed migration, or undecryptable persisted key without
+  exposing the failing dependency detail.
 
 ## Non-Goals
 

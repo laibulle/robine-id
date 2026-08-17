@@ -21,6 +21,9 @@ OpenID Provider discovery.
 - The response MUST expose the actual authorization, token, device authorization, PAR,
   introspection, revocation and JWKS endpoints, plus only currently usable grants, response types,
   response modes, PKCE methods, DPoP algorithms and client-authentication methods.
+- The response MUST advertise `request_uri_parameter_supported: false` because arbitrary Request
+  URI dereferencing is not implemented. The advertised PAR endpoint and its server-issued
+  references remain usable independently of that OpenID Connect metadata member.
 - OAuth and OpenID discovery MUST be generated from one canonical metadata model so their shared
   values cannot drift. Registered OpenID and OAuth extension members MAY be included in the RFC
   8414 response.

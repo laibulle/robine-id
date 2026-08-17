@@ -1,6 +1,9 @@
 use robine_id::{Application, Snapshot};
 use serde::Serialize;
-use std::{io, process::ExitCode};
+use std::{
+    io::{self, Write},
+    process::ExitCode,
+};
 
 #[derive(Debug, Serialize)]
 struct DoctorReport {
@@ -135,9 +138,9 @@ fn configuration_report(snapshot: &Snapshot) -> ConfigurationReport {
 }
 
 fn write_report(report: &DoctorReport) -> io::Result<()> {
-    serde_json::to_writer_pretty(io::stdout().lock(), report).map_err(io::Error::other)?;
-    println!();
-    Ok(())
+    let mut output = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut output, report).map_err(io::Error::other)?;
+    writeln!(output)
 }
 
 #[cfg(test)]

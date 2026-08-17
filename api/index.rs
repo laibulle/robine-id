@@ -1557,6 +1557,12 @@ mod tests {
             body["dpop_signing_alg_values_supported"],
             serde_json::json!(["EdDSA", "ES256", "RS256"])
         );
+        assert_eq!(body["request_uri_parameter_supported"], false);
+        assert!(
+            body["pushed_authorization_request_endpoint"]
+                .as_str()
+                .is_some_and(|endpoint| endpoint.ends_with("/par"))
+        );
         assert_eq!(
             body["token_endpoint_auth_signing_alg_values_supported"],
             serde_json::json!(["EdDSA", "ES256", "HS256", "RS256"])

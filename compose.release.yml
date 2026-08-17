@@ -4,9 +4,16 @@ services:
       context: .
     image: ${ROBINE_ID_IMAGE:-robine-id:0.1.0}
     restart: unless-stopped
+    init: true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     read_only: true
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -46,6 +53,19 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    init: true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+      - /var/run/postgresql:size=16m,mode=3775,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - path: ${ROBINE_ID_ENV_FILE:-.env.release}
         required: true

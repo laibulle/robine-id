@@ -155,9 +155,13 @@ Rust image is built from the canonical `Dockerfile`, runs as an unprivileged use
 health check implemented by the bounded `robine-id-healthcheck` Rust binary; the runtime image does
 not install `curl` solely for container health polling. In both development and release Compose,
 the application root filesystem is read-only, all Linux capabilities are dropped, privilege
-escalation is disabled, and only a bounded in-memory `/tmp` remains writable. The known development
-database password and host-published `make dev` database are development conveniences, not a
-production security boundary.
+escalation is disabled, and only a bounded `noexec,nosuid,nodev` in-memory `/tmp` remains writable.
+PostgreSQL likewise has a read-only root and `no-new-privileges`; writes are limited to its data
+volume plus bounded, non-executable `/tmp` and `/var/run/postgresql` tmpfs mounts.
+Application and PostgreSQL services use Docker's init shim and a 256-process cgroup limit. The
+Compose definitions also retain at most three 10 MiB `json-file` log segments per service. The
+known development database password and host-published `make dev` database are development
+conveniences, not a production security boundary.
 The two-network topology requires Docker Compose 2.33.1 or newer so the non-internal application
 network remains the explicit default gateway.
 
@@ -773,6 +777,9 @@ of rotation and across restarts.
   across `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`, never raw paths or extension methods. The
   metrics response emits `Cache-Control: no-store` and `Pragma: no-cache`.
 - SIGTERM and SIGINT disable readiness immediately, preserve liveness during the configurable drain delay, then stop Actix gracefully.
+- `make doctor` (or `robine-id-doctor` inside the image) performs a read-only configuration,
+  PostgreSQL, exact migration-checksum, and encrypted-key diagnostic. It emits bounded JSON and
+  never applies migrations or creates/prunes/rotates keys.
 - `x-request-id` is returned as the public correlation reference.
 - security and reconciliation events use structured, bounded metadata.
 - credentials, password hashes, authorization codes, bearer tokens, session identifiers, client

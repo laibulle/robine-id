@@ -13,8 +13,10 @@ through the browser.
 ## Requirements
 
 - Discovery MUST advertise `pushed_authorization_request_endpoint`,
-  `request_uri_parameter_supported: true`, and the issuer's effective
-  `require_pushed_authorization_requests` value.
+  `request_uri_parameter_supported: false`, and the issuer's effective
+  `require_pushed_authorization_requests` value. RFC 9126 PAR references MUST remain usable
+  independently of the OIDC Request URI capability flag; arbitrary URI dereferencing remains
+  unsupported.
 - PAR MAY be required for every client of an issuer through token policy or for one declaratively
   registered client. Both policies MUST default to `false`; a client policy is valid only for an
   `authorization_code` client.

@@ -1297,7 +1297,24 @@ fn health_response(request: &HttpRequest, status: StatusCode, body: Value) -> Ht
     response
 }
 
-async fn metrics(application: web::Data<Application>) -> impl Responder {
+async fn metrics(request: HttpRequest, application: web::Data<Application>) -> HttpResponse {
+    if let Some(expected) = application.metrics_bearer_token() {
+        let authorized = access_token_credential(&request).is_some_and(|(scheme, provided)| {
+            scheme.eq_ignore_ascii_case("bearer")
+                && constant_time_eq::constant_time_eq(expected.as_bytes(), provided.as_bytes())
+        });
+        if !authorized {
+            let mut response = HttpResponse::Unauthorized()
+                .content_type("application/json")
+                .insert_header((
+                    actix_web::http::header::WWW_AUTHENTICATE,
+                    "Bearer realm=\"metrics\"",
+                ))
+                .body(r#"{"error":"unauthorized"}"#);
+            prevent_caching(&mut response);
+            return response;
+        }
+    }
     let ready = if application.accepting_traffic() {
         match application.database() {
             Some(database) => database.healthy().await,
@@ -11866,7 +11883,7 @@ mod tests {
             body["request_object_signing_alg_values_supported"],
             json!(["EdDSA", "ES256", "RS256"])
         );
-        assert_eq!(body["request_uri_parameter_supported"], true);
+        assert_eq!(body["request_uri_parameter_supported"], false);
         assert_eq!(body["require_pushed_authorization_requests"], false);
         assert_eq!(
             body["pushed_authorization_request_endpoint"],
@@ -14172,6 +14189,66 @@ mod tests {
         assert!(body.contains("robine_id_token_exchange_total{outcome=\"failure\"} 1"));
         assert!(!body.contains("attacker-controlled-grant"));
         assert!(body.contains("robine_id_userinfo_total{outcome=\"failure\"} 1"));
+    }
+
+    #[actix_web::test]
+    async fn protects_metrics_with_an_optional_constant_time_bearer_token() {
+        let token = "metrics_token_abcdefghijklmnopqrstuvwxyz0123456789";
+        let application = Application::without_database_with_metrics_bearer_token(
+            application().snapshot().as_ref().clone(),
+            Zeroizing::new(token.to_owned()),
+        )
+        .expect("valid metrics token");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+
+        for request in [
+            test::TestRequest::get().uri("/metrics").to_request(),
+            test::TestRequest::get()
+                .uri("/metrics")
+                .insert_header(("authorization", "Bearer wrong_token_that_is_long_enough_123456"))
+                .to_request(),
+            test::TestRequest::get()
+                .uri("/metrics")
+                .append_header(("authorization", format!("Bearer {token}")))
+                .append_header(("authorization", format!("Bearer {token}")))
+                .to_request(),
+        ] {
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer realm=\"metrics\"")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+            let body = test::read_body(response).await;
+            assert!(!body.windows(token.len()).any(|window| window == token.as_bytes()));
+        }
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/metrics")
+                .insert_header(("authorization", format!("bEaReR {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        assert!(body.starts_with(b"# HELP robine_id_http_requests_total"));
     }
 
     #[actix_web::test]

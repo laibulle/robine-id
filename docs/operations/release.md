@@ -7,7 +7,13 @@ Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4001`. The ca
 `Dockerfile` contains only the Rust runtime and its operational commands; Phoenix is not present in
 the production image. Compose additionally makes the application root filesystem read-only, drops
 all Linux capabilities, and enables `no-new-privileges`; only a small temporary in-memory filesystem
-is writable. Docker and Compose poll readiness through the bounded native
+is writable, and that `/tmp` mount is `noexec`, `nosuid`, and `nodev`. PostgreSQL also uses a
+read-only root with `no-new-privileges`; only its durable data volume and bounded, non-executable
+`/tmp` and socket-directory tmpfs mounts remain writable. Both services run behind
+Docker's minimal init shim and a 256-process cgroup ceiling, containing process leaks and correctly
+reaping descendants. Each service uses an explicit `json-file` log policy capped at three 10 MiB
+segments, so container output cannot grow without a Compose-level bound. Docker and Compose poll
+readiness through the bounded native
 `robine-id-healthcheck` binary, so the runtime image does not carry `curl` just to call itself.
 Compose 2.33.1 or newer is required for explicit gateway selection. Robine ID joins a normal
 application network for outbound logout callbacks and an `internal` database network for
@@ -112,7 +118,8 @@ make release-smoke
 checks migrations, readiness, documentation, discovery, CLI utilities, the non-root user, and
 strict non-leaking rejection of invalid database and Actix server environments. It verifies that
 PostgreSQL has no host binding and only one internal network, while both Actix instances have a
-separate non-internal callback network plus database access. It
+separate non-internal callback network plus database access. It also inspects init usage, PID
+ceilings, the exact log rotation policy, and every restrictive `/tmp` flag before continuing. It
 then pushes and consumes a single-use authorization request across instances, delivers and
 exchanges a form-posted code, rejects correctly credentialed disabled identities and applications,
 issues and revokes a machine token, and completes login, consented offline access, PKCE code exchange, refresh rotation, UserInfo,
@@ -142,7 +149,15 @@ Confirm that:
 docker compose --env-file .env.release -f compose.release.yml up -d --build --wait
 docker compose --env-file .env.release -f compose.release.yml ps
 docker compose --env-file .env.release -f compose.release.yml logs --tail=100 robine-id
+docker compose --env-file .env.release -f compose.release.yml exec -T robine-id robine-id-doctor
 ```
+
+`robine-id-doctor` performs no migration or key mutation. It exits successfully only when the
+configuration loads, PostgreSQL responds, every embedded migration version and checksum matches,
+and all persisted active and retained signing keys decrypt with the supplied wrapping secret. Its
+JSON reports only the semantic revision and bounded counts. A fresh issuer may report a missing
+lazy signing key while remaining ready; the first signing operation creates it transactionally.
+Run `make doctor` for the equivalent local check against the development database.
 
 Verify the local service and public proxy:
 

@@ -63,8 +63,10 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
   request parameter MUST be advertised and implemented according to OIDC-011.
 - JARM MUST advertise `jwt`, `query.jwt`, and `form_post.jwt` response modes plus RS256 through
   `authorization_signing_alg_values_supported`.
-  PAR request URIs MUST be advertised as supported, together with the pushed
-  authorization request endpoint and the fact that PAR is optional. Supported user-interface
+  Arbitrary OpenID Connect Request URI dereferencing MUST be advertised as unsupported through
+  `request_uri_parameter_supported: false`. PAR support MUST still be advertised through the
+  pushed authorization request endpoint and the issuer's effective requirement policy because
+  RFC 9126 references remain usable independently of the OIDC Request URI flag. Supported user-interface
   locales MUST reflect resolved issuer branding; the default theme advertises `en` and `fr`.
 - The discovery document MUST advertise the end-session endpoint.
 - The discovery document MUST advertise session-bound Back-Channel Logout through
@@ -114,6 +116,8 @@ The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`,
 Discovery metadata is generated from the active configuration on each request. Applying a new active revision therefore changes subsequent discovery responses without recompiling the application.
 `claims_parameter_supported` is `true`; OIDC-011 defines the corresponding bounded request and
 essential-claim behavior.
+`request_uri_parameter_supported` is `false`; only server-issued RFC 9126 PAR references are
+accepted, and arbitrary external Request URIs are never dereferenced.
 
 ## Acceptance Criteria
 

@@ -422,7 +422,9 @@ impl DiscoveryDocument {
             claims_parameter_supported: true,
             request_parameter_supported: true,
             request_object_signing_alg_values_supported: vec!["EdDSA", "ES256", "RS256"],
-            request_uri_parameter_supported: true,
+            // RFC 9126 PAR references remain valid independently of this OIDC
+            // Discovery flag. We do not dereference arbitrary Request URIs.
+            request_uri_parameter_supported: false,
             require_pushed_authorization_requests: issuer
                 .token_policy
                 .require_pushed_authorization_requests,
@@ -1714,7 +1716,7 @@ mod tests {
             discovery.request_object_signing_alg_values_supported,
             vec!["EdDSA", "ES256", "RS256"]
         );
-        assert!(discovery.request_uri_parameter_supported);
+        assert!(!discovery.request_uri_parameter_supported);
         assert!(!discovery.require_pushed_authorization_requests);
         assert_eq!(
             discovery.pushed_authorization_request_endpoint,
