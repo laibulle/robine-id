@@ -1,4 +1,5 @@
 use crate::protocol::{AuthorizationGrant, AuthorizationRequest, authorization_details_subset};
+use crate::secret_source::{SecretSourceError, from_environment_names};
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
@@ -15,7 +16,7 @@ use rsa::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::{env, fmt::Write as _, fs::File, io::Read, path::Path};
+use std::{env, fmt::Write as _};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -39,23 +40,13 @@ const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b']')
     .add(b'^')
     .add(b'|');
-const MAXIMUM_SECRET_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum DatabaseConfigurationError {
     #[error("database environment variable {name} is not valid Unicode")]
     NonUnicode { name: &'static str },
-    #[error("{value_name} and {file_name} are mutually exclusive")]
-    ConflictingSecretSources {
-        value_name: &'static str,
-        file_name: &'static str,
-    },
-    #[error("secret file configured by {name} could not be read")]
-    UnreadableSecretFile { name: &'static str },
-    #[error("secret file configured by {name} exceeds 16384 bytes")]
-    OversizedSecretFile { name: &'static str },
-    #[error("secret file configured by {name} is not valid UTF-8")]
-    NonUnicodeSecretFile { name: &'static str },
+    #[error(transparent)]
+    SecretSource(#[from] SecretSourceError),
     #[error("DATABASE_URL or PG* database credentials are incomplete")]
     IncompleteCredentials,
     #[error("DATABASE_URL or PG* values do not form a valid PostgreSQL connection URL")]
@@ -228,65 +219,11 @@ fn environment_value(name: &'static str) -> Result<Option<String>, DatabaseConfi
     }
 }
 
-fn secret_environment_value(
-    name: &'static str,
-) -> Result<Option<Zeroizing<String>>, DatabaseConfigurationError> {
-    environment_value(name).map(|value| value.map(Zeroizing::new))
-}
-
 fn secret_environment_or_file_value(
     value_name: &'static str,
     file_name: &'static str,
 ) -> Result<Option<Zeroizing<String>>, DatabaseConfigurationError> {
-    let value = secret_environment_value(value_name)?;
-    let file_path = environment_value(file_name)?;
-    resolve_secret_sources(value_name, value, file_name, file_path.as_deref())
-}
-
-fn resolve_secret_sources(
-    value_name: &'static str,
-    value: Option<Zeroizing<String>>,
-    file_name: &'static str,
-    file_path: Option<&str>,
-) -> Result<Option<Zeroizing<String>>, DatabaseConfigurationError> {
-    match (value, file_path) {
-        (Some(_), Some(_)) => Err(DatabaseConfigurationError::ConflictingSecretSources {
-            value_name,
-            file_name,
-        }),
-        (Some(value), None) => Ok(Some(value)),
-        (None, Some(file_path)) => read_secret_file(file_name, Path::new(file_path)).map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
-fn read_secret_file(
-    name: &'static str,
-    path: &Path,
-) -> Result<Zeroizing<String>, DatabaseConfigurationError> {
-    let file =
-        File::open(path).map_err(|_| DatabaseConfigurationError::UnreadableSecretFile { name })?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(256));
-    file.take((MAXIMUM_SECRET_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| DatabaseConfigurationError::UnreadableSecretFile { name })?;
-    if bytes.len() > MAXIMUM_SECRET_FILE_BYTES {
-        return Err(DatabaseConfigurationError::OversizedSecretFile { name });
-    }
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-    }
-    match String::from_utf8(std::mem::take(&mut *bytes)) {
-        Ok(value) => Ok(Zeroizing::new(value)),
-        Err(error) => {
-            let mut bytes = error.into_bytes();
-            bytes.zeroize();
-            Err(DatabaseConfigurationError::NonUnicodeSecretFile { name })
-        }
-    }
+    from_environment_names(value_name, file_name).map_err(Into::into)
 }
 
 fn bounded_integer(
@@ -2378,24 +2315,9 @@ async fn generate_signing_key_async() -> Result<SigningKey, sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatabaseConfigurationError, DatabaseEnvironment, MAXIMUM_SECRET_FILE_BYTES,
-        database_url_from_components, format_user_code, random_user_code, read_secret_file,
-        resolve_secret_sources, valid_rotation_id,
+        DatabaseConfigurationError, DatabaseEnvironment, database_url_from_components,
+        format_user_code, random_user_code, valid_rotation_id,
     };
-    use std::{
-        fs,
-        path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
-    fn temporary_secret_path(label: &str) -> PathBuf {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "robine-id-{label}-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
 
     #[test]
     fn builds_a_postgres_url_and_percent_encodes_credentials() {
@@ -2423,76 +2345,6 @@ mod tests {
             database_url_from_components("postgres", "invalid", "db", "user", "password").is_none()
         );
         assert!(database_url_from_components("postgres", "5432", "db", "user", "").is_none());
-    }
-
-    #[test]
-    fn reads_bounded_secret_files_and_removes_one_line_ending() {
-        let unix_path = temporary_secret_path("secret-unix");
-        let windows_path = temporary_secret_path("secret-windows");
-        fs::write(&unix_path, b"database-password\n").expect("write Unix secret file");
-        fs::write(&windows_path, b"wrapping-secret\r\n").expect("write Windows secret file");
-
-        assert_eq!(
-            read_secret_file("POSTGRES_PASSWORD_FILE", &unix_path)
-                .expect("read Unix secret")
-                .as_str(),
-            "database-password"
-        );
-        assert_eq!(
-            read_secret_file("KEY_ENCRYPTION_SECRET_FILE", &windows_path)
-                .expect("read Windows secret")
-                .as_str(),
-            "wrapping-secret"
-        );
-
-        fs::remove_file(unix_path).expect("remove Unix secret file");
-        fs::remove_file(windows_path).expect("remove Windows secret file");
-    }
-
-    #[test]
-    fn rejects_conflicting_unreadable_oversized_and_non_unicode_secret_files() {
-        assert!(matches!(
-            resolve_secret_sources(
-                "KEY_ENCRYPTION_SECRET",
-                Some("direct-secret".to_owned().into()),
-                "KEY_ENCRYPTION_SECRET_FILE",
-                Some("not-opened"),
-            ),
-            Err(DatabaseConfigurationError::ConflictingSecretSources {
-                value_name: "KEY_ENCRYPTION_SECRET",
-                file_name: "KEY_ENCRYPTION_SECRET_FILE"
-            })
-        ));
-        assert!(matches!(
-            read_secret_file(
-                "KEY_ENCRYPTION_SECRET_FILE",
-                &temporary_secret_path("absent")
-            ),
-            Err(DatabaseConfigurationError::UnreadableSecretFile {
-                name: "KEY_ENCRYPTION_SECRET_FILE"
-            })
-        ));
-
-        let oversized_path = temporary_secret_path("secret-oversized");
-        fs::write(&oversized_path, vec![b'x'; MAXIMUM_SECRET_FILE_BYTES + 1])
-            .expect("write oversized secret file");
-        assert!(matches!(
-            read_secret_file("DATABASE_URL_FILE", &oversized_path),
-            Err(DatabaseConfigurationError::OversizedSecretFile {
-                name: "DATABASE_URL_FILE"
-            })
-        ));
-        fs::remove_file(oversized_path).expect("remove oversized secret file");
-
-        let non_unicode_path = temporary_secret_path("secret-non-unicode");
-        fs::write(&non_unicode_path, [0xff, 0xfe]).expect("write non-Unicode secret file");
-        assert!(matches!(
-            read_secret_file("PGPASSWORD_FILE", &non_unicode_path),
-            Err(DatabaseConfigurationError::NonUnicodeSecretFile {
-                name: "PGPASSWORD_FILE"
-            })
-        ));
-        fs::remove_file(non_unicode_path).expect("remove non-Unicode secret file");
     }
 
     #[test]

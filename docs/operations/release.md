@@ -78,8 +78,10 @@ ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.fil
 The overlay supplies `POSTGRES_PASSWORD_FILE` to PostgreSQL, `PGPASSWORD_FILE` to Robine ID, and
 `KEY_ENCRYPTION_SECRET_FILE` only to Robine ID. Never define a direct value and its `*_FILE`
 counterpart together. The runtime accepts the same file pattern for `DATABASE_URL`, the previous
-wrapping key used during rotation, and the `SECRET_KEY_BASE` compatibility alias; reads are limited
-to 16 KiB and errors never reproduce the path or value.
+wrapping key used during rotation, and the `SECRET_KEY_BASE` compatibility alias. Every declarative
+`{"provider":"env","key":"NAME"}` client, TOTP, or pairwise-salt reference may likewise use
+`NAME_FILE`; mount those additional files only into Robine ID with a deployment-specific Compose
+override. Reads are limited to 16 KiB and errors never reproduce the path or value.
 
 `KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
 requires both the PostgreSQL backup and the matching encryption secret. Do not rotate this secret
@@ -250,6 +252,15 @@ Rotate the wrapping secret without changing public keys or invalidating ID token
 
 4. Verify readiness, JWKS, a new ID token, and retained-key validation.
 5. Remove `KEY_ENCRYPTION_SECRET_PREVIOUS` and roll every instance again.
+
+For the file-mounted deployment, keep the former value in
+`deploy/secrets/key_encryption_secret_previous`, put the new value in
+`deploy/secrets/key_encryption_secret`, set
+`ROBINE_ID_KEY_ENCRYPTION_SECRET_PREVIOUS_PATH` in `.env.release.files`, and temporarily add
+`-f compose.release.secrets-rotation.yml` after the normal secrets overlay. This supplies
+`KEY_ENCRYPTION_SECRET_PREVIOUS_FILE` to Robine ID. Run `reencrypt_keys` with all three Compose
+files, verify JWKS, then remove the rotation overlay, the previous-path setting, and the previous
+secret file before rolling the application again.
 6. Take a new backup paired with the new secret. Keep pre-rotation backups paired with the former
    secret until their retention period ends.
 

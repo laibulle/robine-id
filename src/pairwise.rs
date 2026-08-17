@@ -57,9 +57,8 @@ fn configured_salt(snapshot: &Snapshot) -> Option<Zeroizing<String>> {
                 reference
                     .get("key")
                     .and_then(serde_json::Value::as_str)
-                    .and_then(|key| std::env::var(key).ok())
+                    .and_then(|key| crate::secret_source::from_environment(key).ok().flatten())
                     .filter(|secret| secret.len() >= MINIMUM_SALT_BYTES)
-                    .map(Zeroizing::new)
             }
             _ => None,
         })

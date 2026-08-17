@@ -329,8 +329,10 @@ and any overlapping tenant scope is rejected during configuration validation.
 ### Optional TOTP MFA
 
 Enable `totp` beside `password`, then attach an environment secret reference only to users who need
-the second factor. The environment value is an unpadded Base32 secret containing 160 through 512
-bits; it is resolved only while verifying a code and is redacted from effective configuration.
+the second factor. The value is an unpadded Base32 secret containing 160 through 512 bits; it is
+resolved only while verifying a code and is redacted from effective configuration. Set
+`ALICE_TOTP_SECRET_FILE` instead of `ALICE_TOTP_SECRET` to load the same reference from a mounted
+secret file.
 
 ```json
 {
@@ -431,6 +433,9 @@ Application secrets may use a typed environment reference:
 Literal client secrets are rejected. This keeps versioned configuration safe to inspect and makes
 the deployment secret store the only supported source of confidential-client credentials.
 Effective configuration output redacts the environment reference.
+For every configured key, the runtime also accepts the mutually exclusive `<KEY>_FILE` variable;
+for example, `MY_CLIENT_SECRET_FILE=/run/secrets/my_client_secret`. The same convention applies to
+TOTP and pairwise-subject salt references.
 
 To isolate a user's `sub` between relying-party sectors, set an application's `subject_type` to
 `pairwise`. A single redirect host is inferred as its sector; otherwise declare a canonical
@@ -809,6 +814,8 @@ ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.fil
 
 The same PostgreSQL password file is mounted only into PostgreSQL and Robine ID; the wrapping-key
 file is mounted only into Robine ID. Do not retain the direct variables alongside their file forms.
+During wrapping-key rotation, the temporary `compose.release.secrets-rotation.yml` overlay mounts
+the former key separately and is removed after `reencrypt_keys` succeeds.
 
 The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. PostgreSQL data,
 including encrypted signing keys and short-lived protocol state, lives in the persistent

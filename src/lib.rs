@@ -7,6 +7,7 @@ pub mod pairwise;
 pub mod protocol;
 pub mod provisioning;
 pub mod recovery;
+pub mod secret_source;
 pub mod secrets;
 pub mod tokens;
 pub mod totp;

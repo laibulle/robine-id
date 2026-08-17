@@ -34,7 +34,8 @@ Selected users may additionally reference an operator-provisioned TOTP factor as
   command output, and emit a bcrypt `password_hash` at an explicitly bounded cost from 10 through
   16. The plaintext MUST NOT be accepted as a command argument.
 - Clear-text TOTP secrets MUST NOT be accepted in configuration; only strict environment secret
-  references MAY be attached to a user.
+  references MAY be attached to a user. A reference `NAME` MAY resolve through a mutually
+  exclusive `NAME_FILE` source under the shared bounded and zeroizing file-secret contract.
 - Authentication MUST trim the submitted identifier and perform a bcrypt verification.
 - Missing users MUST trigger a dummy bcrypt verification so the public response and dominant work factor do not disclose account existence.
 - Disabled users MUST follow the same dummy-verification and generic-error path as unknown identifiers.

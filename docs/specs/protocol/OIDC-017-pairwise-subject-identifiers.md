@@ -18,7 +18,8 @@ stable local user ID; only protocol-facing subject claims are pseudonymized.
   the sector.
 - Enabling any pairwise client MUST require the root
   `pairwise_subject_salt_reference` environment-secret reference. The resolved value MUST contain
-  at least 32 bytes and MUST be redacted from effective configuration.
+  at least 32 bytes and MUST be redacted from effective configuration. The corresponding `_FILE`
+  source MAY supply it through the common bounded, zeroizing file-secret contract.
 - Pairwise identifiers MUST be deterministic for the same issuer, sector, and local user, and MUST
   differ when any of those inputs changes. Robine ID derives them using domain-separated
   HMAC-SHA-256 and unpadded base64url encoding.

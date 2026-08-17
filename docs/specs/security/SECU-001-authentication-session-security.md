@@ -17,8 +17,8 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - Passwords, authorization codes, access tokens, refresh tokens, session identifiers, and client secrets MUST never appear in logs.
 - DPoP proof thumbprints, proof `jti` values, and nonces MUST NOT appear in logs. Accepted proofs
   MAY emit only bounded fields such as endpoint and outcome.
-- Environment-resolved client and TOTP secrets MUST use zeroizing memory wrappers so transient
-  buffers are overwritten when released.
+- Environment- or file-resolved client, TOTP, and pairwise-subject secrets MUST use zeroizing
+  memory wrappers so transient buffers are overwritten when released.
 - Submitted passwords, MFA/recovery and CSRF codes, authorization and device codes,
   refresh/access tokens, PKCE verifiers, client secrets/assertions, token-exchange subject/actor
   tokens, logout hints, and decoded HTTP Basic secrets MUST remain in zeroizing wrappers for their

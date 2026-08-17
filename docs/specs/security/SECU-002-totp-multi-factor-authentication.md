@@ -14,6 +14,9 @@ placing the shared authenticator secret in versioned configuration or browser st
 - TOTP MUST be enabled explicitly by adding `totp` to `authentication.methods`; `password` remains
   mandatory. A user MAY then declare one `totp_secret_reference` using the existing strict
   `{provider: "env", key: "..."}` secret-reference shape.
+- The named value MAY be supplied through the corresponding `_FILE` environment variable. Direct
+  and file forms MUST remain mutually exclusive and file loading MUST use the common bounded,
+  zeroizing secret-source implementation.
 - The referenced value MUST be unpadded RFC 4648 Base32 and decode to 160 through 512 bits. The
   effective configuration, diagnostics, HTML, metrics, and logs MUST never expose the reference or
   secret value.

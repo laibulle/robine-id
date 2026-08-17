@@ -9903,9 +9903,8 @@ fn configured_client_secret(client: &crate::configuration::Client) -> Option<Zer
                 reference
                     .get("key")
                     .and_then(Value::as_str)
-                    .and_then(|key| std::env::var(key).ok())
+                    .and_then(|key| crate::secret_source::from_environment(key).ok().flatten())
                     .filter(|secret| !secret.is_empty())
-                    .map(Zeroizing::new)
             }
             _ => None,
         })

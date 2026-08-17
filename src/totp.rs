@@ -2,9 +2,10 @@ use constant_time_eq::constant_time_eq;
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha1::Sha1;
-use std::env;
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::secret_source::{SecretSourceError, from_environment};
 
 const PERIOD_SECONDS: i64 = 30;
 const DIGITS: u32 = 6;
@@ -17,6 +18,8 @@ pub enum TotpSecretError {
     Missing,
     #[error("TOTP secret environment variable is not valid Unicode")]
     NonUnicode,
+    #[error("TOTP secret source is unreadable, oversized, or ambiguous")]
+    Unavailable,
     #[error("TOTP secret must be an unpadded Base32 value containing 160 through 512 bits")]
     InvalidEncoding,
 }
@@ -26,10 +29,14 @@ pub fn secret_from_reference(reference: &Value) -> Result<Zeroizing<Vec<u8>>, To
         .get("key")
         .and_then(Value::as_str)
         .ok_or(TotpSecretError::Missing)?;
-    let encoded = match env::var(key) {
-        Ok(value) => Zeroizing::new(value),
-        Err(env::VarError::NotPresent) => return Err(TotpSecretError::Missing),
-        Err(env::VarError::NotUnicode(_)) => return Err(TotpSecretError::NonUnicode),
+    let encoded = match from_environment(key) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err(TotpSecretError::Missing),
+        Err(
+            SecretSourceError::NonUnicodeEnvironment { .. }
+            | SecretSourceError::NonUnicodeFile { .. },
+        ) => return Err(TotpSecretError::NonUnicode),
+        Err(_) => return Err(TotpSecretError::Unavailable),
     };
     decode_base32(&encoded)
         .map(Zeroizing::new)

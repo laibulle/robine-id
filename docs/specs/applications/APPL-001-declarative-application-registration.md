@@ -91,8 +91,10 @@ Unknown fields are invalid.
 
 `secret_reference` accepts only an environment reference of the form
 `{"provider":"env","key":"VARIABLE_NAME"}`. Environment values are resolved only when
-authenticating the client. Missing values cause authentication failure. Literal client secrets are
-invalid, and effective configuration output MUST redact the reference.
+authenticating the client. The runtime MUST alternatively resolve `VARIABLE_NAME_FILE` through the
+same bounded, zeroizing, mutually exclusive file-source contract. Missing or invalid sources cause
+authentication failure. Literal client secrets are invalid, and effective configuration output
+MUST redact the reference.
 
 `jwks.keys` accepts one to sixteen unique RSA, P-256, or Ed25519 public signing keys. RSA keys require `kid`,
 `n`, and `e`, with optional `alg=RS256`; EC keys require `kid`, `crv=P-256`, `x`, and `y`, with
