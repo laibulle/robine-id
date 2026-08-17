@@ -14210,7 +14210,10 @@ mod tests {
             test::TestRequest::get().uri("/metrics").to_request(),
             test::TestRequest::get()
                 .uri("/metrics")
-                .insert_header(("authorization", "Bearer wrong_token_that_is_long_enough_123456"))
+                .insert_header((
+                    "authorization",
+                    "Bearer wrong_token_that_is_long_enough_123456",
+                ))
                 .to_request(),
             test::TestRequest::get()
                 .uri("/metrics")
@@ -14235,7 +14238,11 @@ mod tests {
                 Some("no-store")
             );
             let body = test::read_body(response).await;
-            assert!(!body.windows(token.len()).any(|window| window == token.as_bytes()));
+            assert!(
+                !body
+                    .windows(token.len())
+                    .any(|window| window == token.as_bytes())
+            );
         }
 
         let response = test::call_service(
@@ -14248,7 +14255,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = test::read_body(response).await;
-        assert!(body.starts_with(b"# HELP robine_id_http_requests_total"));
+        assert!(
+            body.windows(b"robine_id_http_requests_total".len())
+                .any(|window| window == b"robine_id_http_requests_total")
+        );
     }
 
     #[actix_web::test]

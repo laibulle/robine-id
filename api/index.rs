@@ -927,6 +927,61 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn preserves_metrics_bearer_authentication_through_vercel() {
+        let token = "vercel_metrics_token_abcdefghijklmnopqrstuvwxyz012345";
+        let application = Application::without_database_with_metrics_bearer_token(
+            Snapshot::load().expect("development configuration should load"),
+            zeroize::Zeroizing::new(token.to_owned()),
+        )
+        .expect("valid metrics token");
+        let worker = ActixWorker::start(application).expect("Actix worker");
+
+        let unauthorized = worker
+            .dispatch(FunctionRequest {
+                method: "GET".to_owned(),
+                uri: "/metrics".to_owned(),
+                headers: vec![],
+                body: vec![],
+                request_id: "vercel_metrics_unauthorized.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel metrics rejection");
+        assert_eq!(unauthorized.status(), 401);
+        assert_eq!(
+            unauthorized
+                .headers()
+                .get("www-authenticate")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer realm=\"metrics\"")
+        );
+
+        let authorized = worker
+            .dispatch(FunctionRequest {
+                method: "GET".to_owned(),
+                uri: "/metrics".to_owned(),
+                headers: vec![(
+                    "authorization".to_owned(),
+                    format!("Bearer {token}").into_bytes(),
+                )],
+                body: vec![],
+                request_id: "vercel_metrics_authorized.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel metrics response");
+        assert_eq!(authorized.status(), 200);
+        let body = http_body_util::BodyExt::collect(authorized.into_body())
+            .await
+            .expect("Vercel metrics body")
+            .to_bytes();
+        assert!(
+            body.windows(b"robine_id_http_requests_total".len())
+                .any(|window| window == b"robine_id_http_requests_total")
+        );
+    }
+
+    #[actix_web::test]
     async fn forwards_conditionally_cacheable_embedded_assets() {
         let application = Application::without_database(
             Snapshot::load().expect("development configuration should load"),

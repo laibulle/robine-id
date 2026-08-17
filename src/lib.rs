@@ -41,9 +41,7 @@ pub enum ApplicationLoadError {
 pub enum MetricsConfigurationError {
     #[error(transparent)]
     SecretSource(#[from] secret_source::SecretSourceError),
-    #[error(
-        "METRICS_BEARER_TOKEN must contain between 32 and 256 URL-safe ASCII characters"
-    )]
+    #[error("METRICS_BEARER_TOKEN must contain between 32 and 256 URL-safe ASCII characters")]
     InvalidToken,
 }
 
@@ -451,8 +449,8 @@ impl Application {
     }
 }
 
-fn metrics_bearer_token_from_environment(
-) -> Result<Option<Zeroizing<String>>, MetricsConfigurationError> {
+fn metrics_bearer_token_from_environment()
+-> Result<Option<Zeroizing<String>>, MetricsConfigurationError> {
     let token = secret_source::from_environment("METRICS_BEARER_TOKEN")?;
     if let Some(token) = token.as_deref() {
         validate_metrics_bearer_token(token)?;
