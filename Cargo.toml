@@ -55,7 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 vercel_runtime = { version = "2.4", features = ["actix"] }
 webpki-roots = "1"
-zeroize = "1.8"
+zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
 actix-http = "3"

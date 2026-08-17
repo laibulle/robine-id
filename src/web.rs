@@ -25,6 +25,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
@@ -44,6 +45,25 @@ const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-excha
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 const MAX_ACTOR_CHAIN_DEPTH: usize = 8;
 static FALLBACK_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct SensitiveString(Zeroizing<String>);
+
+impl SensitiveString {
+    fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl Deref for SensitiveString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
 pub const SECURITY_HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "nosniff"),
     ("x-frame-options", "DENY"),
@@ -853,9 +873,9 @@ struct AuthorizationPostForm {
     transaction: Option<String>,
     csrf_token: Option<String>,
     identifier: Option<String>,
-    password: Option<String>,
+    password: Option<SensitiveString>,
     mfa_transaction: Option<String>,
-    totp_code: Option<String>,
+    totp_code: Option<SensitiveString>,
 }
 
 #[derive(Deserialize)]
@@ -868,32 +888,32 @@ struct WebFingerQuery {
 #[derive(Deserialize)]
 struct TokenForm {
     grant_type: String,
-    code: Option<String>,
-    refresh_token: Option<String>,
-    device_code: Option<String>,
+    code: Option<SensitiveString>,
+    refresh_token: Option<SensitiveString>,
+    device_code: Option<SensitiveString>,
     client_id: Option<String>,
-    client_secret: Option<String>,
+    client_secret: Option<SensitiveString>,
     client_assertion_type: Option<String>,
-    client_assertion: Option<String>,
+    client_assertion: Option<SensitiveString>,
     redirect_uri: Option<String>,
-    code_verifier: Option<String>,
+    code_verifier: Option<SensitiveString>,
     scope: Option<String>,
     resource: Option<String>,
     authorization_details: Option<String>,
     audience: Option<String>,
-    subject_token: Option<String>,
+    subject_token: Option<SensitiveString>,
     subject_token_type: Option<String>,
     requested_token_type: Option<String>,
-    actor_token: Option<String>,
+    actor_token: Option<SensitiveString>,
     actor_token_type: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct DeviceAuthorizationForm {
     client_id: Option<String>,
-    client_secret: Option<String>,
+    client_secret: Option<SensitiveString>,
     client_assertion_type: Option<String>,
-    client_assertion: Option<String>,
+    client_assertion: Option<SensitiveString>,
     scope: Option<String>,
     resource: Option<String>,
     authorization_details: Option<String>,
@@ -918,11 +938,11 @@ struct DeviceInteractionForm {
     #[serde(default)]
     identifier: Option<String>,
     #[serde(default)]
-    password: Option<String>,
+    password: Option<SensitiveString>,
     #[serde(default)]
     mfa_transaction: Option<String>,
     #[serde(default)]
-    totp_code: Option<String>,
+    totp_code: Option<SensitiveString>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -980,9 +1000,9 @@ struct PushedAuthorizationForm {
     authorization_details: Option<String>,
     #[serde(default)]
     dpop_jkt: Option<String>,
-    client_secret: Option<String>,
+    client_secret: Option<SensitiveString>,
     client_assertion_type: Option<String>,
-    client_assertion: Option<String>,
+    client_assertion: Option<SensitiveString>,
 }
 
 impl PushedAuthorizationForm {
@@ -990,9 +1010,9 @@ impl PushedAuthorizationForm {
         self,
     ) -> (
         AuthorizationRequest,
+        Option<SensitiveString>,
         Option<String>,
-        Option<String>,
-        Option<String>,
+        Option<SensitiveString>,
     ) {
         (
             AuthorizationRequest {
@@ -1028,13 +1048,13 @@ impl PushedAuthorizationForm {
 
 #[derive(Deserialize)]
 struct TokenStatusForm {
-    token: String,
+    token: SensitiveString,
     #[serde(default)]
     token_type_hint: Option<String>,
     client_id: Option<String>,
-    client_secret: Option<String>,
+    client_secret: Option<SensitiveString>,
     client_assertion_type: Option<String>,
-    client_assertion: Option<String>,
+    client_assertion: Option<SensitiveString>,
 }
 
 #[derive(Deserialize)]
@@ -1046,8 +1066,8 @@ struct ConsentForm {
 
 #[derive(Default, Deserialize)]
 struct LogoutRequest {
-    id_token_hint: Option<String>,
-    logout_hint: Option<String>,
+    id_token_hint: Option<SensitiveString>,
+    logout_hint: Option<SensitiveString>,
     client_id: Option<String>,
     post_logout_redirect_uri: Option<String>,
     state: Option<String>,
@@ -3105,7 +3125,7 @@ async fn complete_authentication(
     authorization: AuthorizationRequest,
     csrf_token: String,
     submitted_identifier: String,
-    password: String,
+    password: SensitiveString,
     application: web::Data<Application>,
 ) -> HttpResponse {
     let request_id = correlation_id(&request);
@@ -3261,11 +3281,12 @@ async fn complete_authentication(
     let password = if credentials_shape_valid {
         password
     } else {
-        "invalid-credential-shape".to_owned()
+        SensitiveString::new("invalid-credential-shape".to_owned())
     };
-    let password_verified = web::block(move || bcrypt::verify(password, &hash).unwrap_or(false))
-        .await
-        .unwrap_or(false);
+    let password_verified =
+        web::block(move || bcrypt::verify(password.as_bytes(), &hash).unwrap_or(false))
+            .await
+            .unwrap_or(false);
     let valid_password = credentials_shape_valid && password_verified;
 
     let Some(user) = user.filter(|_| valid_password) else {
@@ -3494,7 +3515,7 @@ async fn complete_totp_authentication(
     request: HttpRequest,
     transaction: String,
     csrf_token: String,
-    submitted_code: String,
+    submitted_code: SensitiveString,
     application: web::Data<Application>,
 ) -> HttpResponse {
     let snapshot = application.snapshot();
@@ -4267,9 +4288,12 @@ async fn logout_confirmation_response(
     application: &Application,
 ) -> HttpResponse {
     let request_id = correlation_id(request);
+    for parameter in [&mut query.id_token_hint, &mut query.logout_hint] {
+        if parameter.as_deref() == Some("") {
+            *parameter = None;
+        }
+    }
     for parameter in [
-        &mut query.id_token_hint,
-        &mut query.logout_hint,
         &mut query.client_id,
         &mut query.post_logout_redirect_uri,
         &mut query.state,
@@ -9797,7 +9821,7 @@ fn bearer_token(request: &HttpRequest) -> Option<&str> {
         .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token))
 }
 
-fn basic_credentials(request: &HttpRequest) -> Result<Option<(String, String)>, ()> {
+fn basic_credentials(request: &HttpRequest) -> Result<Option<(String, SensitiveString)>, ()> {
     let mut values = request
         .headers()
         .get_all(actix_web::http::header::AUTHORIZATION);
@@ -9817,10 +9841,10 @@ fn basic_credentials(request: &HttpRequest) -> Result<Option<(String, String)>, 
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| ())?;
-    let decoded = String::from_utf8(decoded).map_err(|_| ())?;
+    let decoded = Zeroizing::new(String::from_utf8(decoded).map_err(|_| ())?);
     let (id, secret) = decoded.split_once(':').ok_or(())?;
     let id = decode_form_component(id).ok_or(())?;
-    let secret = decode_form_component(secret).ok_or(())?;
+    let secret = SensitiveString::new(decode_form_component(secret).ok_or(())?);
     Ok(Some((id, secret)))
 }
 
@@ -14307,24 +14331,22 @@ mod tests {
         let valid = test::TestRequest::post()
             .insert_header(("authorization", format!("bAsIc {encoded}")))
             .to_http_request();
-        assert_eq!(
-            basic_credentials(&valid),
-            Ok(Some((
-                "client:id".to_owned(),
-                "secret:with+characters".to_owned()
-            )))
-        );
+        let (id, secret) = basic_credentials(&valid)
+            .expect("valid Basic credential")
+            .expect("present Basic credential");
+        assert_eq!(id, "client:id");
+        assert_eq!(&*secret, "secret:with+characters");
 
         let malformed = test::TestRequest::post()
             .insert_header(("authorization", "Digest value"))
             .to_http_request();
-        assert_eq!(basic_credentials(&malformed), Err(()));
+        assert!(basic_credentials(&malformed).is_err());
 
         let multiple = test::TestRequest::post()
             .append_header(("authorization", "Basic Y2xpZW50OnNlY3JldA=="))
             .append_header(("authorization", "Basic Y2xpZW50OnNlY3JldA=="))
             .to_http_request();
-        assert_eq!(basic_credentials(&multiple), Err(()));
+        assert!(basic_credentials(&multiple).is_err());
     }
 
     #[actix_web::test]
