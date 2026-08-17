@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const APP_CSS: &str = include_str!("../assets/css/app.css");
 const BRAND_MARK: &[u8] = include_bytes!("../priv/static/images/brand/robine-mark.png");
@@ -10658,11 +10658,13 @@ fn redirect_response(location: impl Into<String>) -> HttpResponse {
 fn random_token() -> Option<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(bytes))
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+    bytes.zeroize();
+    Some(token)
 }
 
-fn required_random_token(purpose: &'static str) -> Result<String, HttpResponse> {
-    random_token().ok_or_else(|| {
+fn required_random_token(purpose: &'static str) -> Result<Zeroizing<String>, HttpResponse> {
+    random_token().map(Zeroizing::new).ok_or_else(|| {
         tracing::error!(
             event = "cryptographic_entropy",
             outcome = "unavailable",
@@ -10678,9 +10680,8 @@ fn required_random_token(purpose: &'static str) -> Result<String, HttpResponse> 
 }
 
 fn op_browser_state(session_id: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(
-        format!("robine-id op browser state {session_id}").as_bytes(),
-    ))
+    let input = Zeroizing::new(format!("robine-id op browser state {session_id}"));
+    URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes()))
 }
 
 fn calculate_session_state(
@@ -10689,7 +10690,7 @@ fn calculate_session_state(
     browser_state: &str,
     salt: &str,
 ) -> String {
-    let input = format!("{client_id} {origin} {browser_state} {salt}");
+    let input = Zeroizing::new(format!("{client_id} {origin} {browser_state} {salt}"));
     format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes())),
@@ -10703,7 +10704,7 @@ fn new_session_state(client_id: &str, redirect_uri: &str, session_id: &str) -> O
     if origin == "null" {
         return None;
     }
-    let salt = random_token()?;
+    let salt = Zeroizing::new(random_token()?);
     Some(calculate_session_state(
         client_id,
         &origin,

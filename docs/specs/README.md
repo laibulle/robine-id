@@ -117,7 +117,7 @@ the same database.
 | OIDC-013 | Rust signing/configuration/discovery tests, PostgreSQL signature verification, and cross-instance JWT UserInfo in `make release-smoke` |
 | OIDC-014 | Rust signing, discovery, transport and configuration tests, PostgreSQL session-to-RP persistence, plus a decoded real callback in `make release-smoke` |
 | OIDC-015 | Rust configuration, URL, CSP and Askama tests plus a real iframe interstitial and RP GET in `make release-smoke` |
-| OIDC-016 | Rust hash/cookie/origin/CSP tests, PostgreSQL query/form/JARM coverage, Vercel transport, and the real iframe/session calculation in `make release-smoke` |
+| OIDC-016 | Rust zeroizing hash-preimage/cookie/origin/CSP tests, PostgreSQL query/form/JARM coverage, Vercel transport, and the real iframe/session calculation in `make release-smoke` |
 | OIDC-017 | Rust derivation/configuration/discovery tests plus cross-instance ID token, UserInfo, and introspection consistency in `make release-smoke` |
 | OAUTH-001 | Rust configuration/PostgreSQL tests plus cross-instance introspection and revocation in `make release-smoke` |
 | OAUTH-002 | Rust configuration/PostgreSQL/Vercel tests plus cross-instance issuance, introspection, UserInfo rejection, and revocation in `make release-smoke` |

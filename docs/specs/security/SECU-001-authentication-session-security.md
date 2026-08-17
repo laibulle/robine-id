@@ -29,6 +29,8 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - Generated or decrypted signing-key PEM and raw opaque-token entropy buffers MUST be zeroized on
   every success and error path. Signing-key structures MUST NOT derive a plaintext-revealing debug
   representation.
+- Server-generated CSRF values MUST use a zeroizing wrapper until copied into the unavoidable HTTP
+  representation. Raw browser-token entropy MUST be cleared immediately after Base64URL encoding.
 - `DATABASE_URL`, `PGPASSWORD`, `POSTGRES_PASSWORD`, and any component-built connection URL MUST
   use zeroizing wrappers during configuration parsing. Percent-encoding a component password MUST
   NOT place it in an ordinary owned string or a general-purpose URL object.

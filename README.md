@@ -166,6 +166,8 @@ encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
 Owned copies of submitted passwords, MFA/recovery and CSRF codes, OAuth tokens, PKCE verifiers, client
 secrets/assertions, and logout hints use zeroizing memory wrappers throughout request processing.
+Generated CSRF values and OIDC Session Management hash preimages remain zeroizing until their
+unavoidable public HTTP representation is constructed.
 The landing-page runtime badge uses the same drainage and PostgreSQL health decision as
 `/health/ready`, so it never presents an unavailable instance as ready.
 The landing page and built-in documentation expose bodyless `HEAD` alongside `GET`, preserving the

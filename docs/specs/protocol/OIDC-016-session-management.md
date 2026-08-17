@@ -21,6 +21,9 @@ the state needed by the OP iframe.
   MUST carry it only inside the signed authorization-response JWT.
 - Session State MUST contain no spaces and MUST be a salted SHA-256 value bound to the client ID,
   the exact redirect origin, the current OP browser state, and a fresh random salt.
+- The session identifier, browser state, and salt preimage used by the SHA-256 calculation MUST be
+  assembled only in zeroizing transient storage. The fresh salt MUST remain zeroizing until copied
+  into the public `session_state` representation.
 - The OP browser-state cookie MUST be distinct from the authenticated-session cookie and public
   `sid`. It MUST contain neither a user identifier nor a credential and MUST NOT be accepted for
   authentication. It MUST expire no later than the corresponding absolute session lifetime.
