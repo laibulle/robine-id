@@ -4,7 +4,10 @@
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-id/coverage.svg)](https://ci.base59.dev/repositories)
 [![release](https://img.shields.io/github/v/release/laibulle/robine-id?display_name=tag&sort=semver)](https://github.com/laibulle/robine-id/releases)
 
-Robine ID is a file-configured OpenID Connect provider built with Elixir and Phoenix. It implements the Authorization Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated logout.
+Robine ID is a file-configured OpenID Connect provider. The established runtime uses Elixir and
+Phoenix; its portable replacement uses Rust, Actix Web, and Askama. It implements the Authorization
+Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated
+logout.
 
 It can run as a standalone service or as an embedded OTP dependency mounted inside another Phoenix application. Both modes use the same protocol implementation and configuration model. See [`docs/embedding.md`](docs/embedding.md) for the host contract.
 
@@ -100,39 +103,57 @@ the Vercel Function entrypoint, with Askama for server-rendered HTML.
 Run the Rust server against the existing JSON configuration:
 
 ```sh
-cp .env.rust.example .env.rust
-set -a; source .env.rust; set +a
 make dev
 ```
 
 It listens on `127.0.0.1:4001` by default. `HOST`, `PORT`, `ROBINE_ID_CONFIG`, and
 `ROBINE_ID_APPLICATIONS_DIR` can override those defaults. `DATABASE_URL` selects a PostgreSQL
 database and `KEY_ENCRYPTION_SECRET` encrypts persisted RSA private keys with AES-256-GCM. The
-server applies embedded SQL migrations at startup.
+server applies embedded SQL migrations at startup. `make dev` starts the PostgreSQL 17 development
+container automatically; `make dev-down` stops it without deleting its named data volume.
+Set `TRUST_PROXY_HEADERS=true` only behind a trusted reverse proxy; Vercel enables forwarded-header
+handling automatically.
+`DATABASE_MAX_CONNECTIONS` defaults to five on the server and two per Vercel instance.
+Use `make dev-container` to build and run both the Rust application and PostgreSQL in Docker. The
+Rust image is built from `Dockerfile.rust`, runs as an unprivileged user, and includes a readiness
+health check.
 
-The Rust slice implements the home and sign-in pages, health endpoints, provider discovery,
-declarative application loading, bcrypt authentication with database-backed rate limiting,
-single-use authorization codes, PKCE exchange, RS256 ID tokens, JWKS, access tokens, and UserInfo.
-Applications whose `consent_required` policy is enabled deliberately remain on Phoenix until the
-consent transaction and session work is migrated; Rust never silently bypasses consent.
+The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
+discovery endpoints; declarative application loading; bcrypt authentication with database-backed
+rate limiting and persistent session policy; single-use authorization codes; PKCE exchange;
+RS256 ID tokens; retained-key JWKS; opaque access tokens; and UserInfo. Browser transactions,
+sessions, tokens, rate limits, and encrypted signing keys are shared through PostgreSQL so the same
+application can run as a conventional Actix server or across Vercel Function invocations.
+
+Rotate an issuer signing key with a stable deployment identifier:
+
+```sh
+make keys-rotate ISSUER=default ROTATION_ID=deployment-2026-08
+```
+
+Repeating the same identifier is a no-op. Previously active keys remain published for token
+verification.
 
 Run the Rust quality gate with:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+make rust-preflight
+make rust-integration
 ```
 
 The `api/index.rs` binary and `vercel.json` expose the same Actix routes as one Vercel Function.
-Configuration files are immutable for a deployment. Authorization codes, access tokens, rate
-limits, and encrypted signing keys are stored in PostgreSQL so separate Vercel invocations share
-the same protocol state. Consent transactions, authenticated sessions, logout, and key rotation
-still need to move before the Rust runtime replaces Phoenix in production.
+Configuration files are immutable for a Vercel deployment. PostgreSQL is required and
+`KEY_ENCRYPTION_SECRET` (or `SECRET_KEY_BASE`) must be supplied as deployment secret material.
+For a filesystem-independent deployment, set `ROBINE_ID_CONFIG_JSON` to the complete root JSON
+document and `ROBINE_ID_APPLICATIONS_JSON` to a JSON array of complete application documents.
+The file-based variables remain supported for conventional servers and containers.
+Production cutover still requires validating the complete legacy configuration/branding surface,
+the deployment pipeline, and production observability against the Phoenix runtime.
 
 The checked-in development configuration contains one public client and one development identity:
 
 - client ID: `development-client`
+- fast-path client ID: `rust-development-client` (consent disabled for development testing)
 - redirect URI: `http://localhost:4002/callback`
 - user: `admin@example.com`
 - password: `change-me`

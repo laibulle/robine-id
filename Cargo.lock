@@ -2066,6 +2066,7 @@ dependencies = [
  "constant_time_eq",
  "getrandom 0.3.4",
  "hex",
+ "hmac",
  "http-body-util",
  "jsonwebtoken",
  "rand_core 0.6.4",

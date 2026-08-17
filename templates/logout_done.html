@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Signed out · {{ product_name }}</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="auth-shell" style="--auth-primary: {{ primary_color }}">
+      <section class="auth-card" aria-labelledby="signed-out-title">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<div class="success-mark" aria-hidden="true">✓</div>{% endif %}
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="signed-out-title">You're signed out</h1>
+        <p class="auth-intro">Your session on this device has ended safely.</p>
+        <a class="primary-link full-width" href="/">Return home</a>
+      </section>
+    </main>
+  </body>
+</html>

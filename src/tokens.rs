@@ -2,8 +2,10 @@ use crate::{
     configuration::{Snapshot, User},
     database::SigningKey,
 };
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use serde::Serialize;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(Serialize)]
@@ -29,6 +31,14 @@ pub struct IdTokenInput<'a> {
     pub lifetime: i64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct VerifiedIdToken {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub exp: i64,
+}
+
 pub fn issue_id_token(
     key: &SigningKey,
     input: &IdTokenInput<'_>,
@@ -49,6 +59,31 @@ pub fn issue_id_token(
         },
         &EncodingKey::from_rsa_pem(key.private_key_pem.as_bytes())?,
     )
+}
+
+pub fn verify_id_token(
+    token: &str,
+    key: &SigningKey,
+    expected_issuer: &str,
+    clock_skew_seconds: u64,
+) -> Result<VerifiedIdToken, jsonwebtoken::errors::Error> {
+    let header = decode_header(token)?;
+    if header.alg != Algorithm::RS256 || header.kid.as_deref() != Some(&key.kid) {
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::InvalidAlgorithm,
+        ));
+    }
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[expected_issuer]);
+    validation.validate_aud = false;
+    validation.leeway = clock_skew_seconds;
+    decode::<VerifiedIdToken>(
+        token,
+        &DecodingKey::from_rsa_components(&key.modulus, &key.exponent)?,
+        &validation,
+    )
+    .map(|decoded| decoded.claims)
 }
 
 pub fn mapped_claims(snapshot: &Snapshot, user: &User, scopes: &[String]) -> Map<String, Value> {
@@ -125,5 +160,10 @@ mod tests {
         assert_eq!(decoded.header.kid.as_deref(), Some("test-key"));
         assert_eq!(decoded.claims["sub"], "user-1");
         assert_eq!(decoded.claims["nonce"], "nonce");
+
+        let verified = verify_id_token(&token, &key, "https://id.example/default", 30)
+            .expect("verified ID token");
+        assert_eq!(verified.sub, "user-1");
+        assert_eq!(verified.aud, "client-1");
     }
 }

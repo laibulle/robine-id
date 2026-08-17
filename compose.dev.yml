@@ -1,0 +1,44 @@
+services:
+  app:
+    profiles: ["runtime"]
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+    image: robine-id-rust:dev
+    container_name: robine-id-rust-dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://robine_id:robine_id_dev@postgres:5432/robine_id
+      KEY_ENCRYPTION_SECRET: development-only-key-encryption-secret-change-me
+    ports:
+      - "127.0.0.1:4001:4001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4001/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: robine-id-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: robine_id
+      POSTGRES_USER: robine_id
+      POSTGRES_PASSWORD: robine_id_dev
+    ports:
+      - "127.0.0.1:54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U robine_id -d robine_id"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_dev:/var/lib/postgresql/data
+
+volumes:
+  postgres_dev:
+    name: robine-id-postgres-dev

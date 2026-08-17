@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Authorize {{ client_name }} · {{ product_name }}</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="auth-shell" style="--auth-primary: {{ primary_color }}">
+      <section class="auth-card" aria-labelledby="consent-title">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">{% endif %}
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="consent-title">{{ messages.consent_title }}</h1>
+        <p class="auth-intro"><strong>{{ client_name }}</strong>: {{ messages.consent_intro }}</p>
+        <ul class="consent-list">
+          {% for scope in scopes %}<li><span aria-hidden="true">✓</span>{{ scope }}</li>{% endfor %}
+        </ul>
+        <form id="consent-form" method="post" action="/{{ issuer_id }}/authorize/consent" class="consent-actions">
+          <input type="hidden" name="transaction" value="{{ transaction }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button id="consent-approve" type="submit" name="decision" value="approve" class="primary-action full-width">{{ messages.consent_approve }}</button>
+          <button id="consent-deny" type="submit" name="decision" value="deny" class="secondary-action full-width">{{ messages.consent_deny }}</button>
+        </form>
+        <p class="privacy-note">You can sign out at any time.</p>
+        <nav class="legal-links" aria-label="Legal and support">
+          {% if let Some(url) = support_url %}<a href="{{ url }}">Support</a>{% endif %}
+          {% if let Some(url) = privacy_url %}<a href="{{ url }}">Privacy</a>{% endif %}
+          {% if let Some(url) = terms_url %}<a href="{{ url }}">Terms</a>{% endif %}
+        </nav>
+      </section>
+    </main>
+  </body>
+</html>

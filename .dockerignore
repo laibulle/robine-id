@@ -41,6 +41,7 @@
 # Mix artifacts
 /_build/
 /deps/
+/target/
 *.ez
 
 # Generated on crash by the VM

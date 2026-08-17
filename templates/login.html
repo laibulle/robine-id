@@ -10,10 +10,10 @@
   <body>
     <main class="auth-shell" style="--auth-primary: {{ primary_color }}">
       <section class="auth-card" aria-labelledby="sign-in-title">
-        <img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="auth-brand-logo">{% endif %}
         <p class="eyebrow">{{ product_name }}</p>
-        <h1 id="sign-in-title">Welcome back</h1>
-        <p class="auth-intro">Sign in to continue to <strong>{{ client_name }}</strong>.</p>
+        <h1 id="sign-in-title">{{ messages.sign_in_title }}</h1>
+        <p class="auth-intro">{{ messages.sign_in_intro }} <strong>{{ client_name }}</strong>.</p>
 
         {% if let Some(error) = error %}<div class="error-summary" role="alert"><strong>We couldn't sign you in</strong><span>{{ error }}</span></div>{% endif %}
 
@@ -27,17 +27,23 @@
           <input type="hidden" name="nonce" value="{{ request.nonce }}">
           {% if let Some(code_challenge) = request.code_challenge %}<input type="hidden" name="code_challenge" value="{{ code_challenge }}">{% endif %}
           {% if let Some(code_challenge_method) = request.code_challenge_method %}<input type="hidden" name="code_challenge_method" value="{{ code_challenge_method }}">{% endif %}
+          {% if let Some(ui_locales) = request.ui_locales %}<input type="hidden" name="ui_locales" value="{{ ui_locales }}">{% endif %}
 
-          <label for="login_identifier">Email address</label>
+          <label for="login_identifier">{{ messages.sign_in_identifier }}</label>
           <input id="login_identifier" name="identifier" type="email" autocomplete="username" inputmode="email" required autofocus>
-          <label for="login_password">Password</label>
+          <label for="login_password">{{ messages.sign_in_password }}</label>
           <div class="password-field">
             <input id="login_password" name="password" type="password" autocomplete="current-password" required>
             <button type="button" class="reveal-password" data-password-toggle aria-label="Show password">Show</button>
           </div>
-          <button id="login-submit" type="submit" class="primary-action">Continue</button>
+          <button id="login-submit" type="submit" class="primary-action">{{ messages.sign_in_submit }}</button>
         </form>
         <p class="privacy-note">Your password is never shared with {{ client_name }}.</p>
+        <nav class="legal-links" aria-label="Legal and support">
+          {% if let Some(url) = support_url %}<a href="{{ url }}">Support</a>{% endif %}
+          {% if let Some(url) = privacy_url %}<a href="{{ url }}">Privacy</a>{% endif %}
+          {% if let Some(url) = terms_url %}<a href="{{ url }}">Terms</a>{% endif %}
+        </nav>
       </section>
     </main>
   </body>

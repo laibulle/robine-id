@@ -10,7 +10,7 @@
     <main class="landing-shell" style="--auth-primary: {{ primary_color }}">
       <nav class="landing-nav" aria-label="Primary navigation">
         <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
-          <img src="/images/brand/robine-mark.png" alt="" class="brand-logo">
+          {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo nav-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="brand-logo">{% endif %}
           <span>Robine <span class="product-suffix">ID</span></span>
         </a>
         <div class="landing-nav-actions">
@@ -43,4 +43,3 @@
     </main>
   </body>
 </html>
-

@@ -1,10 +1,11 @@
 use actix_web::{App, body::to_bytes, test, web};
 use robine_id::{Application, web as robine_web};
 use std::sync::OnceLock;
+use tokio::sync::OnceCell;
 use vercel_runtime::{Error, Request, Response, ResponseBody, run, service_fn};
 
 static APPLICATION: OnceLock<Result<Application, String>> = OnceLock::new();
-static MIGRATED: OnceLock<()> = OnceLock::new();
+static MIGRATED: OnceCell<()> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -22,13 +23,15 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
         .get_or_init(|| Application::load().map_err(|error| error.to_string()))
         .clone()
         .map_err(|error| -> Error { error.into() })?;
-    if MIGRATED.get().is_none() {
-        application
-            .migrate()
-            .await
-            .map_err(|error| -> Error { Box::new(error) })?;
-        let _ = MIGRATED.set(());
-    }
+    MIGRATED
+        .get_or_try_init(|| async {
+            application
+                .migrate()
+                .await
+                .map_err(|error| -> Error { Box::new(error) })?;
+            Ok::<(), Error>(())
+        })
+        .await?;
 
     let (parts, body) = request.into_parts();
     let body = http_body_util::BodyExt::collect(body).await?.to_bytes();
@@ -53,7 +56,8 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
         }
     }
 
-    let response = test::call_service(&app, actix_request.set_payload(body).to_request()).await;
+    let mut response = test::call_service(&app, actix_request.set_payload(body).to_request()).await;
+    robine_web::secure(response.response_mut());
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     let body = to_bytes(response.into_body())
@@ -63,13 +67,5 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
     for (name, value) in &headers {
         builder = builder.header(name.as_str(), value.as_bytes());
     }
-    builder = builder
-        .header("x-content-type-options", "nosniff")
-        .header("x-frame-options", "DENY")
-        .header(
-            "content-security-policy",
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-        );
-
     Ok(builder.body(ResponseBody::from(body.to_vec()))?)
 }

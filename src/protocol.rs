@@ -3,6 +3,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizationError {
+    pub code: &'static str,
+    pub description: &'static str,
+}
+
+impl AuthorizationError {
+    fn new(code: &'static str, description: &'static str) -> Self {
+        Self { code, description }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveryDocument {
     pub issuer: String,
@@ -18,7 +30,7 @@ pub struct DiscoveryDocument {
     pub code_challenge_methods_supported: Vec<&'static str>,
     pub token_endpoint_auth_methods_supported: Vec<&'static str>,
     pub scopes_supported: Vec<String>,
-    pub claims_supported: Vec<&'static str>,
+    pub claims_supported: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,9 +40,12 @@ pub struct AuthorizationRequest {
     pub redirect_uri: String,
     pub scope: String,
     pub state: String,
+    #[serde(default)]
     pub nonce: String,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    #[serde(default)]
+    pub ui_locales: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -51,6 +66,20 @@ impl DiscoveryDocument {
         let issuer = snapshot.issuer(issuer_id)?;
         let base = issuer.url.trim_end_matches('/').to_owned();
 
+        let mut claims_supported = vec!["sub", "iss", "aud", "iat", "exp", "nonce"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut mapped_claims = snapshot
+            .configuration
+            .claims
+            .keys()
+            .filter(|claim| !claims_supported.contains(claim))
+            .cloned()
+            .collect::<Vec<_>>();
+        mapped_claims.sort();
+        claims_supported.extend(mapped_claims);
+
         Some(Self {
             issuer: base.clone(),
             authorization_endpoint: format!("{base}/authorize"),
@@ -69,7 +98,7 @@ impl DiscoveryDocument {
                 "none",
             ],
             scopes_supported: issuer.scopes.clone(),
-            claims_supported: vec!["sub", "iss", "aud", "iat", "exp", "nonce", "name", "email"],
+            claims_supported,
         })
     }
 }
@@ -79,27 +108,57 @@ impl AuthorizationRequest {
         &self,
         snapshot: &'a Snapshot,
         issuer_id: &str,
-    ) -> Result<&'a Client, &'static str> {
+    ) -> Result<&'a Client, AuthorizationError> {
         if snapshot.issuer(issuer_id).is_none() {
-            return Err("Unknown issuer");
+            return Err(AuthorizationError::new("invalid_request", "Unknown issuer"));
         }
         if self.response_type != "code" {
-            return Err("Only the authorization code flow is supported");
+            return Err(AuthorizationError::new(
+                "unsupported_response_type",
+                "Only the authorization code flow is supported",
+            ));
         }
-        if self.state.is_empty() || self.nonce.is_empty() {
-            return Err("state and nonce are required");
+        if self.state.is_empty() {
+            return Err(AuthorizationError::new(
+                "invalid_request",
+                "state is required",
+            ));
         }
         if !self
             .scope
             .split_ascii_whitespace()
             .any(|scope| scope == "openid")
         {
-            return Err("The openid scope is required");
+            return Err(AuthorizationError::new(
+                "invalid_scope",
+                "The openid scope is required",
+            ));
         }
 
-        let client = snapshot.client(&self.client_id).ok_or("Unknown client")?;
+        let client = snapshot
+            .client(&self.client_id)
+            .ok_or_else(|| AuthorizationError::new("invalid_request", "Unknown client"))?;
+        if !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == "authorization_code")
+        {
+            return Err(AuthorizationError::new(
+                "unauthorized_client",
+                "The client does not allow the authorization code grant",
+            ));
+        }
+        if client.nonce_required.unwrap_or(true) && self.nonce.is_empty() {
+            return Err(AuthorizationError::new(
+                "invalid_request",
+                "nonce is required for this client",
+            ));
+        }
         if !client.redirect_uris.contains(&self.redirect_uri) {
-            return Err("The redirect URI is not registered for this client");
+            return Err(AuthorizationError::new(
+                "invalid_request",
+                "The redirect URI is not registered for this client",
+            ));
         }
 
         let requested_scopes = self.scope.split_ascii_whitespace().collect::<Vec<_>>();
@@ -107,7 +166,10 @@ impl AuthorizationRequest {
             .iter()
             .any(|scope| !client.scopes.iter().any(|allowed| allowed == scope))
         {
-            return Err("One or more requested scopes are not allowed");
+            return Err(AuthorizationError::new(
+                "invalid_scope",
+                "One or more requested scopes are not allowed",
+            ));
         }
 
         let pkce_required = client.client_type == "public" || client.pkce_required.unwrap_or(true);
@@ -123,7 +185,10 @@ impl AuthorizationRequest {
                     .as_deref()
                     .is_some_and(valid_pkce_challenge))
         {
-            return Err("PKCE using S256 is required for this client");
+            return Err(AuthorizationError::new(
+                "invalid_request",
+                "PKCE using S256 is required for this client",
+            ));
         }
 
         Ok(client)
@@ -151,6 +216,7 @@ mod tests {
                     url: "https://id.example/default".to_owned(),
                     scopes: vec!["openid".to_owned()],
                     token_policy: crate::configuration::TokenPolicy::default(),
+                    branding: None,
                 }],
                 clients: vec![Client {
                     id: "web".to_owned(),
@@ -159,15 +225,18 @@ mod tests {
                     redirect_uris: vec!["https://app.example/callback".to_owned()],
                     post_logout_redirect_uris: vec![],
                     scopes: vec!["openid".to_owned()],
+                    grant_types: vec!["authorization_code".to_owned()],
                     pkce_required: None,
                     nonce_required: None,
                     consent_required: None,
                     authentication_method: None,
                     secret_reference: None,
+                    branding: None,
                 }],
                 branding: Branding::default(),
                 users: vec![],
                 claims: Default::default(),
+                authentication: Default::default(),
             },
             revision: "revision".to_owned(),
         }
@@ -184,10 +253,14 @@ mod tests {
             nonce: "nonce".to_owned(),
             code_challenge: Some("challenge".to_owned()),
             code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
         };
 
         assert_eq!(
-            request.validate(&snapshot(), "default").unwrap_err(),
+            request
+                .validate(&snapshot(), "default")
+                .unwrap_err()
+                .description,
             "The redirect URI is not registered for this client"
         );
     }
@@ -203,11 +276,54 @@ mod tests {
             nonce: "nonce".to_owned(),
             code_challenge: Some("too-short".to_owned()),
             code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
         };
 
         assert_eq!(
-            request.validate(&snapshot(), "default").unwrap_err(),
+            request
+                .validate(&snapshot(), "default")
+                .unwrap_err()
+                .description,
             "PKCE using S256 is required for this client"
+        );
+    }
+
+    #[test]
+    fn allows_an_omitted_nonce_only_when_client_policy_allows_it() {
+        let mut snapshot = snapshot();
+        snapshot.configuration.clients[0].nonce_required = Some(false);
+        let request = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: "web".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid".to_owned(),
+            state: "state".to_owned(),
+            nonce: String::new(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
+        };
+
+        assert!(request.validate(&snapshot, "default").is_ok());
+    }
+
+    #[test]
+    fn returns_a_standard_error_code_for_an_unsupported_response_type() {
+        let request = AuthorizationRequest {
+            response_type: "token".to_owned(),
+            client_id: "web".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid".to_owned(),
+            state: "state".to_owned(),
+            nonce: "nonce".to_owned(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
+        };
+
+        assert_eq!(
+            request.validate(&snapshot(), "default").unwrap_err().code,
+            "unsupported_response_type"
         );
     }
 }

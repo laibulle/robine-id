@@ -26,6 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 constant_time_eq = "0.4"
 getrandom = "0.3"
 hex = "0.4"
+hmac = "0.12"
 http-body-util = "0.1"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

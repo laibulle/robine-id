@@ -5,6 +5,7 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use rsa::{
     RsaPrivateKey,
     pkcs8::{EncodePrivateKey, LineEnding},
@@ -31,10 +32,31 @@ pub struct AccessGrant {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct PendingAuthorization {
+    pub issuer: String,
+    pub subject: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub state: String,
+    pub nonce: Option<String>,
+    pub code_challenge: Option<String>,
+    pub claims: Value,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct SigningKey {
     pub kid: String,
     pub private_key_pem: String,
+    pub modulus: String,
+    pub exponent: String,
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct PublicSigningKey {
+    pub kid: String,
     pub modulus: String,
     pub exponent: String,
 }
@@ -54,9 +76,26 @@ impl Database {
         let secret = env::var("KEY_ENCRYPTION_SECRET")
             .or_else(|_| env::var("SECRET_KEY_BASE"))
             .ok()?;
+        if secret.len() < 32 {
+            tracing::error!(
+                event = "database_configuration",
+                "KEY_ENCRYPTION_SECRET or SECRET_KEY_BASE must contain at least 32 bytes"
+            );
+            return None;
+        }
         let key_encryption_key: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+        let default_connections = if env::var_os("VERCEL").is_some() {
+            2
+        } else {
+            5
+        };
+        let maximum_connections = env::var("DATABASE_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| (1..=50).contains(value))
+            .unwrap_or(default_connections);
         PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(maximum_connections)
             .connect_lazy(&url)
             .ok()
             .map(|pool| Self {
@@ -66,7 +105,22 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
-        sqlx::migrate!().run(&self.pool).await.map_err(Into::into)
+        sqlx::migrate!().run(&self.pool).await?;
+        self.cleanup_expired_state().await
+    }
+
+    async fn cleanup_expired_state(&self) -> Result<(), sqlx::Error> {
+        for statement in [
+            "DELETE FROM authorization_codes WHERE expires_at <= now()",
+            "DELETE FROM access_tokens WHERE expires_at <= now()",
+            "DELETE FROM pending_authorizations WHERE expires_at <= now()",
+            "DELETE FROM logout_transactions WHERE expires_at <= now()",
+            "DELETE FROM authenticated_sessions WHERE absolute_expires_at <= now() - interval '7 days' OR revoked_at <= now() - interval '7 days'",
+            "DELETE FROM authentication_rate_limits WHERE window_started_at <= now() - interval '30 days'",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
+        Ok(())
     }
 
     pub async fn healthy(&self) -> bool {
@@ -165,11 +219,147 @@ impl Database {
                END
              RETURNING attempts",
         )
-        .bind(digest(key))
+        .bind(self.private_digest(key))
         .bind(window_seconds)
         .fetch_one(&self.pool)
         .await?;
         Ok(attempts <= limit)
+    }
+
+    pub async fn start_session(
+        &self,
+        subject: &str,
+        maximum: i64,
+        absolute_timeout_seconds: i64,
+    ) -> Result<String, sqlx::Error> {
+        let session = random_token();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO authenticated_sessions
+             (session_hash, subject, absolute_expires_at)
+             VALUES ($1, $2, now() + ($3 * interval '1 second'))",
+        )
+        .bind(digest(&session))
+        .bind(subject)
+        .bind(absolute_timeout_seconds)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "WITH excess AS (
+               SELECT session_hash FROM authenticated_sessions
+               WHERE subject = $1 AND revoked_at IS NULL
+               ORDER BY created_at DESC OFFSET $2
+             )
+             UPDATE authenticated_sessions SET revoked_at = now()
+             WHERE session_hash IN (SELECT session_hash FROM excess)",
+        )
+        .bind(subject)
+        .bind(maximum)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(session)
+    }
+
+    pub async fn validate_session(
+        &self,
+        session: &str,
+        idle_timeout_seconds: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "UPDATE authenticated_sessions SET last_seen_at = now()
+             WHERE session_hash = $1 AND revoked_at IS NULL
+               AND absolute_expires_at > now()
+               AND last_seen_at > now() - ($2 * interval '1 second')
+             RETURNING subject",
+        )
+        .bind(digest(session))
+        .bind(idle_timeout_seconds)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn revoke_session(&self, session: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE authenticated_sessions SET revoked_at = now()
+             WHERE session_hash = $1",
+        )
+        .bind(digest(session))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn issue_pending_authorization(
+        &self,
+        grant: &AuthorizationGrant,
+        state: &str,
+    ) -> Result<String, sqlx::Error> {
+        let transaction = random_token();
+        sqlx::query(
+            "INSERT INTO pending_authorizations
+             (transaction_hash, issuer, subject, client_id, redirect_uri, scopes, state,
+              nonce, code_challenge, claims, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(digest(&transaction))
+        .bind(&grant.issuer)
+        .bind(&grant.subject)
+        .bind(&grant.client_id)
+        .bind(&grant.redirect_uri)
+        .bind(&grant.scopes)
+        .bind(state)
+        .bind(&grant.nonce)
+        .bind(&grant.code_challenge)
+        .bind(&grant.claims)
+        .bind(grant.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(transaction)
+    }
+
+    pub async fn consume_pending_authorization(
+        &self,
+        transaction: &str,
+    ) -> Result<Option<PendingAuthorization>, sqlx::Error> {
+        sqlx::query_as(
+            "DELETE FROM pending_authorizations WHERE transaction_hash = $1
+             RETURNING issuer, subject, client_id, redirect_uri, scopes, state, nonce,
+                       code_challenge, claims, expires_at",
+        )
+        .bind(digest(transaction))
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn issue_logout_transaction(
+        &self,
+        return_to: Option<&str>,
+    ) -> Result<String, sqlx::Error> {
+        let transaction = random_token();
+        sqlx::query(
+            "INSERT INTO logout_transactions (transaction_hash, return_to, expires_at)
+             VALUES ($1, $2, now() + interval '5 minutes')",
+        )
+        .bind(digest(&transaction))
+        .bind(return_to)
+        .execute(&self.pool)
+        .await?;
+        Ok(transaction)
+    }
+
+    pub async fn consume_logout_transaction(
+        &self,
+        transaction: &str,
+    ) -> Result<Option<Option<String>>, sqlx::Error> {
+        sqlx::query_scalar(
+            "DELETE FROM logout_transactions
+             WHERE transaction_hash = $1 AND expires_at > now()
+             RETURNING return_to",
+        )
+        .bind(digest(transaction))
+        .fetch_optional(&self.pool)
+        .await
     }
 
     pub async fn signing_key(&self, issuer: &str) -> Result<SigningKey, sqlx::Error> {
@@ -177,7 +367,7 @@ impl Database {
             return Ok(key);
         }
 
-        let generated = generate_signing_key();
+        let generated = generate_signing_key_async().await?;
         let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem);
         sqlx::query(
             "INSERT INTO signing_keys
@@ -196,6 +386,109 @@ impl Database {
         self.find_signing_key(issuer)
             .await?
             .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn verification_signing_keys(
+        &self,
+        issuer: &str,
+    ) -> Result<Vec<SigningKey>, sqlx::Error> {
+        let _ = self.signing_key(issuer).await?;
+        let stored = sqlx::query_as::<_, StoredSigningKey>(
+            "SELECT kid, private_key_ciphertext, private_key_nonce, modulus, exponent
+             FROM signing_keys WHERE issuer = $1
+             UNION ALL
+             SELECT kid, private_key_ciphertext, private_key_nonce, modulus, exponent
+             FROM retained_signing_keys WHERE issuer = $1",
+        )
+        .bind(issuer)
+        .fetch_all(&self.pool)
+        .await?;
+        stored
+            .into_iter()
+            .map(|key| self.decrypt_private_key(key))
+            .collect()
+    }
+
+    pub async fn public_signing_keys(
+        &self,
+        issuer: &str,
+    ) -> Result<Vec<PublicSigningKey>, sqlx::Error> {
+        let _ = self.signing_key(issuer).await?;
+        sqlx::query_as(
+            "SELECT kid, modulus, exponent FROM signing_keys WHERE issuer = $1
+             UNION ALL
+             SELECT kid, modulus, exponent FROM retained_signing_keys WHERE issuer = $1
+             ORDER BY kid",
+        )
+        .bind(issuer)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn rotate_signing_key(
+        &self,
+        issuer: &str,
+        rotation_id: &str,
+    ) -> Result<(SigningKey, bool), sqlx::Error> {
+        let _ = self.signing_key(issuer).await?;
+        let mut transaction = self.pool.begin().await?;
+        let current_rotation_id: Option<String> =
+            sqlx::query_scalar("SELECT rotation_id FROM signing_keys WHERE issuer = $1 FOR UPDATE")
+                .bind(issuer)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if current_rotation_id.as_deref() == Some(rotation_id) {
+            transaction.commit().await?;
+            tracing::info!(
+                event = "signing_key_rotation",
+                outcome = "unchanged",
+                issuer,
+                rotation_id
+            );
+            let key = self
+                .find_signing_key(issuer)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?;
+            return Ok((key, false));
+        }
+
+        let generated = generate_signing_key_async().await?;
+        let (ciphertext, nonce) = self.encrypt_private_key(&generated.private_key_pem);
+
+        sqlx::query(
+            "INSERT INTO retained_signing_keys
+             (issuer, kid, private_key_ciphertext, private_key_nonce, modulus, exponent)
+             SELECT issuer, kid, private_key_ciphertext, private_key_nonce, modulus, exponent
+             FROM signing_keys WHERE issuer = $1
+             ON CONFLICT (issuer, kid) DO NOTHING",
+        )
+        .bind(issuer)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE signing_keys SET
+               kid = $2, private_key_ciphertext = $3, private_key_nonce = $4,
+               modulus = $5, exponent = $6, rotation_id = $7, created_at = now()
+             WHERE issuer = $1",
+        )
+        .bind(issuer)
+        .bind(&generated.kid)
+        .bind(ciphertext)
+        .bind(nonce)
+        .bind(&generated.modulus)
+        .bind(&generated.exponent)
+        .bind(rotation_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        tracing::info!(
+            event = "signing_key_rotation",
+            outcome = "rotated",
+            issuer,
+            rotation_id,
+            kid = %generated.kid
+        );
+        Ok((generated, true))
     }
 
     async fn find_signing_key(&self, issuer: &str) -> Result<Option<SigningKey>, sqlx::Error> {
@@ -218,6 +511,13 @@ impl Database {
             .encrypt(Nonce::from_slice(&nonce), private_key.as_bytes())
             .expect("private key encryption failed");
         (ciphertext, nonce.to_vec())
+    }
+
+    fn private_digest(&self, value: &str) -> Vec<u8> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key_encryption_key)
+            .expect("HMAC accepts a 256-bit key");
+        mac.update(value.as_bytes());
+        mac.finalize().into_bytes().to_vec()
     }
 
     fn decrypt_private_key(&self, key: StoredSigningKey) -> Result<SigningKey, sqlx::Error> {
@@ -269,4 +569,10 @@ fn generate_signing_key() -> SigningKey {
         modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
         exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
     }
+}
+
+async fn generate_signing_key_async() -> Result<SigningKey, sqlx::Error> {
+    tokio::task::spawn_blocking(generate_signing_key)
+        .await
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))
 }
