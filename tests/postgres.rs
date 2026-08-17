@@ -21,6 +21,13 @@ async fn persists_and_atomically_consumes_security_state() {
         .expect("valid database environment")
         .expect("DATABASE_URL and encryption secret");
     database.migrate().await.expect("migrations");
+    let migration_status = database
+        .migration_status()
+        .await
+        .expect("read-only migration diagnostics");
+    assert!(migration_status.current);
+    assert_eq!(migration_status.applied, migration_status.expected);
+    assert_eq!(migration_status.failed, 0);
     assert_eq!(
         database
             .statement_timeout_milliseconds()
@@ -1123,6 +1130,18 @@ async fn persists_and_atomically_consumes_security_state() {
             .len(),
         2
     );
+    assert!(
+        database
+            .has_signing_key(&issuer)
+            .await
+            .expect("read-only active signing-key diagnostic")
+    );
+    let signing_key_inventory = database
+        .signing_key_inventory()
+        .await
+        .expect("decrypt read-only signing-key inventory");
+    assert!(signing_key_inventory.active >= 1);
+    assert!(signing_key_inventory.retained >= 1);
     assert_eq!(
         database
             .prune_retained_signing_keys()

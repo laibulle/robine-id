@@ -25,6 +25,7 @@ RUN --mount=type=cache,id=robine-cargo-registry,target=/usr/local/cargo/registry
       --bin config_apply \
       --bin config_effective \
       --bin robine-id-healthcheck \
+      --bin robine-id-doctor \
       --bin reencrypt_keys \
       --bin generate_deployment_secrets \
       --bin generate_encryption_secret \
@@ -41,6 +42,7 @@ RUN --mount=type=cache,id=robine-cargo-registry,target=/usr/local/cargo/registry
       target/release/config_apply \
       target/release/config_effective \
       target/release/robine-id-healthcheck \
+      target/release/robine-id-doctor \
       target/release/reencrypt_keys \
       target/release/generate_deployment_secrets \
       target/release/generate_encryption_secret \

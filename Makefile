@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective deployment-secrets deployment-secret-files encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective doctor deployment-secrets deployment-secret-files encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -27,6 +27,7 @@ help:
 	@echo "  make config-preview [CONFIG=path]  Preview Rust configuration reconciliation"
 	@echo "  make config-apply [CONFIG=path]    Validate and atomically apply in the command runtime"
 	@echo "  make config-effective Print the redacted effective Rust configuration"
+	@echo "  make doctor     Inspect configuration, database, migrations, and signing keys read-only"
 	@echo "  make deployment-secrets  Generate independent release database/encryption secrets"
 	@echo "  make deployment-secret-files [SECRET_DIRECTORY=deploy/secrets]  Create protected secret files once"
 	@echo "  make encryption-secret  Generate one production key-encryption secret"
@@ -89,6 +90,10 @@ config-apply:
 
 config-effective:
 	cargo run --bin config_effective
+
+doctor: dev-db
+	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
+		cargo run --bin robine-id-doctor
 
 deployment-secrets:
 	cargo run --bin generate_deployment_secrets

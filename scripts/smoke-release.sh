@@ -1224,6 +1224,11 @@ compose exec --no-TTY robine-id config_apply | grep -q '^unchanged'
 compose exec --no-TTY postgres \
   psql --username robine_id --dbname robine_id --tuples-only --command \
   "SELECT count(*) FROM _sqlx_migrations;" | grep -Eq '[1-9]'
+doctor_report="$temporary_directory/doctor.json"
+compose exec --no-TTY robine-id robine-id-doctor >"$doctor_report"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"ready"' "$doctor_report"
+grep -Eq '"current"[[:space:]]*:[[:space:]]*true' "$doctor_report"
+grep -Eq '"failed"[[:space:]]*:[[:space:]]*0' "$doctor_report"
 
 container_id=$(compose ps --quiet robine-id)
 postgres_container_id=$(compose ps --quiet postgres)
@@ -1252,7 +1257,7 @@ docker run --detach --name "$backchannel_container" \
   -c "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n' | nc -l -p $redirect_port; done" \
   >/dev/null
 docker run --rm --entrypoint /bin/sh "$image" -c \
-  'test -x /usr/local/bin/robine-id-healthcheck && ! command -v curl'
+  'test -x /usr/local/bin/robine-id-healthcheck && test -x /usr/local/bin/robine-id-doctor && ! command -v curl'
 embedded_configuration="$temporary_directory/embedded-config.json"
 docker run --rm --entrypoint /usr/local/bin/config_effective "$image" \
   >"$embedded_configuration"

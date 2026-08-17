@@ -621,6 +621,13 @@ impl Database {
         })
     }
 
+    pub async fn has_signing_key(&self, issuer: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM signing_keys WHERE issuer = $1)")
+            .bind(issuer)
+            .fetch_one(&self.pool)
+            .await
+    }
+
     pub async fn register_client_assertion(
         &self,
         issuer: &str,
@@ -2247,13 +2254,14 @@ impl Drop for Database {
 fn migration_status_from_rows(rows: &[(i64, Vec<u8>, bool)]) -> DatabaseMigrationStatus {
     let expected = MIGRATOR.iter().count();
     let current = rows.len() == expected
-        && rows.iter().zip(MIGRATOR.iter()).all(
-            |((version, checksum, success), migration)| {
+        && rows
+            .iter()
+            .zip(MIGRATOR.iter())
+            .all(|((version, checksum, success), migration)| {
                 *success
                     && *version == migration.version
                     && checksum.as_slice() == migration.checksum.as_ref()
-            },
-        );
+            });
     DatabaseMigrationStatus {
         applied: rows.iter().filter(|(_, _, success)| *success).count(),
         expected,

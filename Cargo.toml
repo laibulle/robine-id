@@ -21,6 +21,10 @@ name = "robine-id-healthcheck"
 path = "src/bin/healthcheck.rs"
 
 [[bin]]
+name = "robine-id-doctor"
+path = "src/bin/doctor.rs"
+
+[[bin]]
 name = "reencrypt_keys"
 path = "src/bin/reencrypt_keys.rs"
 
