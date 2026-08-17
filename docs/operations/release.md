@@ -51,6 +51,36 @@ make deployment-secrets
 Copy both emitted assignments into `.env.release`. Each value contains an independent 384 bits of
 operating-system entropy and uses only environment-file-safe Base64URL characters.
 
+To keep the database password and wrapping key out of the container environment, use the optional
+Compose secrets overlay instead. Copy `.env.release.files.example` to `.env.release.files`, create
+the two files named by `ROBINE_ID_POSTGRES_PASSWORD_PATH` and
+`ROBINE_ID_KEY_ENCRYPTION_SECRET_PATH`, store only the corresponding generated value in each file,
+and restrict the host files to the deployment account:
+
+```sh
+install -d -m 700 deploy/secrets
+install -m 600 /dev/null deploy/secrets/postgres_password
+install -m 600 /dev/null deploy/secrets/key_encryption_secret
+# Paste only each generated value into its matching file, without the NAME= prefix.
+cp .env.release.files.example .env.release.files
+```
+
+Then add `-f compose.release.secrets.yml` and set `ROBINE_ID_ENV_FILE=.env.release.files` on every
+Compose invocation, for example:
+
+```sh
+ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.files \
+  -f compose.release.yml -f compose.release.secrets.yml config --quiet
+ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.files \
+  -f compose.release.yml -f compose.release.secrets.yml up -d --build --wait
+```
+
+The overlay supplies `POSTGRES_PASSWORD_FILE` to PostgreSQL, `PGPASSWORD_FILE` to Robine ID, and
+`KEY_ENCRYPTION_SECRET_FILE` only to Robine ID. Never define a direct value and its `*_FILE`
+counterpart together. The runtime accepts the same file pattern for `DATABASE_URL`, the previous
+wrapping key used during rotation, and the `SECRET_KEY_BASE` compatibility alias; reads are limited
+to 16 KiB and errors never reproduce the path or value.
+
 `KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
 requires both the PostgreSQL backup and the matching encryption secret. Do not rotate this secret
 independently of stored signing keys; use the staged procedure below.

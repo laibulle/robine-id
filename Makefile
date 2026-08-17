@@ -74,6 +74,7 @@ compose-validate:
 	docker compose --profile runtime -f compose.dev.yml config --quiet
 	docker compose --profile runtime -f compose.dev.yml -f compose.dev.host.yml config --quiet
 	ROBINE_ID_ENV_FILE=.env.release.example docker compose -f compose.release.yml config --quiet
+	ROBINE_ID_ENV_FILE=.env.release.files.example docker compose --env-file .env.release.files.example -f compose.release.yml -f compose.release.secrets.yml config --quiet
 
 config-validate:
 	cargo run --bin validate_config

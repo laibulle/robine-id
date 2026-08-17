@@ -774,6 +774,11 @@ deployment-specific entropy. `DATABASE_URL` is accepted for managed databases; t
 stack uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `POSTGRES_PASSWORD`.
 The runtime keeps direct and component-built connection URLs and database passwords in zeroizing
 transient storage while SQLx constructs its connection pool.
+Every sensitive database input also accepts a mutually exclusive file source: `DATABASE_URL_FILE`,
+`PGPASSWORD_FILE`, `POSTGRES_PASSWORD_FILE`, `KEY_ENCRYPTION_SECRET_FILE`,
+`KEY_ENCRYPTION_SECRET_PREVIOUS_FILE`, or `SECRET_KEY_BASE_FILE`. Secret files are bounded to
+16 KiB and loaded into zeroizing memory. This supports Docker/Swarm/Kubernetes secret mounts
+without exposing the values through the container environment.
 Generate the wrapping secret with `make encryption-secret`; it emits one environment-file-safe
 `KEY_ENCRYPTION_SECRET` containing 384 bits of operating-system entropy. Store that value with the
 matching database backups and do not commit it.
@@ -792,6 +797,18 @@ docker compose --env-file .env.release -f compose.release.yml build
 docker compose --env-file .env.release -f compose.release.yml up -d --wait
 docker compose --env-file .env.release -f compose.release.yml ps
 ```
+
+For file-mounted PostgreSQL and wrapping secrets, copy `.env.release.files.example` to
+`.env.release.files`, write the generated values to the two paths declared there with mode `0600`,
+and add the overlay to each Compose command:
+
+```sh
+ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.files \
+  -f compose.release.yml -f compose.release.secrets.yml up -d --build --wait
+```
+
+The same PostgreSQL password file is mounted only into PostgreSQL and Robine ID; the wrapping-key
+file is mounted only into Robine ID. Do not retain the direct variables alongside their file forms.
 
 The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. PostgreSQL data,
 including encrypted signing keys and short-lived protocol state, lives in the persistent

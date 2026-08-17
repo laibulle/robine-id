@@ -13,6 +13,11 @@ the shared durable store for protocol state and encrypted signing keys.
 
 - Production MUST provide PostgreSQL through `DATABASE_URL` or the documented `PG*` variables.
 - Production MUST provide `KEY_ENCRYPTION_SECRET` with at least 32 bytes of deployment-specific entropy.
+- Sensitive database and wrapping-key inputs MUST also accept the corresponding `*_FILE` source.
+  Direct and file sources for the same input MUST be mutually exclusive. File reads MUST be
+  bounded to 16 KiB, accept one conventional trailing line ending, reject unreadable and invalid
+  UTF-8 content without disclosing the path or content, and keep the loaded value in zeroizing
+  memory.
 - The canonical operator generator MUST emit an environment-file-safe `KEY_ENCRYPTION_SECRET`
   containing exactly 384 bits of operating-system entropy, zeroize its raw random buffer, and be
   included in the production image.
@@ -104,6 +109,9 @@ rotation. File-backed hot reload is a conventional-server feature; Vercel config
   without reproducing the submitted value.
 - Compose proves the application container is non-root, read-only, capability-free, and protected
   by `no-new-privileges`.
+- The optional Compose secrets overlay MUST mount the PostgreSQL password and wrapping key as
+  files shared only with the services that consume them, without placing either value in the
+  container environment.
 - The release gate MUST prove that SIGTERM makes an instance not-ready but live during drainage and that the container exits with status zero.
 - The Vercel release binary compiles from the same Actix routes.
 - Vercel adapter tests MUST prove sequential and concurrent requests reuse one warm Actix worker.

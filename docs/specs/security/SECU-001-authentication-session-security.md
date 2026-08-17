@@ -34,6 +34,9 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - `DATABASE_URL`, `PGPASSWORD`, `POSTGRES_PASSWORD`, and any component-built connection URL MUST
   use zeroizing wrappers during configuration parsing. Percent-encoding a component password MUST
   NOT place it in an ordinary owned string or a general-purpose URL object.
+- File-backed database and wrapping-key secrets MUST be read through a bounded buffer, zeroized on
+  every success and failure path, and reject ambiguous direct-plus-file configuration. Diagnostics
+  MUST identify only the fixed environment variable name, never the submitted path or secret.
 - Failed-login responses MUST not disclose account existence by default.
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.

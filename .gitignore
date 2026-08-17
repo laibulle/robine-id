@@ -40,7 +40,10 @@ npm-debug.log
 
 # Local release secrets.
 /.env.release
+/.env.release.files
 /.env.rust
+/deploy/secrets/*
+!/deploy/secrets/.gitkeep
 
 # Database files
 *.db
