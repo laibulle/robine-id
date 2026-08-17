@@ -70,8 +70,9 @@ make release-smoke
 checks migrations, readiness, documentation, discovery, CLI utilities, the non-root user, and
 strict non-leaking rejection of invalid database and Actix server environments. It
 then pushes and consumes a single-use authorization request across instances, delivers and
-exchanges a form-posted code, issues and revokes a machine token, and completes login, consented offline access, PKCE code exchange, refresh rotation, UserInfo,
-introspection, revocation, replay rejection, and logout across two Actix containers sharing
+exchanges a form-posted code, rejects correctly credentialed disabled identities and applications,
+issues and revokes a machine token, and completes login, consented offline access, PKCE code exchange, refresh rotation, UserInfo,
+introspection, revocation, replay rejection, OIDC Session Management, and RP/front/back-channel logout across two Actix containers sharing
 PostgreSQL. It sends SIGTERM to the peer, verifies not-ready/live drainage and a zero exit status,
 then rotates the signing key twice with the same idempotency key. Finally, it takes a
 logical dump, recreates the database, restores the dump, and proves that the access grant, active
@@ -104,7 +105,8 @@ Verify the local service and public proxy:
 ```sh
 curl --fail http://127.0.0.1:4001/health/ready
 curl --fail http://127.0.0.1:4001/metrics
-curl --fail https://id.base59.dev/default/.well-known/openid-configuration
+curl --fail https://id.base59.dev/.well-known/openid-configuration/default
+curl --fail https://id.base59.dev/.well-known/oauth-authorization-server/default
 ```
 
 The discovery document must advertise `https://id.base59.dev/default` and HTTPS endpoints. Complete
@@ -170,7 +172,8 @@ For scheduled rollover, set `token_policy.signing_key_rotation_interval` to 3,60
 31,536,000 seconds. The conventional server checks every five minutes and during startup. The age
 decision and update are serialized on the active PostgreSQL row, so replicas do not generate
 multiple active replacements. Keep the manual command for emergency or deployment-specific
-rotation.
+rotation. An issuer configured with `enabled: false` is skipped by automatic rollover while its
+active and retained rows remain stored; retained-key expiry pruning continues normally.
 
 Conventional servers prune elapsed retained keys at startup and with hourly database maintenance.
 The operation is idempotent and never targets the active key. Run it explicitly when desired:

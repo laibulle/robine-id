@@ -218,6 +218,7 @@ pub struct AccessGrant {
     pub mfa_verified: bool,
     pub claims: Value,
     pub authorization_details: Value,
+    pub actor: Option<Value>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -233,6 +234,7 @@ pub struct IntrospectionGrant {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub authorization_details: Value,
+    pub actor: Option<Value>,
     pub expires_at: DateTime<Utc>,
     pub issued_at: DateTime<Utc>,
 }
@@ -247,6 +249,25 @@ pub struct DeviceAuthorization {
     pub expires_at: DateTime<Utc>,
 }
 
+pub struct DeviceAuthorizationRequest<'a> {
+    pub issuer: &'a str,
+    pub client_id: &'a str,
+    pub scopes: &'a [String],
+    pub resource: Option<&'a str>,
+    pub authorization_details: &'a Value,
+    pub lifetime_seconds: i64,
+    pub poll_interval_seconds: i32,
+}
+
+pub struct DeviceAuthorizationDecision<'a> {
+    pub subject: &'a str,
+    pub claims: &'a Value,
+    pub auth_time: i64,
+    pub session_id: Option<&'a str>,
+    pub approved: bool,
+    pub mfa_verified: bool,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct DeviceGrant {
     pub issuer: String,
@@ -254,6 +275,7 @@ pub struct DeviceGrant {
     pub client_id: String,
     pub scopes: Vec<String>,
     pub resource: Option<String>,
+    pub session_id: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
@@ -265,7 +287,7 @@ pub struct DeviceGrant {
 pub enum DevicePoll {
     Pending,
     SlowDown,
-    Approved(DeviceGrant),
+    Approved(Box<DeviceGrant>),
     Denied,
     Expired,
     Invalid,
@@ -279,11 +301,20 @@ pub struct RefreshGrant {
     pub scopes: Vec<String>,
     pub resource: Option<String>,
     pub dpop_jkt: Option<String>,
+    pub session_id: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
     pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Default)]
+pub struct RefreshTokenSelection<'a> {
+    pub scopes: Option<&'a [String]>,
+    pub resource: Option<&'a str>,
+    pub authorization_details: Option<&'a Value>,
+    pub dpop_jkt: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -309,6 +340,7 @@ struct StoredRefreshToken {
     scopes: Vec<String>,
     resource: Option<String>,
     dpop_jkt: Option<String>,
+    session_id: Option<String>,
     auth_time: Option<i64>,
     mfa_verified: bool,
     claims: Value,
@@ -331,6 +363,7 @@ pub struct PendingAuthorization {
     pub response_mode: Option<String>,
     pub resource: Option<String>,
     pub dpop_jkt: Option<String>,
+    pub session_id: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
@@ -341,8 +374,23 @@ pub struct PendingAuthorization {
 #[derive(Debug, sqlx::FromRow)]
 pub struct ValidatedSession {
     pub subject: String,
+    pub session_id: String,
     pub authenticated_at: DateTime<Utc>,
     pub mfa_verified: bool,
+}
+
+#[derive(Debug)]
+pub struct StartedSession {
+    pub token: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct LogoutTarget {
+    pub subject: String,
+    pub session_id: String,
+    pub issuer: String,
+    pub client_id: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -636,12 +684,13 @@ impl Database {
     ) -> Result<String, sqlx::Error> {
         let code = random_token();
         let hash = digest(&code);
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO authorization_codes
              (code_hash, issuer, subject, client_id, redirect_uri, scopes, nonce, code_challenge,
-              response_mode, resource, dpop_jkt, auth_time, mfa_verified, claims,
+              response_mode, resource, dpop_jkt, session_id, auth_time, mfa_verified, claims,
               authorization_details, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         )
         .bind(hash)
         .bind(&grant.issuer)
@@ -654,13 +703,27 @@ impl Database {
         .bind(&grant.response_mode)
         .bind(&grant.resource)
         .bind(&grant.dpop_jkt)
+        .bind(&grant.session_id)
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
         .bind(&grant.authorization_details)
         .bind(grant.expires_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        if let Some(session_id) = &grant.session_id {
+            sqlx::query(
+                "INSERT INTO authenticated_session_clients (session_id, issuer, client_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(session_id)
+            .bind(&grant.issuer)
+            .bind(&grant.client_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(code)
     }
 
@@ -877,8 +940,8 @@ impl Database {
         sqlx::query_as::<_, AuthorizationGrant>(
             "DELETE FROM authorization_codes WHERE code_hash = $1
              RETURNING issuer, subject, client_id, redirect_uri, scopes, nonce,
-                       code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-                       claims, authorization_details, expires_at",
+                       code_challenge, response_mode, resource, dpop_jkt, session_id, auth_time,
+                       mfa_verified, claims, authorization_details, expires_at",
         )
         .bind(digest(code))
         .fetch_optional(&self.pool)
@@ -887,18 +950,12 @@ impl Database {
 
     pub async fn issue_device_authorization(
         &self,
-        issuer: &str,
-        client_id: &str,
-        scopes: &[String],
-        resource: Option<&str>,
-        authorization_details: &Value,
-        lifetime_seconds: i64,
-        poll_interval_seconds: i32,
+        request: DeviceAuthorizationRequest<'_>,
     ) -> Result<(String, String), sqlx::Error> {
-        if !(300..=1_800).contains(&lifetime_seconds)
-            || !(5..=60).contains(&poll_interval_seconds)
-            || scopes.is_empty()
-            || scopes.len() > 256
+        if !(300..=1_800).contains(&request.lifetime_seconds)
+            || !(5..=60).contains(&request.poll_interval_seconds)
+            || request.scopes.is_empty()
+            || request.scopes.len() > 256
         {
             return Err(sqlx::Error::Protocol(
                 "invalid device authorization policy".to_owned(),
@@ -916,13 +973,13 @@ impl Database {
             )
             .bind(digest(&device_code))
             .bind(digest(&user_code))
-            .bind(issuer)
-            .bind(client_id)
-            .bind(scopes)
-            .bind(resource)
-            .bind(authorization_details)
-            .bind(poll_interval_seconds)
-            .bind(lifetime_seconds)
+            .bind(request.issuer)
+            .bind(request.client_id)
+            .bind(request.scopes)
+            .bind(request.resource)
+            .bind(request.authorization_details)
+            .bind(request.poll_interval_seconds)
+            .bind(request.lifetime_seconds)
             .execute(&self.pool)
             .await?;
             if result.rows_affected() == 1 {
@@ -992,29 +1049,51 @@ impl Database {
     pub async fn decide_device_authorization(
         &self,
         transaction: &str,
-        subject: &str,
-        claims: &Value,
-        auth_time: i64,
-        approved: bool,
-        mfa_verified: bool,
+        decision: DeviceAuthorizationDecision<'_>,
     ) -> Result<bool, sqlx::Error> {
-        let status = if approved { "approved" } else { "denied" };
+        let status = if decision.approved {
+            "approved"
+        } else {
+            "denied"
+        };
         let empty_claims = serde_json::json!({});
-        let result = sqlx::query(
+        let mut database_transaction = self.pool.begin().await?;
+        let updated = sqlx::query_as::<_, (String, String)>(
             "UPDATE device_authorizations
              SET status = $1, subject = $2, claims = $3, auth_time = $4, mfa_verified = $5,
-                 decision_at = now(), verification_hash = NULL
-             WHERE verification_hash = $6 AND status = 'pending' AND expires_at > now()",
+                 session_id = $6, decision_at = now(), verification_hash = NULL
+             WHERE verification_hash = $7 AND status = 'pending' AND expires_at > now()
+             RETURNING issuer, client_id",
         )
         .bind(status)
-        .bind(approved.then_some(subject))
-        .bind(if approved { claims } else { &empty_claims })
-        .bind(approved.then_some(auth_time))
-        .bind(approved && mfa_verified)
+        .bind(decision.approved.then_some(decision.subject))
+        .bind(if decision.approved {
+            decision.claims
+        } else {
+            &empty_claims
+        })
+        .bind(decision.approved.then_some(decision.auth_time))
+        .bind(decision.approved && decision.mfa_verified)
+        .bind(decision.approved.then_some(decision.session_id).flatten())
         .bind(digest(transaction))
-        .execute(&self.pool)
+        .fetch_optional(&mut *database_transaction)
         .await?;
-        Ok(result.rows_affected() == 1)
+        if let (Some(session_id), Some((issuer, client_id))) = (decision.session_id, &updated)
+            && decision.approved
+        {
+            sqlx::query(
+                "INSERT INTO authenticated_session_clients (session_id, issuer, client_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(session_id)
+            .bind(issuer)
+            .bind(client_id)
+            .execute(&mut *database_transaction)
+            .await?;
+        }
+        database_transaction.commit().await?;
+        Ok(updated.is_some())
     }
 
     pub async fn poll_device_authorization(
@@ -1031,6 +1110,7 @@ impl Database {
             client_id: String,
             scopes: Vec<String>,
             resource: Option<String>,
+            session_id: Option<String>,
             auth_time: Option<i64>,
             mfa_verified: bool,
             claims: Value,
@@ -1043,7 +1123,8 @@ impl Database {
         let code_hash = digest(device_code);
         let mut transaction = self.pool.begin().await?;
         let stored = sqlx::query_as::<_, StoredDeviceAuthorization>(
-            "SELECT status, issuer, subject, client_id, scopes, resource, auth_time, mfa_verified, claims,
+            "SELECT status, issuer, subject, client_id, scopes, resource, session_id, auth_time,
+                    mfa_verified, claims,
                     authorization_details,
                     expires_at, poll_interval, last_polled_at
              FROM device_authorizations
@@ -1087,18 +1168,19 @@ impl Database {
             let (Some(subject), Some(auth_time)) = (stored.subject, stored.auth_time) else {
                 return Ok(DevicePoll::Invalid);
             };
-            return Ok(DevicePoll::Approved(DeviceGrant {
+            return Ok(DevicePoll::Approved(Box::new(DeviceGrant {
                 issuer: stored.issuer,
                 subject,
                 client_id: stored.client_id,
                 scopes: stored.scopes,
                 resource: stored.resource,
+                session_id: stored.session_id,
                 auth_time: Some(auth_time),
                 mfa_verified: stored.mfa_verified,
                 claims: stored.claims,
                 authorization_details: stored.authorization_details,
                 expires_at: stored.expires_at,
-            }));
+            })));
         }
 
         let too_soon = stored.last_polled_at.is_some_and(|last_polled_at| {
@@ -1146,8 +1228,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO access_tokens
              (token_hash, issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-              auth_time, mfa_verified, claims, authorization_details, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+              auth_time, mfa_verified, claims, authorization_details, actor, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(digest(token))
         .bind(&grant.issuer)
@@ -1161,6 +1243,7 @@ impl Database {
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
         .bind(&grant.authorization_details)
+        .bind(&grant.actor)
         .bind(grant.expires_at)
         .execute(&self.pool)
         .await?;
@@ -1170,7 +1253,7 @@ impl Database {
     pub async fn access_grant(&self, token: &str) -> Result<Option<AccessGrant>, sqlx::Error> {
         sqlx::query_as::<_, AccessGrant>(
             "SELECT issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-                    auth_time, mfa_verified, claims, authorization_details, expires_at
+                    auth_time, mfa_verified, claims, authorization_details, actor, expires_at
              FROM access_tokens WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(digest(token))
@@ -1185,7 +1268,7 @@ impl Database {
     ) -> Result<Option<IntrospectionGrant>, sqlx::Error> {
         sqlx::query_as::<_, IntrospectionGrant>(
             "SELECT issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-                    auth_time, mfa_verified, authorization_details, expires_at, created_at AS issued_at
+                    auth_time, mfa_verified, authorization_details, actor, expires_at, created_at AS issued_at
              FROM access_tokens
              WHERE token_hash = $1 AND issuer = $2 AND expires_at > now()",
         )
@@ -1226,15 +1309,12 @@ impl Database {
         token: &str,
         issuer: &str,
         client_id: &str,
-        requested_scopes: Option<&[String]>,
-        requested_resource: Option<&str>,
-        requested_authorization_details: Option<&Value>,
-        requested_dpop_jkt: Option<&str>,
+        selection: RefreshTokenSelection<'_>,
     ) -> Result<RefreshRotation, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let stored = sqlx::query_as::<_, StoredRefreshToken>(
-            "SELECT family_id, issuer, subject, client_id, scopes, resource, dpop_jkt, auth_time,
-                    mfa_verified, claims, authorization_details, expires_at,
+            "SELECT family_id, issuer, subject, client_id, scopes, resource, dpop_jkt, session_id,
+                    auth_time, mfa_verified, claims, authorization_details, expires_at,
                     consumed_at, revoked_at
              FROM refresh_tokens
              WHERE token_hash = $1 AND issuer = $2 AND client_id = $3
@@ -1252,7 +1332,7 @@ impl Database {
         if stored
             .dpop_jkt
             .as_deref()
-            .is_some_and(|expected| Some(expected) != requested_dpop_jkt)
+            .is_some_and(|expected| Some(expected) != selection.dpop_jkt)
         {
             transaction.commit().await?;
             return Ok(RefreshRotation::InvalidDpopProof);
@@ -1272,11 +1352,11 @@ impl Database {
             transaction.commit().await?;
             return Ok(RefreshRotation::Invalid);
         }
-        if requested_resource.is_some() && requested_resource != stored.resource.as_deref() {
+        if selection.resource.is_some() && selection.resource != stored.resource.as_deref() {
             transaction.commit().await?;
             return Ok(RefreshRotation::InvalidTarget);
         }
-        let scopes = match requested_scopes {
+        let scopes = match selection.scopes {
             Some(scopes)
                 if scopes.is_empty()
                     || scopes.iter().any(|scope| !stored.scopes.contains(scope)) =>
@@ -1287,7 +1367,7 @@ impl Database {
             Some(scopes) => scopes.to_vec(),
             None => stored.scopes,
         };
-        let authorization_details = match requested_authorization_details {
+        let authorization_details = match selection.authorization_details {
             Some(requested)
                 if !authorization_details_subset(requested, &stored.authorization_details) =>
             {
@@ -1311,7 +1391,8 @@ impl Database {
             resource: stored.resource,
             dpop_jkt: stored
                 .dpop_jkt
-                .or_else(|| requested_dpop_jkt.map(str::to_owned)),
+                .or_else(|| selection.dpop_jkt.map(str::to_owned)),
+            session_id: stored.session_id,
             auth_time: stored.auth_time,
             mfa_verified: stored.mfa_verified,
             claims: stored.claims,
@@ -1360,9 +1441,9 @@ impl Database {
     {
         sqlx::query(
             "INSERT INTO refresh_tokens
-             (token_hash, family_id, issuer, subject, client_id, scopes, resource, dpop_jkt, auth_time,
-              mfa_verified, claims, authorization_details, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             (token_hash, family_id, issuer, subject, client_id, scopes, resource, dpop_jkt,
+              session_id, auth_time, mfa_verified, claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(digest(token))
         .bind(family_id)
@@ -1372,6 +1453,7 @@ impl Database {
         .bind(&grant.scopes)
         .bind(&grant.resource)
         .bind(&grant.dpop_jkt)
+        .bind(&grant.session_id)
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
@@ -1432,7 +1514,20 @@ impl Database {
         absolute_timeout_seconds: i64,
         mfa_verified: bool,
     ) -> Result<String, sqlx::Error> {
-        let session = random_token();
+        self.start_session_details(subject, maximum, absolute_timeout_seconds, mfa_verified)
+            .await
+            .map(|session| session.token)
+    }
+
+    pub async fn start_session_details(
+        &self,
+        subject: &str,
+        maximum: i64,
+        absolute_timeout_seconds: i64,
+        mfa_verified: bool,
+    ) -> Result<StartedSession, sqlx::Error> {
+        let token = random_token();
+        let session_id = random_token();
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(subject)
@@ -1440,10 +1535,11 @@ impl Database {
             .await?;
         sqlx::query(
             "INSERT INTO authenticated_sessions
-             (session_hash, subject, absolute_expires_at, mfa_verified)
-             VALUES ($1, $2, now() + ($3 * interval '1 second'), $4)",
+             (session_hash, session_id, subject, absolute_expires_at, mfa_verified)
+             VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5)",
         )
-        .bind(digest(&session))
+        .bind(digest(&token))
+        .bind(&session_id)
         .bind(subject)
         .bind(absolute_timeout_seconds)
         .bind(mfa_verified)
@@ -1463,7 +1559,7 @@ impl Database {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(session)
+        Ok(StartedSession { token, session_id })
     }
 
     pub async fn validate_session(
@@ -1486,7 +1582,7 @@ impl Database {
              WHERE session_hash = $1 AND revoked_at IS NULL
                AND absolute_expires_at > now()
                AND last_seen_at > now() - ($2 * interval '1 second')
-             RETURNING subject, created_at AS authenticated_at, mfa_verified",
+             RETURNING subject, session_id, created_at AS authenticated_at, mfa_verified",
         )
         .bind(digest(session))
         .bind(idle_timeout_seconds)
@@ -1505,6 +1601,26 @@ impl Database {
         Ok(())
     }
 
+    pub async fn revoke_session_and_clients(
+        &self,
+        session: &str,
+    ) -> Result<Vec<LogoutTarget>, sqlx::Error> {
+        sqlx::query_as(
+            "WITH revoked AS (
+               UPDATE authenticated_sessions SET revoked_at = COALESCE(revoked_at, now())
+               WHERE session_hash = $1
+               RETURNING subject, session_id
+             )
+             SELECT revoked.subject, revoked.session_id, clients.issuer, clients.client_id
+             FROM revoked
+             JOIN authenticated_session_clients clients USING (session_id)
+             ORDER BY clients.issuer, clients.client_id",
+        )
+        .bind(digest(session))
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn issue_pending_authorization(
         &self,
         grant: &AuthorizationGrant,
@@ -1514,9 +1630,9 @@ impl Database {
         sqlx::query(
             "INSERT INTO pending_authorizations
              (transaction_hash, issuer, subject, client_id, redirect_uri, scopes, state,
-              nonce, code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-              claims, authorization_details, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+              nonce, code_challenge, response_mode, resource, dpop_jkt, session_id, auth_time,
+              mfa_verified, claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
         )
         .bind(digest(&transaction))
         .bind(&grant.issuer)
@@ -1530,6 +1646,7 @@ impl Database {
         .bind(&grant.response_mode)
         .bind(&grant.resource)
         .bind(&grant.dpop_jkt)
+        .bind(&grant.session_id)
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
@@ -1547,8 +1664,8 @@ impl Database {
         sqlx::query_as(
             "DELETE FROM pending_authorizations WHERE transaction_hash = $1
              RETURNING issuer, subject, client_id, redirect_uri, scopes, state, nonce,
-                       code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-                       claims, authorization_details, expires_at",
+                       code_challenge, response_mode, resource, dpop_jkt, session_id, auth_time,
+                       mfa_verified, claims, authorization_details, expires_at",
         )
         .bind(digest(transaction))
         .fetch_optional(&self.pool)

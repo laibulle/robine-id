@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "rich-authorization-client",
+  "name": "Account dashboard",
+  "type": "public",
+  "redirect_uris": ["https://dashboard.example.test/oauth/callback"],
+  "post_logout_redirect_uris": ["https://dashboard.example.test/"],
+  "resources": ["https://api.example.test/accounts"],
+  "scopes": ["openid", "profile"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true,
+  "authorization_details_types": ["account_information"]
+}

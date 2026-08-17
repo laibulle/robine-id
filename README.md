@@ -6,15 +6,17 @@
 
 Robine ID is a file-configured OpenID Connect provider. Its production runtime uses Rust, Actix Web,
 Askama, and PostgreSQL. It implements the Authorization
-Code Flow with PKCE, signed ID tokens, JWKS, GET/POST UserInfo with registered-origin CORS,
-OAuth token introspection and revocation, consent, reusable SSO sessions with OpenID
-`prompt`/`max_age`, bounded `login_hint`, OIDC `claims` requests with essential-value enforcement,
+Code Flow with PKCE, signed ID tokens, JWKS, registered-origin CORS for GET/POST UserInfo and
+public-client token/revocation requests, OAuth token introspection, consent, reusable SSO sessions with OpenID
+`prompt`/`max_age`, bounded `login_hint` and audience-checked `id_token_hint`, OIDC `claims` requests with essential-value enforcement,
 password `acr`/`amr`, rotating refresh tokens for consented
-`offline_access`, single-use Pushed Authorization Requests (PAR), signed RS256 Authorization
+`offline_access`, single-use Pushed Authorization Requests (PAR), signed RS256/ES256/EdDSA Authorization
 Request Objects (JAR), confidential-service
 `client_credentials`, query or hardened `form_post` authorization responses, signed JARM responses,
 RFC 9449 DPoP sender-constrained access and public refresh tokens,
-operator-provisioned per-user RFC 6238 TOTP MFA, and RP-initiated logout.
+operator-provisioned per-user RFC 6238 TOTP MFA, RP-initiated logout, and session-bound OIDC
+Front-Channel and Back-Channel Logout, plus origin-bound OIDC Session Management through
+`check_session_iframe`.
 Authorization responses identify their issuer according to RFC 9207 so multi-provider clients can
 reject authorization-server mix-up.
 
@@ -53,6 +55,7 @@ curl --fail http://127.0.0.1:4001/health/ready
 - Home: <http://127.0.0.1:4001>
 - Documentation: <http://127.0.0.1:4001/docs>
 - Provider discovery: <http://127.0.0.1:4001/default/.well-known/openid-configuration>
+  (also available as `/.well-known/openid-configuration/default` for RFC 8414-shaped clients)
 
 Production identities belong in `deploy/config/robine_id.json`, and relying applications belong in
 `deploy/config/applications/`, one JSON file per application. Both are intentionally empty by
@@ -91,7 +94,8 @@ make release-smoke
 
 `make release-smoke` uses an isolated production Compose project. It completes GET and POST
 Authorization Code requests with PKCE plus cross-instance PAR, Form Post, and Client Credentials across two Actix instances, exercises SSO, silent consent
-errors, UserInfo GET/POST and registered-origin CORS, rejects a replayed code, rotates a refresh
+errors, disabled-user and disabled-client rejection, UserInfo GET/POST and registered-origin CORS,
+rejects a replayed code, rotates a refresh
 token across instances, performs RP-initiated logout, introspects and revokes a client-bound access
 token, then dumps, recreates, and restores PostgreSQL before checking refresh-token replay
 detection, the restored access grant, and both current and retained signing keys. It removes only
@@ -99,6 +103,8 @@ its own temporary containers, network, volume, and files.
 
 The legacy Phoenix regression suite remains available through `mix precommit`; its coverage reports
 are written to `cover/` and retained by Robine CI.
+Set `ROBINE_ID_TEST_DATABASE` to an isolated SQLite path to prove that the retained migration chain
+can initialize a completely empty database without reusing local state.
 
 Then open <http://localhost:4001>.
 
@@ -141,22 +147,41 @@ not install `curl` solely for container health polling.
 
 The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
 discovery endpoints and `/docs`; strict declarative application loading; bcrypt authentication with database-backed
-independent network/account rate limiting, optional per-user TOTP, and persistent session policy; single-use authorization
+global-network and issuer-account rate limiting, optional per-user TOTP, and persistent session policy; single-use authorization
 codes and pushed authorization references; PKCE exchange;
 RFC 8628 device authorization; RS256 ID tokens; retained-key JWKS; per-issuer opaque or RFC 9068 JWT user, service, device, and exchanged access tokens; UserInfo; and protected token
 introspection/revocation. Browser transactions, sessions, access/refresh tokens, rate limits, and
 encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
+Authentication forms use one shared progressive enhancement for password visibility, accessible busy
+feedback, and duplicate-submit suppression. Login, TOTP, consent, device, and logout submissions remain
+fully functional without JavaScript, and enhanced consent keeps the selected approve or deny value intact.
 Validated authorization parameters never round-trip through hidden login fields. The browser gets
 only an issuer-bound, short-lived, single-use transaction whose hash and request remain in
 PostgreSQL; an invalid password consumes and replaces it.
-Discovery and JWKS use content ETags and bounded browser/CDN caching to avoid repeatedly
-transferring unchanged public metadata, including on Vercel.
+Discovery, WebFinger, and JWKS use weak content ETags and bounded browser/CDN caching to avoid
+repeatedly transferring unchanged public metadata, including on Vercel.
+Discovery, WebFinger, OAuth and protected-resource metadata, and JWKS also permit credential-free
+reads from any origin. Their bounded preflight exposes only `GET`, `HEAD`, `OPTIONS`, and
+`If-None-Match`; credential-bearing endpoints keep their registered-origin or same-origin policy.
+The default favicon, light and dark marks, legacy SVG logo, stylesheet, scripts, and deny-all
+`robots.txt` are embedded in the Rust binary. They need no runtime asset directory and support
+bounded caching, weak content ETags, conditional GET, and bodyless HEAD responses on Actix and Vercel.
+The Askama theme also embeds complete English and French catalogs. `ui_locales=fr-FR` safely falls
+back to configured `fr`, while global, issuer, and client message maps can still override individual
+keys without recompiling either runtime.
+Public text, SVG, metadata, documentation, and operational representations negotiate gzip, Brotli,
+deflate, or Zstandard through Actix when the client advertises support. Login, consent, token,
+UserInfo, logout, and other credential-bearing responses stay outside compression to avoid exposing
+secrets through compression side channels.
 Warm Vercel processes retain one Actix worker and route service behind a 128-request queue and a
 32-request concurrency limit, avoiding per-invocation Actix system/router construction and
 returning a secure retryable 503 instead of growing work without bound.
-Registered public-client redirect origins can call the token and PAR endpoints from a browser
-through a strict POST-only CORS policy; confidential and unrelated origins are never granted CORS.
+Registered public-client redirect origins can call the token, PAR, and revocation endpoints from a
+browser through strict POST-only CORS policies. Revocation permits only `Content-Type` and never
+browser `Authorization`; confidential and unrelated origins are never granted CORS. Malformed and
+oversized form rejections preserve CORS only after the endpoint path and exact public-client origin
+have been validated, including before Actix dispatch on Vercel.
 Set `token_policy.require_pushed_authorization_requests` on an issuer to require PAR globally, or
 set `require_pushed_authorization_requests` on one `authorization_code` application to enforce it
 only there. Discovery publishes the global policy. `browser_authorization_lifetime` defaults to 600
@@ -232,6 +257,20 @@ The checked-in development configuration contains one public client and one deve
 These credentials are development-only and must be replaced in production.
 All configured user password hashes in one revision must use the same bcrypt cost (10 through 16),
 which also determines the dummy verification work performed for unknown identifiers.
+Set `"enabled": false` on a local identity to suspend login and server-validated sessions or grants
+without deleting its stable internal or pairwise subject. Disabled credentials use the same generic
+failure path and dummy bcrypt work as an unknown identifier.
+
+Set a user's `issuer_ids` to a non-empty list of configured issuer identifiers to restrict that
+identity to selected tenants. An omitted or empty list keeps the backwards-compatible all-issuer
+behavior. Login, existing browser sessions, Device Flow, refresh, token exchange, UserInfo,
+introspection, and pairwise-subject resolution enforce the boundary; a correct password on another
+issuer receives the same generic result and bcrypt work as an unknown identity.
+Opening an unauthorized issuer does not erase a still-valid global SSO cookie, so one tenant cannot
+sign the browser out of another merely by failing the identity-scope check.
+Distinct tenants may reuse the same normalized login identifier when both users declare non-empty,
+disjoint `issuer_ids` lists. A global user (empty list) conflicts with that identifier everywhere,
+and any overlapping tenant scope is rejected during configuration validation.
 
 ### Optional TOTP MFA
 
@@ -262,8 +301,10 @@ step across instances. ID tokens, user JWT access tokens, and active introspecti
 that context. Self-service enrollment and recovery codes are not yet provided.
 
 An Authorization Code or Device application can require MFA for every account by setting
-`"required_acr": "urn:robine-id:acr:password+totp"`. This rejects password-only SSO sessions and
-users without an enrolled operator-managed factor. Relying parties may also send the standard
+`"required_acr": "urn:robine-id:acr:password+totp"`, and can bound authentication freshness with
+`"max_authentication_age": 900`. These policies reject password-only or stale SSO sessions and let
+UserInfo issue RFC 9470 `insufficient_user_authentication` challenges for existing tokens. Relying
+parties may also send the standard
 space-delimited `acr_values` authorization parameter as a voluntary preference through direct
 GET/POST requests, PAR, or signed Request Objects. Start from
 [`config/templates/mfa-client-application.json`](config/templates/mfa-client-application.json).
@@ -275,9 +316,10 @@ The default root file is [`config/robine_id.json`](config/robine_id.json). Each 
 Every document declares `schema_version: 1`. The root supports these sections:
 
 - `issuers`: issuer URLs, supported scopes, token policy, claim mappings, and issuer branding;
-- `applications/*.json`: exact redirect URIs, post-logout redirect URIs, scopes, grants,
-  authentication, consent, optional introspection authorization, and application branding;
-- `users`: local identities with bcrypt password hashes, optional TOTP secret references, and source claims;
+- `pairwise_subject_salt_reference`: durable environment-secret reference used only when pairwise subjects are enabled;
+- `applications/*.json`: exact redirect URIs, post-logout, front-channel, and back-channel logout URIs, scopes, grants,
+  authentication, consent, optional issuer isolation/introspection authorization, and application branding;
+- `users`: local identities with bcrypt password hashes, optional `enabled` suspension and `issuer_ids` tenant isolation, TOTP secret references, and source claims;
 - `claims`: mapping from OIDC claim names to identity sources and required scopes;
 - `branding`: product name, assets, accessible theme tokens, locales, message overrides, and legal/support links;
 - `reconciliation`: explicit removal policy;
@@ -285,11 +327,34 @@ Every document declares `schema_version: 1`. The root supports these sections:
 - `storage`: legacy Phoenix storage compatibility metadata (Rust persistence is configured through PostgreSQL environment variables);
 - `telemetry`: validated operational log level.
 
+Set `"enabled": false` on an issuer to suspend the complete tenant without deleting its URL,
+policy, branding, or persisted signing-key history. Its protocol and metadata routes return the
+same not-found response as an unknown issuer, WebFinger stops advertising it, and automatic key
+rotation skips it until reactivation.
+
+Set `"enabled": false` in an application document to suspend the relying party without deleting its
+redirects, keys, secret reference, pairwise sector, or policy. The client immediately stops
+authenticating, validating server-side grants, contributing conditional Discovery capabilities,
+authorizing CORS/session-check origins, and receiving logout callbacks. Start from
+[`config/templates/suspended-application.json`](config/templates/suspended-application.json).
+
+Set an application's `issuer_ids` to a non-empty list of configured issuer identifiers to bind that
+client to selected tenants. An omitted or empty list keeps the backwards-compatible all-issuer
+behavior. Authorization, client authentication, active server-side grants, CORS/session-check
+origins, logout callbacks, and conditional Discovery capabilities all enforce the binding. Start
+from [`config/templates/tenant-scoped-application.json`](config/templates/tenant-scoped-application.json).
+
 Configuration precedence is deterministic:
 
 ```text
 built-in safe defaults < global branding < issuer branding < client branding
 ```
+
+Configured branding logos and favicons accept either an absolute local path or an HTTPS URL
+(`http` is limited to loopback development). Local paths reject authority-like prefixes,
+backslashes, whitespace, fragments, and literal or percent-encoded dot traversal. The active
+semantic revision is appended after existing query parameters so browser/CDN cache invalidation
+stays deterministic on Actix and Vercel.
 
 Application secrets may use a typed environment reference:
 
@@ -304,6 +369,23 @@ Application secrets may use a typed environment reference:
 Literal client secrets are rejected. This keeps versioned configuration safe to inspect and makes
 the deployment secret store the only supported source of confidential-client credentials.
 Effective configuration output redacts the environment reference.
+
+To isolate a user's `sub` between relying-party sectors, set an application's `subject_type` to
+`pairwise`. A single redirect host is inferred as its sector; otherwise declare a canonical
+lowercase hostname in `sector_identifier`. The root configuration must reference a durable secret
+of at least 32 bytes:
+
+```json
+{
+  "pairwise_subject_salt_reference": {
+    "provider": "env",
+    "key": "PAIRWISE_SUBJECT_SALT"
+  }
+}
+```
+
+Do not rotate this salt as routine credential maintenance: doing so changes all pairwise subject
+identifiers. See [`config/templates/pairwise-application.json`](config/templates/pairwise-application.json).
 
 HTTP issuer and redirect URLs are accepted only for loopback development hosts. Other URLs must use HTTPS. Unknown fields and incompatible values fail validation before activation.
 
@@ -338,8 +420,9 @@ For the configured issuer `https://id.base59.dev/default`:
 
 | Capability | Endpoint |
 | --- | --- |
-| Discovery | `GET /default/.well-known/openid-configuration` |
+| Discovery | `GET /default/.well-known/openid-configuration` or `GET /.well-known/openid-configuration/default` |
 | OAuth metadata | `GET /.well-known/oauth-authorization-server/default` |
+| UserInfo resource metadata | `GET /.well-known/oauth-protected-resource/default/userinfo` |
 | WebFinger issuer discovery | `GET /.well-known/webfinger` |
 | Authorization | `GET /default/authorize` |
 | Pushed authorization request | `POST /default/par` |
@@ -350,6 +433,7 @@ For the configured issuer `https://id.base59.dev/default`:
 | Token revocation | `POST /default/revoke` |
 | UserInfo | `GET /default/userinfo` |
 | JWKS | `GET /default/jwks.json` |
+| Session status iframe | `GET /default/check-session` |
 | Logout | `GET`, `POST /default/logout` |
 
 Authorization requests require `response_type=code`, `openid` scope, `state`, and `nonce`. PKCE using `S256` is mandatory by default and always required for public clients; a confidential integration that cannot send PKCE may opt out explicitly. Redirect URIs match registered values exactly. Authorization codes are short-lived, stored only by hash, bound to issuer/client/redirect/subject/nonce and the PKCE challenge when present, and consumed atomically once.
@@ -365,12 +449,24 @@ Direct authorization remains supported unless the issuer or client enables
 required by RFC 9126. Once validated, every login continuation keeps the complete request in
 PostgreSQL and renders only a separate opaque transaction token.
 
-Confidential clients with configured `jwks` may protect the complete authorization request in an
-RS256 `request` JWT. The outer request still carries the exact `client_id`; any repeated outer
-parameter must match its signed value. Objects are issuer-audience-bound, expire within five
-minutes, and use a single-use `jti` enforced through PostgreSQL across Actix and Vercel instances.
-Signed objects work with direct GET/POST authorization and authenticated PAR. Encrypted objects,
-remote `request_uri` dereferencing, and algorithms other than RS256 are intentionally unsupported.
+Public and confidential clients with configured `request_object_jwks` may protect the complete
+authorization request in an RS256, ES256, or EdDSA `request` JWT, using a matching RSA, P-256, or
+Ed25519 key. Existing `private_key_jwt` clients may reuse their authentication `jwks`. The outer request
+still carries the exact `client_id`; any repeated outer parameter must match its signed value.
+Objects are issuer-audience-bound, expire within five minutes, and use a single-use `jti` enforced
+through PostgreSQL across Actix and Vercel instances. Signed objects work with direct GET/POST
+authorization and authenticated PAR. Set `require_signed_request_object` to reject unsigned direct
+and pushed requests before browser or PAR state is created. Dedicated request-object keys do not
+turn a public client into a confidential one. Encrypted objects, remote `request_uri` dereferencing, and
+other signing algorithms are intentionally unsupported.
+
+An authorization request may send a previously issued ID Token as `id_token_hint`. Robine ID
+verifies the issuer, RS256 signature, retained signing key, and exact client audience, then requires
+the active browser session to identify the same subject for silent SSO. In accordance with OpenID
+Connect Core, expiration alone does not invalidate a hint: the token never creates or extends a
+session and never bypasses current MFA, `max_age`, consent, claims, or client policy. The parameter
+works identically through GET, POST, PAR, and signed Request Objects; conflicting outer and signed
+values are rejected.
 
 Authorization responses use query redirects by default. Set `response_mode=form_post` to receive
 success or redirectable error parameters in an Askama-rendered, auto-submitted HTML form. The page
@@ -388,6 +484,26 @@ A client configured with the `refresh_token` grant can request the `offline_acce
 always shows consent before granting offline access, stores refresh tokens only by hash, and returns
 a replacement on every refresh. Replaying a consumed token revokes its complete token family. A
 refresh request may retain the original scopes or atomically narrow them, but cannot add scopes.
+
+Clients can request RFC 9396 fine-grained permissions with `authorization_details` after the
+operator registers each type globally and enables it through the client's
+`authorization_details_types`. Robine ID validates bounded type-specific fields, always shows these
+details during consent, persists them through authorization code, device, access, and refresh
+grants, and returns them in token responses, JWT access tokens, and introspection. Token and refresh
+requests may remove object fields or array members but cannot expand the original grant. Start from
+[`config/templates/rich-authorization-client-application.json`](config/templates/rich-authorization-client-application.json)
+and add the matching root definition:
+
+```json
+{
+  "authorization_detail_types": [{
+    "type": "account_information",
+    "name": "Account information",
+    "allowed_fields": ["actions", "identifier", "locations"],
+    "required_fields": ["actions"]
+  }]
+}
+```
 
 A public CLI, television, or other input-constrained client may enable
 `urn:ietf:params:oauth:grant-type:device_code`. It POSTs its client identifier and scopes to the
@@ -410,6 +526,37 @@ curl --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:device_code' 
   http://127.0.0.1:4001/default/token
 ```
 
+RP-Initiated Logout accepts GET or form-serialized POST requests and always asks for explicit
+confirmation. A registered `post_logout_redirect_uri` can be associated with the RP through either
+an `id_token_hint` or `client_id`; when both are sent they must identify the same application.
+Signed hints remain usable after expiration for this confirmation-only purpose, but still require a
+valid issuer, retained RS256 key, and known audience. `state` is returned only after an exact
+registered redirect match, and the final confirmation is protected by CSRF and an opaque,
+single-use PostgreSQL transaction.
+
+When an application registers `backchannel_logout_uri`, successful browser or device authorization
+associates that RP with the opaque `sid` published in its ID Token. Confirming logout then sends a
+short-lived RS256 `logout+jwt` to every participating RP in parallel before completing the browser
+response. Delivery is best effort, bounded to two seconds, never follows redirects, and does not
+undo local logout when an RP is unavailable. Start from
+[`config/templates/backchannel-logout-application.json`](config/templates/backchannel-logout-application.json).
+
+An application can additionally register `frontchannel_logout_uri`. Robine ID renders every
+participating RP in a sandboxed iframe interstitial whose CSP contains only registered callback
+origins, retains any callback query, and appends `iss` plus `sid` when requested. It continues to
+the validated post-logout destination after the frames settle or 1.5 seconds; the normal link and
+iframe requests still work without JavaScript. Start from
+[`config/templates/frontchannel-logout-application.json`](config/templates/frontchannel-logout-application.json).
+
+HTTPS issuers also advertise `check_session_iframe`. Successful query, form-post, and JARM
+authorization responses receive an opaque `session_state` bound to the client, exact redirect
+origin, and current OP browser state. The iframe validates the caller against a registered redirect
+origin once, then recalculates locally with Web Crypto and replies with the standard `unchanged`,
+`changed`, or `error` status. The authentication cookie remains `HttpOnly`; only a separate
+one-way-derived, non-authenticating `__Host-robine_opbs` value is readable by the iframe. Browsers
+that block third-party cookies can produce `changed` notifications, so clients must avoid
+`prompt=none` loops and should prefer Back-Channel Logout when it is available.
+
 A confidential backend client configured with `client_credentials` can obtain a short-lived
 service token without a browser or user session. Its scopes must be service scopes shared by the
 client and issuer; `openid`, `offline_access`, and scopes used by configured user-claim mappings are
@@ -418,20 +565,35 @@ introspection reports the client ID as the machine subject. Start from
 [`config/templates/service-client-application.json`](config/templates/service-client-application.json)
 and add its service scope to the issuer.
 
+An authenticated resource server can request an RFC 9701 signed introspection response with
+`Accept: application/token-introspection+jwt`. The RS256 JWT uses
+`typ=token-introspection+jwt`, binds `iss` and `aud` to the issuer and authenticated caller, and
+keeps the RFC 7662 data nested under `token_introspection` to prevent access-token confusion.
+Discovery advertises `introspection_signing_alg_values_supported`; plain JSON remains the default.
+
 A confidential client may additionally enable
 `urn:ietf:params:oauth:grant-type:token-exchange` and register its exact target resources. It can
 then exchange one of its own active access tokens for a downscoped token whose expiry never exceeds
-the source token. Opaque and configured JWT access tokens are accepted and issued; actor tokens, scope
-amplification, cross-client delegation, ID tokens, and refresh tokens are rejected. For example:
+the source token. With `actor_token_exchange_allowed: true`, a distinct Client Credentials token
+from the authenticated broker identifies the acting party; issued JWTs and introspection expose the
+bounded RFC 8693 `act` delegation chain. A source application can explicitly delegate to that
+broker through `authorized_actor_clients`; the resulting token keeps the original subject and
+identifies the broker in both `client_id` and `act`. Opaque and configured JWT access tokens are
+accepted and issued; scope amplification, unapproved delegation, ID tokens, and refresh tokens are rejected.
+For example:
 Start from
 [`config/templates/token-exchange-client-application.json`](config/templates/token-exchange-client-application.json)
-for a strict confidential-client configuration.
+for the broker and
+[`config/templates/delegating-client-application.json`](config/templates/delegating-client-application.json)
+for an explicitly delegating source.
 
 ```sh
 curl --user 'service-client:secret' \
   --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
   --data-urlencode "subject_token=$ACCESS_TOKEN" \
   --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode "actor_token=$ACTOR_ACCESS_TOKEN" \
+  --data-urlencode 'actor_token_type=urn:ietf:params:oauth:token-type:access_token' \
   --data-urlencode 'scope=service.read' \
   --data-urlencode 'resource=https://api.example.test' \
   http://127.0.0.1:4001/default/token
@@ -448,11 +610,21 @@ access token with `token_type=DPoP`. Authorization requests can pre-bind the cod
 PAR can carry that parameter or derive it from its own DPoP header. Public refresh tokens created
 with DPoP remain bound to the same key. UserInfo requires the `DPoP` authorization scheme plus a
 fresh proof containing the access-token hash, while introspection exposes the binding as `cnf.jkt`.
-ES256 and RS256 proofs are supported, and PostgreSQL rejects proof replay across instances.
+EdDSA, ES256, and RS256 proofs are supported with strict Ed25519, P-256, and RSA JWK matching, and
+PostgreSQL rejects proof replay across instances.
 Set `token_policy.dpop_nonce_required` to `true` to additionally require an opaque server-provided
 nonce. Missing or stale values return `use_dpop_nonce` plus `DPoP-Nonce`; recent nonce digests are
 shared through PostgreSQL, kept separately for authorization-server and UserInfo proofs, and exposed
 to browser clients through CORS. `dpop_nonce_lifetime` defaults to 300 seconds and accepts 30–3600.
+
+Applications may set `userinfo_signed_response_alg` to `RS256` to receive UserInfo as a compact
+`application/jwt` response. The response carries issuer and client audience binding, short
+`iat`/`exp` timestamps, and the authorized claims, and verifies against normal issuer JWKS. JSON
+remains the default. See
+[`config/templates/signed-userinfo-application.json`](config/templates/signed-userinfo-application.json).
+UserInfo also publishes RFC 9728 protected-resource metadata at
+`/.well-known/oauth-protected-resource/:issuer_id/userinfo`; Discovery cross-advertises the exact
+resource identifier, and authentication challenges point clients back to that metadata document.
 
 Access tokens are opaque by default. Set an issuer's `token_policy.access_token_format` to `jwt`
 to issue RS256 RFC 9068 tokens with `typ=at+jwt`, `iss`, `sub`, resource `aud`, `client_id`,
@@ -462,13 +634,22 @@ stable `auth_time`, `acr`, and `amr`; machine grants omit user-authentication co
 JWKS; Robine ID still stores only their digest so introspection and immediate server-side
 revocation keep working. A purely offline verifier cannot observe revocation until token expiry.
 
-Confidential clients may set `authentication_method` to `private_key_jwt` and register their RSA
-public keys in `jwks`. Each request uses an RS256 assertion with an endpoint-specific audience and a
+Confidential clients may set `authentication_method` to `private_key_jwt` and register RSA, P-256,
+or Ed25519 public keys in `jwks`. Each request uses an RS256, ES256, or EdDSA assertion with an endpoint-specific audience and a
 single-use `jti`; PostgreSQL rejects replay across instances. This works on token, PAR,
 introspection, and revocation endpoints without Robine ID ever receiving the client private key.
 Generate a private key and matching application document with
-`scripts/generate-private-key-jwt-client.sh OUTPUT_DIRECTORY [CLIENT_ID]`; keep the resulting PEM only
-on the client side.
+`scripts/generate-private-key-jwt-client.sh OUTPUT_DIRECTORY [CLIENT_ID] [RS256|ES256|EdDSA]`; RS256 remains
+the default. Keep the resulting PEM only on the client side. Overlapping RSA, P-256, and Ed25519 JWKs allow
+algorithm migration without downtime.
+
+Confidential clients that already share a strong secret may instead use `client_secret_jwt`. Each
+request carries a short-lived HS256 assertion whose `iss` and `sub` equal the client identifier,
+whose `aud` is the exact endpoint URL, and whose `jti` is single-use across all PostgreSQL-backed
+instances. The resolved environment secret must contain at least 32 octets. Token, PAR, device
+authorization, introspection, and revocation all use the same strict assertion transport.
+[`config/templates/client-secret-jwt-application.json`](config/templates/client-secret-jwt-application.json)
+is a ready-to-copy service definition.
 
 Revocation accepts the same configured client-authentication method as the token endpoint and is
 idempotent for unknown tokens. A client can revoke only its own access or refresh tokens.
@@ -490,13 +671,26 @@ of rotation and across restarts.
 
 ## Operations
 
-- `GET /health/live` reports process liveness.
-- `GET /health/ready` checks traffic acceptance, active configuration, and database connectivity.
-- `GET /metrics` exports bounded Prometheus counters, including MFA, PAR, and Device Flow outcomes, request duration, readiness, and the active revision.
+- `GET`/`HEAD /health/live` reports process liveness without allowing caches to retain the result.
+- `GET`/`HEAD /health/ready` checks traffic acceptance, active configuration, and database
+  connectivity; both health endpoints emit `Cache-Control: no-store` and `Pragma: no-cache`.
+- JSON errors, rejected CORS preflights, and session-origin checks also emit `Cache-Control:
+  no-store` and `Pragma: no-cache`; only explicit public metadata and asset responses opt into
+  cacheability.
+- Unsupported methods on known OAuth/OIDC routes return `405 Method Not Allowed` with an exact
+  endpoint-specific `Allow` header on both Actix and Vercel; unknown routes remain HTTP 404.
+- `GET /metrics` exports bounded Prometheus counters, including per-grant token issuance,
+  RFC 8693 exchange, aggregate UserInfo, MFA, PAR and Device Flow outcomes, request duration,
+  readiness, and the active revision. Arbitrary grant values collapse to the fixed `unsupported`
+  label; UserInfo metrics contain no identity dimensions. HTTP volume and latency are split only
+  across `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`, never raw paths or extension methods. The
+  metrics response emits `Cache-Control: no-store` and `Pragma: no-cache`.
 - SIGTERM and SIGINT disable readiness immediately, preserve liveness during the configurable drain delay, then stop Actix gracefully.
 - `x-request-id` is returned as the public correlation reference.
 - security and reconciliation events use structured, bounded metadata.
-- credentials, password hashes, authorization codes, bearer tokens, session identifiers, and client secrets are excluded from audit events.
+- credentials, password hashes, authorization codes, bearer tokens, session identifiers, client
+  secrets, and DPoP proof thumbprints/identifiers/nonces are excluded from audit events, including
+  debug-level accepted-proof diagnostics.
 
 Production requires PostgreSQL connectivity and `KEY_ENCRYPTION_SECRET` with at least 32 bytes of
 deployment-specific entropy. `DATABASE_URL` is accepted for managed databases; the release Compose

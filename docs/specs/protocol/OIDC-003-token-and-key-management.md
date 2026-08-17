@@ -37,6 +37,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
   A due decision MUST be rechecked while holding the active PostgreSQL key row lock so concurrent
   instances create at most one replacement. The automatic idempotency identifier MUST derive from
   the key being retired.
+- Automatic rotation MUST skip issuers whose active configuration sets `enabled: false`. Their
+  active and retained key rows MUST remain persisted and normal expiry-based retained-key pruning
+  MUST continue, so reactivation preserves the prior key history without unnecessary rollover.
 - ID tokens MUST be compact JWS values signed with RS256 and carry the active key's `kid` header.
 - `iat` and `exp` MUST use integer epoch seconds. `exp` MUST equal `iat` plus the configured ID-token lifetime.
 - Access tokens MUST be opaque, random bearer credentials; only their hashes MUST be used as runtime lookup keys.
@@ -45,6 +48,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - JWKS MUST expose RSA public parameters and the metadata `kid`, `use=sig`, and `alg=RS256`; it MUST NOT expose private RSA parameters.
 - JWKS MUST expose a representation ETag and a shared-cache lifetime no longer than five minutes;
   key rotation MUST change the validator and matching conditional requests MUST return HTTP 304.
+- JWKS MUST allow credential-free cross-origin reads with `Access-Control-Allow-Origin: *` and
+  `Cross-Origin-Resource-Policy: cross-origin`. Its public route MUST support `GET`, bodyless
+  `HEAD`, and an `OPTIONS` preflight limited to `GET, HEAD, OPTIONS` and `If-None-Match`.
 - Private signing state MUST be encrypted with AES-256-GCM using key material derived from `KEY_ENCRYPTION_SECRET` (or the compatibility fallback `SECRET_KEY_BASE`) before PostgreSQL persistence.
 - A temporary `KEY_ENCRYPTION_SECRET_PREVIOUS` MAY decrypt existing rows during a staged secret
   rollover. It MUST be at least 32 bytes, differ from the current secret, and never encrypt new
@@ -85,7 +91,7 @@ Conventional servers prune elapsed retained keys at startup and during database 
 startup pass because they intentionally do not run background maintenance loops. Migrating legacy
 retained rows assigns a conservative seven-day deadline before pruning becomes possible.
 
-Conventional servers check configured automatic rotation every five minutes in addition to startup.
+Conventional servers check configured active-issuer automatic rotation every five minutes in addition to startup.
 Vercel checks during cold initialization and immediately before an ID token is signed, because a
 function process cannot rely on a background timer. Both paths use the same row-locked PostgreSQL
 operation.

@@ -7,18 +7,20 @@ Rust production extension
 ## Summary
 
 Confidential clients can authenticate without a shared secret by signing a short-lived JWT with
-their own RSA private key. Robine ID stores only the configured public JWKs and a digest of each
+their own RSA, P-256, or Ed25519 private key. Robine ID stores only the configured public JWKs and a digest of each
 consumed assertion identifier.
 
 ## Requirements
 
-- A client using `private_key_jwt` MUST be confidential, MUST configure one to sixteen valid RSA
-  public JWKs, and MUST NOT configure `secret_reference`.
+- A client using `private_key_jwt` MUST be confidential, MUST configure one to sixteen valid RSA,
+  P-256, or Ed25519 public JWKs, and MUST NOT configure `secret_reference`.
 - Token, PAR, introspection, and revocation requests MUST include `client_id`,
   `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, and one bounded
   `client_assertion`. Basic credentials or `client_secret` MUST NOT be mixed with an assertion.
-- The JWS algorithm MUST be RS256 and its `kid` MUST select exactly one configured key. `iss` and
-  `sub` MUST exactly equal `client_id`.
+- The JWS algorithm MUST be RS256 with a matching RSA JWK, ES256 with a matching P-256 JWK, or
+  EdDSA with a matching Ed25519 OKP JWK. Its
+  `kid` MUST select exactly one configured key; algorithm/key-type confusion MUST be rejected.
+  `iss` and `sub` MUST exactly equal `client_id`.
 - `aud` MUST contain the canonical, issuer-derived URL of the endpoint receiving the assertion. An
   assertion for `/token` MUST NOT authenticate at `/par`, `/introspect`, or `/revoke`.
 - `iat`, `exp`, and a non-empty bounded `jti` MUST be present. The assertion lifetime MUST NOT exceed
@@ -27,7 +29,8 @@ consumed assertion identifier.
   assertion. Reuse on the same or another instance MUST return `invalid_client`.
 - Expired replay records MUST be pruned without storing assertion bodies, signatures, or private
   key material. Logs MUST NOT contain assertions or `jti` values.
-- Discovery MUST advertise `private_key_jwt` for token, introspection, and revocation authentication.
+- Discovery MUST advertise `private_key_jwt`, RS256, ES256, and EdDSA for token, introspection, and
+  revocation authentication.
 - Actix and the Vercel adapter MUST expose identical behavior.
 
 ## Acceptance Criteria
@@ -36,15 +39,17 @@ consumed assertion identifier.
 - A wrong audience, unknown key, invalid signature, mixed credential transport, stale assertion, or
   assertion longer than five minutes is rejected.
 - Replaying a valid assertion through another instance is rejected while a fresh assertion works.
-- A client can rotate keys by publishing overlapping JWKs with unique key identifiers.
+- A client can rotate keys, including between RSA, P-256, and Ed25519, by publishing overlapping JWKs with
+  unique key identifiers.
 
 ## Standards
 
 - RFC 7523, JSON Web Token Bearer Profile for OAuth 2.0 Client Authentication.
 - OpenID Connect Core 1.0, `private_key_jwt` client authentication.
-- RFC 7517 and RFC 7518, JSON Web Key and RS256.
+- RFC 7517 and RFC 7518, JSON Web Key, RS256, and ES256.
+- RFC 8037, Ed25519 JWKs and EdDSA for JOSE.
 
 ## Non-Goals
 
-Remote `jwks_uri` fetching, symmetric `client_secret_jwt`, EC/EdDSA keys, certificate-bound tokens,
+Remote `jwks_uri` fetching, curves other than P-256 and Ed25519, certificate-bound tokens,
 and access-token formatting are outside this extension; OAUTH-007 defines JWT access tokens.

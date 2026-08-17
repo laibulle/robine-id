@@ -30,6 +30,8 @@ Robine ID provides a polished, fast, accessible authentication experience across
 - Destructive or denying actions MUST be visually distinguishable from the primary approving action.
 - Every form, key action, and error region MUST have a stable unique DOM identifier suitable for automated tests.
 - Pages MUST have a unique descriptive title and one primary heading.
+- Enhanced form submissions MUST expose an accessible busy state, identify the active submit action visually,
+  and suppress duplicate requests without dropping the selected OAuth decision.
 - Interactive targets SHOULD be at least 44 by 44 CSS pixels.
 - Motion MUST be subtle and disabled when `prefers-reduced-motion` requests it. Forced-colors mode MUST preserve boundaries and focus.
 
@@ -42,7 +44,8 @@ Robine ID provides a polished, fast, accessible authentication experience across
 5. Protocol errors remain on the provider when no redirect is trusted and expose a correlation reference.
 6. Logout asks for confirmation and ends on either a local confirmation or validated client return URI.
 
-JavaScript MAY enhance password visibility and transient loading feedback, but submitting login, consent, and logout MUST work without it.
+JavaScript MAY enhance password visibility and form submission feedback, but submitting login, TOTP,
+consent, device authorization, and logout forms MUST work without it.
 
 ## Acceptance Criteria
 
@@ -51,6 +54,8 @@ JavaScript MAY enhance password visibility and transient loading feedback, but s
 - Invalid form submission preserves non-sensitive input, moves focus to the error summary, and identifies every invalid field.
 - Browser autofill and password managers can identify both login inputs.
 - Consent approval and denial remain understandable without relying on color.
+- An enhanced form accepts one request per submission, retains the activated submit button's name and
+  value, exposes `aria-busy`, and uses a static rather than animated indicator under reduced motion.
 
 ## Manual Verification
 

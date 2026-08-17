@@ -3,6 +3,7 @@
 pub mod configuration;
 pub mod database;
 pub mod metrics;
+pub mod pairwise;
 pub mod protocol;
 pub mod tokens;
 pub mod totp;
@@ -315,7 +316,7 @@ impl Application {
         };
         let snapshot = self.snapshot();
         let mut rotated = 0;
-        for issuer in &snapshot.configuration.issuers {
+        for issuer in snapshot.active_issuers() {
             let Some(interval) = issuer.token_policy.signing_key_rotation_interval else {
                 continue;
             };

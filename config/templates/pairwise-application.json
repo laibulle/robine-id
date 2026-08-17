@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "pairwise-web",
+  "name": "Pairwise Web Application",
+  "type": "public",
+  "subject_type": "pairwise",
+  "sector_identifier": "app.example.com",
+  "redirect_uris": ["https://app.example.com/oauth/callback"],
+  "scopes": ["openid", "profile", "email"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true
+}

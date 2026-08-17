@@ -20,12 +20,23 @@ issuer-configured presentation format.
 - The issuing client, originating authorization or refresh grant, and every granted scope MUST
   remain enabled in the active configuration. A machine token MUST never satisfy UserInfo.
 - A successful response MUST contain `sub` and MAY contain only non-nil claims captured for scopes granted during authorization.
+- By default a successful response MUST be JSON. A client configured according to OIDC-013 MUST
+  instead receive an audience-bound RS256 JWT with `application/jwt` through both GET and POST.
 - Claim values MUST come from validated claim mappings; reserved token claims MUST NOT be injected through configuration.
 - Missing, malformed, unknown, expired, or issuer-mismatched tokens MUST return HTTP 401 with `WWW-Authenticate: Bearer error="invalid_token"`.
+- Bearer and DPoP challenges SHOULD also include the OAUTH-012 `resource_metadata` URL for this exact
+  UserInfo endpoint.
+- An otherwise valid token that no longer meets the application's `required_acr` or
+  `max_authentication_age` policy MUST return the OAUTH-013
+  `insufficient_user_authentication` challenge with the unmet `acr_values`, `max_age`, or both.
 - A bound token presented as Bearer, without a valid `ath` proof, with another key, or with a replayed
   proof MUST return HTTP 401 with a DPoP authentication challenge.
 - Error bodies MUST NOT distinguish why a bearer token was rejected.
-- Responses containing identity claims MUST NOT be cached by shared caches.
+- JSON and signed-JWT responses containing identity claims MUST emit `Cache-Control: no-store` and
+  `Pragma: no-cache` and MUST NOT be cached by browser or shared caches.
+- A bounded UserInfo outcome metric MUST count final successful and failed responses without token,
+  client, subject, origin, or claim labels. The structured success audit event MUST be emitted only
+  after subject derivation, optional JWT signing, and response construction have all succeeded.
 - Browser CORS preflight and claim responses MUST allow only origins derived from registered client
   redirect URIs; arbitrary origins and unsupported requested headers MUST be rejected.
 
@@ -36,10 +47,15 @@ issuer-configured presentation format.
 - Changing or expiring a token returns the same public `invalid_token` failure.
 - A token issued for one issuer cannot be used at another issuer's UserInfo endpoint.
 - The same bearer credential returns the same claims through GET and POST.
+- A signed response verifies against issuer JWKS and binds `iss` and `aud` to the issuer and client.
 - A DPoP-bound credential returns the same claims only when each request carries a fresh proof for
   the exact method, endpoint URI, access token, and bound key.
 - A registered browser-client origin can call UserInfo through CORS, while an unregistered origin
   receives no cross-origin access grant.
+- Authentication-context and recentness policy failures are distinguishable from invalid tokens
+  only after token and, when applicable, DPoP proof validation.
+- Pairwise-subject or signing failures cannot be recorded as successful UserInfo access; the final
+  HTTP outcome and `robine_id_userinfo_total` remain consistent.
 
 ## Runtime behavior
 

@@ -32,13 +32,16 @@ base64 = "0.22"
 bcrypt = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 constant_time_eq = "0.4"
+ed25519-dalek = { version = "2.2", features = ["pkcs8", "rand_core"] }
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.12"
 http-body-util = "0.1"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rsa = { version = "0.9", features = ["pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
@@ -51,11 +54,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 vercel_runtime = { version = "2.4", features = ["actix"] }
+webpki-roots = "1"
 zeroize = "1.8"
 
 [dev-dependencies]
 actix-http = "3"
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 
 [profile.release]
 codegen-units = 1

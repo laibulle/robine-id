@@ -1,5 +1,5 @@
 use actix_web::{App, HttpServer, web};
-use robine_id::{Application, initialize_tracing, web as robine_web};
+use robine_id::{Application, initialize_tracing, metrics::HttpMethodClass, web as robine_web};
 use std::time::{Duration, Instant};
 use std::{env, io};
 use tracing::Instrument;
@@ -143,22 +143,24 @@ async fn main() -> io::Result<()> {
                         value,
                     );
                 }
-                let method = request.method().to_string();
+                let method = HttpMethodClass::from_method(request.method().as_str());
                 let started_at = Instant::now();
                 let metrics_application = worker_application.clone();
                 let span = tracing::info_span!(
                     "http_request",
                     request_id = %request_id,
-                    method = %method
+                    method = method.label()
                 );
                 let future = service.call(request);
                 async move {
                     let mut response = future.await?;
                     robine_web::secure(response.response_mut());
                     robine_web::set_correlation_id(response.response_mut(), &request_id);
-                    metrics_application
-                        .metrics()
-                        .record_http_response(response.status().as_u16(), started_at.elapsed());
+                    metrics_application.metrics().record_http_response(
+                        method,
+                        response.status().as_u16(),
+                        started_at.elapsed(),
+                    );
                     tracing::info!(
                         event = "http_request",
                         outcome = "completed",

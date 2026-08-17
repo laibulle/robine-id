@@ -3,8 +3,12 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use robine_id::{
     Application, Snapshot,
-    database::{AccessGrant, Database, DevicePoll, RefreshGrant, RefreshRotation},
+    database::{
+        AccessGrant, Database, DeviceAuthorizationDecision, DeviceAuthorizationRequest, DevicePoll,
+        RefreshGrant, RefreshRotation, RefreshTokenSelection,
+    },
     protocol::{AuthorizationGrant, AuthorizationRequest},
+    tokens::{self, IdTokenInput},
     web as robine_web,
 };
 use serde_json::json;
@@ -229,6 +233,10 @@ async fn persists_and_atomically_consumes_security_state() {
             .expect("pruned old DPoP nonce")
             .is_some()
     );
+    let linked_session = database
+        .start_session_details(&subject, 5, 300, false)
+        .await
+        .expect("linked browser session");
     let grant = AuthorizationGrant {
         issuer: issuer.clone(),
         subject: subject.clone(),
@@ -240,6 +248,7 @@ async fn persists_and_atomically_consumes_security_state() {
         response_mode: Some("form_post.jwt".to_owned()),
         resource: Some("https://api.example/resource".to_owned()),
         dpop_jkt: Some(dpop_jkt.clone()),
+        session_id: Some(linked_session.session_id.clone()),
         auth_time: Some(Utc::now().timestamp()),
         mfa_verified: false,
         claims: json!({"name": "Integration"}),
@@ -268,6 +277,14 @@ async fn persists_and_atomically_consumes_security_state() {
         Some("https://api.example/resource")
     );
     assert_eq!(consumed_code.dpop_jkt.as_deref(), Some(dpop_jkt.as_str()));
+    assert_eq!(
+        consumed_code.session_id.as_deref(),
+        Some(linked_session.session_id.as_str())
+    );
+    assert_eq!(
+        consumed_code.authorization_details,
+        grant.authorization_details
+    );
     assert!(
         database
             .consume_authorization_code(&code)
@@ -275,6 +292,15 @@ async fn persists_and_atomically_consumes_security_state() {
             .expect("replay code")
             .is_none()
     );
+    let logout_targets = database
+        .revoke_session_and_clients(&linked_session.token)
+        .await
+        .expect("revoke linked browser session");
+    assert_eq!(logout_targets.len(), 1);
+    assert_eq!(logout_targets[0].issuer, issuer);
+    assert_eq!(logout_targets[0].client_id, "integration-client");
+    assert_eq!(logout_targets[0].subject, subject);
+    assert_eq!(logout_targets[0].session_id, linked_session.session_id);
 
     let pushed_request = AuthorizationRequest {
         response_type: "code".to_owned(),
@@ -293,6 +319,7 @@ async fn persists_and_atomically_consumes_security_state() {
         request_object: None,
         request_uri: None,
         login_hint: None,
+        id_token_hint: None,
         acr_values: None,
         claims: None,
         authorization_details: None,
@@ -387,6 +414,10 @@ async fn persists_and_atomically_consumes_security_state() {
         consumed_pending.dpop_jkt.as_deref(),
         Some(dpop_jkt.as_str())
     );
+    assert_eq!(
+        consumed_pending.authorization_details,
+        grant.authorization_details
+    );
     assert!(
         database
             .consume_pending_authorization(&pending)
@@ -396,15 +427,15 @@ async fn persists_and_atomically_consumes_security_state() {
     );
 
     let (device_code, formatted_user_code) = database
-        .issue_device_authorization(
-            &issuer,
-            "integration-client",
-            &["openid".to_owned(), "profile".to_owned()],
-            Some("https://api.example/resource"),
-            &json!([{"type": "account_information", "actions": ["read_balances"]}]),
-            600,
-            5,
-        )
+        .issue_device_authorization(DeviceAuthorizationRequest {
+            issuer: &issuer,
+            client_id: "integration-client",
+            scopes: &["openid".to_owned(), "profile".to_owned()],
+            resource: Some("https://api.example/resource"),
+            authorization_details: &json!([{"type": "account_information", "actions": ["read_balances"]}]),
+            lifetime_seconds: 600,
+            poll_interval_seconds: 5,
+        })
         .await
         .expect("device authorization");
     assert_eq!(device_code.len(), 43);
@@ -445,15 +476,22 @@ async fn persists_and_atomically_consumes_security_state() {
         .expect("device user code");
     assert_eq!(stored_device.client_id, "integration-client");
     assert_eq!(stored_device.scopes, ["openid", "profile"]);
+    assert_eq!(
+        stored_device.authorization_details,
+        json!([{"type": "account_information", "actions": ["read_balances"]}])
+    );
     assert!(
         database
             .decide_device_authorization(
                 &device_transaction,
-                &subject,
-                &json!({"name": "Integration"}),
-                Utc::now().timestamp(),
-                true,
-                true,
+                DeviceAuthorizationDecision {
+                    subject: &subject,
+                    claims: &json!({"name": "Integration"}),
+                    auth_time: Utc::now().timestamp(),
+                    session_id: None,
+                    approved: true,
+                    mfa_verified: true,
+                },
             )
             .await
             .expect("approve device")
@@ -467,6 +505,10 @@ async fn persists_and_atomically_consumes_security_state() {
             assert_eq!(grant.subject, subject);
             assert_eq!(grant.scopes, ["openid", "profile"]);
             assert_eq!(grant.claims, json!({"name": "Integration"}));
+            assert_eq!(
+                grant.authorization_details,
+                json!([{"type": "account_information", "actions": ["read_balances"]}])
+            );
             assert!(grant.mfa_verified);
         }
         poll => panic!("unexpected approved device poll: {poll:?}"),
@@ -480,15 +522,15 @@ async fn persists_and_atomically_consumes_security_state() {
     ));
 
     let (denied_device_code, denied_user_code) = database
-        .issue_device_authorization(
-            &issuer,
-            "integration-client",
-            &["openid".to_owned()],
-            None,
-            &json!([]),
-            600,
-            5,
-        )
+        .issue_device_authorization(DeviceAuthorizationRequest {
+            issuer: &issuer,
+            client_id: "integration-client",
+            scopes: &["openid".to_owned()],
+            resource: None,
+            authorization_details: &json!([]),
+            lifetime_seconds: 600,
+            poll_interval_seconds: 5,
+        })
         .await
         .expect("denied device authorization");
     let (denied_transaction, _) = database
@@ -500,11 +542,14 @@ async fn persists_and_atomically_consumes_security_state() {
         database
             .decide_device_authorization(
                 &denied_transaction,
-                &subject,
-                &json!({}),
-                Utc::now().timestamp(),
-                false,
-                false,
+                DeviceAuthorizationDecision {
+                    subject: &subject,
+                    claims: &json!({}),
+                    auth_time: Utc::now().timestamp(),
+                    session_id: None,
+                    approved: false,
+                    mfa_verified: false,
+                },
             )
             .await
             .expect("deny device")
@@ -542,6 +587,7 @@ async fn persists_and_atomically_consumes_security_state() {
             mfa_verified: true,
             claims: json!({"name": "Integration"}),
             authorization_details: grant.authorization_details.clone(),
+            actor: None,
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -598,6 +644,7 @@ async fn persists_and_atomically_consumes_security_state() {
             mfa_verified: true,
             claims: json!({"name": "Integration"}),
             authorization_details: json!([]),
+            actor: Some(json!({"sub": "integration-client"})),
             expires_at: Utc::now() + Duration::minutes(4),
         })
         .await
@@ -618,6 +665,10 @@ async fn persists_and_atomically_consumes_security_state() {
     );
     assert!(exchanged_introspection.auth_time.is_some());
     assert!(exchanged_introspection.mfa_verified);
+    assert_eq!(
+        exchanged_introspection.actor,
+        Some(json!({"sub": "integration-client"}))
+    );
 
     let device_access_token = database
         .issue_access_token(&AccessGrant {
@@ -632,6 +683,7 @@ async fn persists_and_atomically_consumes_security_state() {
             mfa_verified: false,
             claims: json!({}),
             authorization_details: json!([]),
+            actor: None,
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -659,6 +711,7 @@ async fn persists_and_atomically_consumes_security_state() {
         ],
         resource: Some("https://api.example/resource".to_owned()),
         dpop_jkt: Some(dpop_jkt.clone()),
+        session_id: None,
         auth_time: Some(Utc::now().timestamp()),
         mfa_verified: false,
         claims: json!({"name": "Integration"}),
@@ -675,9 +728,11 @@ async fn persists_and_atomically_consumes_security_state() {
                 &refresh_token,
                 &issuer,
                 "integration-client",
-                None,
-                Some("https://other-api.example/resource"),
-                Some(&dpop_jkt),
+                RefreshTokenSelection {
+                    resource: Some("https://other-api.example/resource"),
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
             )
             .await
             .expect("invalid resource"),
@@ -689,22 +744,44 @@ async fn persists_and_atomically_consumes_security_state() {
                 &refresh_token,
                 &issuer,
                 "integration-client",
-                None,
-                None,
-                None,
+                RefreshTokenSelection::default(),
             )
             .await
             .expect("missing DPoP proof"),
         RefreshRotation::InvalidDpopProof
     ));
+    let excessive_authorization_details = json!([{
+        "type": "account_information",
+        "actions": ["initiate_payment"]
+    }]);
+    assert!(matches!(
+        database
+            .rotate_refresh_token(
+                &refresh_token,
+                &issuer,
+                "integration-client",
+                RefreshTokenSelection {
+                    authorization_details: Some(&excessive_authorization_details),
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("excessive authorization details"),
+        RefreshRotation::InvalidAuthorizationDetails
+    ));
+    let selected_authorization_details = grant.authorization_details.clone();
     let rotated_token = match database
         .rotate_refresh_token(
             &refresh_token,
             &issuer,
             "integration-client",
-            Some(&["openid".to_owned(), "offline_access".to_owned()]),
-            None,
-            Some(&dpop_jkt),
+            RefreshTokenSelection {
+                scopes: Some(&["openid".to_owned(), "offline_access".to_owned()]),
+                authorization_details: Some(&selected_authorization_details),
+                dpop_jkt: Some(&dpop_jkt),
+                ..Default::default()
+            },
         )
         .await
         .expect("refresh rotation")
@@ -713,6 +790,7 @@ async fn persists_and_atomically_consumes_security_state() {
             assert_eq!(grant.scopes, ["openid", "offline_access"]);
             assert_eq!(grant.resource, refresh_grant.resource);
             assert_eq!(grant.dpop_jkt, refresh_grant.dpop_jkt);
+            assert_eq!(grant.authorization_details, selected_authorization_details);
             token
         }
         rotation => panic!("unexpected rotation: {rotation:?}"),
@@ -723,9 +801,7 @@ async fn persists_and_atomically_consumes_security_state() {
                 &refresh_token,
                 &issuer,
                 "integration-client",
-                None,
-                None,
-                None,
+                RefreshTokenSelection::default(),
             )
             .await
             .expect("missing proof on consumed DPoP refresh token"),
@@ -737,9 +813,10 @@ async fn persists_and_atomically_consumes_security_state() {
                 &refresh_token,
                 &issuer,
                 "integration-client",
-                None,
-                None,
-                Some(&dpop_jkt),
+                RefreshTokenSelection {
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
             )
             .await
             .expect("replay detection"),
@@ -751,9 +828,10 @@ async fn persists_and_atomically_consumes_security_state() {
                 &rotated_token,
                 &issuer,
                 "integration-client",
-                None,
-                None,
-                Some(&dpop_jkt),
+                RefreshTokenSelection {
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
             )
             .await
             .expect("revoked family"),
@@ -770,9 +848,11 @@ async fn persists_and_atomically_consumes_security_state() {
                 &scoped_refresh,
                 &issuer,
                 "integration-client",
-                Some(&["openid".to_owned(), "ungranted".to_owned()]),
-                None,
-                Some(&dpop_jkt),
+                RefreshTokenSelection {
+                    scopes: Some(&["openid".to_owned(), "ungranted".to_owned()]),
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
             )
             .await
             .expect("invalid scope"),
@@ -783,9 +863,10 @@ async fn persists_and_atomically_consumes_security_state() {
             &scoped_refresh,
             &issuer,
             "integration-client",
-            None,
-            None,
-            Some(&dpop_jkt),
+            RefreshTokenSelection {
+                dpop_jkt: Some(&dpop_jkt),
+                ..Default::default()
+            },
         )
         .await
         .expect("valid rotation after rejected scope");
@@ -814,9 +895,10 @@ async fn persists_and_atomically_consumes_security_state() {
                 &scoped_rotated,
                 &issuer,
                 "integration-client",
-                None,
-                None,
-                Some(&dpop_jkt),
+                RefreshTokenSelection {
+                    dpop_jkt: Some(&dpop_jkt),
+                    ..Default::default()
+                },
             )
             .await
             .expect("revoked refresh token"),
@@ -1057,11 +1139,19 @@ async fn persists_and_atomically_consumes_security_state() {
         .configuration
         .clients
         .push(robine_id::configuration::Client {
+            enabled: true,
+            issuer_ids: vec![],
             id: device_client_id.clone(),
             name: "Integration device client".to_owned(),
             client_type: "public".to_owned(),
+            subject_type: "public".to_owned(),
+            sector_identifier: None,
             redirect_uris: vec![],
             post_logout_redirect_uris: vec![],
+            frontchannel_logout_uri: None,
+            frontchannel_logout_session_required: false,
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: false,
             resources: vec![],
             scopes: vec![
                 "openid".to_owned(),
@@ -1077,8 +1167,14 @@ async fn persists_and_atomically_consumes_security_state() {
             nonce_required: None,
             consent_required: Some(true),
             introspection_allowed: false,
+            userinfo_signed_response_alg: Some("RS256".to_owned()),
             require_pushed_authorization_requests: false,
+            require_signed_request_object: false,
+            request_object_jwks: None,
             required_acr: None,
+            max_authentication_age: None,
+            actor_token_exchange_allowed: false,
+            authorized_actor_clients: vec![],
             authorization_details_types: vec![],
             authentication_method: Some("none".to_owned()),
             secret_reference: None,
@@ -1090,11 +1186,19 @@ async fn persists_and_atomically_consumes_security_state() {
         .configuration
         .clients
         .push(robine_id::configuration::Client {
+            enabled: true,
+            issuer_ids: vec![],
             id: service_client_id.clone(),
             name: "Integration service client".to_owned(),
             client_type: "confidential".to_owned(),
+            subject_type: "public".to_owned(),
+            sector_identifier: None,
             redirect_uris: vec![],
             post_logout_redirect_uris: vec![],
+            frontchannel_logout_uri: None,
+            frontchannel_logout_session_required: false,
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: false,
             resources: vec!["https://api.example/resource".to_owned()],
             scopes: vec!["service.read".to_owned()],
             grant_types: vec!["client_credentials".to_owned()],
@@ -1102,8 +1206,14 @@ async fn persists_and_atomically_consumes_security_state() {
             nonce_required: None,
             consent_required: None,
             introspection_allowed: true,
+            userinfo_signed_response_alg: None,
             require_pushed_authorization_requests: false,
+            require_signed_request_object: false,
+            request_object_jwks: None,
             required_acr: None,
+            max_authentication_age: None,
+            actor_token_exchange_allowed: false,
+            authorized_actor_clients: vec![],
             authorization_details_types: vec![],
             authentication_method: Some("client_secret_basic".to_owned()),
             secret_reference: Some(json!({
@@ -1197,11 +1307,14 @@ async fn persists_and_atomically_consumes_security_state() {
         database
             .decide_device_authorization(
                 &default_scope_transaction,
-                "release-smoke-user",
-                &json!({}),
-                Utc::now().timestamp(),
-                false,
-                false,
+                DeviceAuthorizationDecision {
+                    subject: "release-smoke-user",
+                    claims: &json!({}),
+                    auth_time: Utc::now().timestamp(),
+                    session_id: None,
+                    approved: false,
+                    mfa_verified: false,
+                },
             )
             .await
             .expect("discard default-scope device authorization")
@@ -1401,10 +1514,71 @@ async fn persists_and_atomically_consumes_security_state() {
     )
     .await;
     assert_eq!(device_userinfo.status(), actix_web::http::StatusCode::OK);
-    let device_userinfo_body: serde_json::Value =
-        actix_web::test::read_body_json(device_userinfo).await;
+    assert_eq!(
+        device_userinfo
+            .headers()
+            .get(actix_web::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwt")
+    );
+    let signed_device_userinfo = actix_web::test::read_body(device_userinfo).await;
+    let signed_device_userinfo =
+        std::str::from_utf8(&signed_device_userinfo).expect("signed UserInfo UTF-8");
+    let userinfo_header = decode_header(signed_device_userinfo).expect("signed UserInfo header");
+    let userinfo_key = database
+        .public_signing_keys(&web_issuer)
+        .await
+        .expect("UserInfo public signing keys")
+        .into_iter()
+        .find(|key| Some(key.kid.as_str()) == userinfo_header.kid.as_deref())
+        .expect("UserInfo signing key is published");
+    let mut userinfo_validation = Validation::new(Algorithm::RS256);
+    userinfo_validation.set_issuer(&[web_issuer.as_str()]);
+    userinfo_validation.set_audience(&[device_client_id.as_str()]);
+    let device_userinfo_body = decode::<serde_json::Value>(
+        signed_device_userinfo,
+        &DecodingKey::from_rsa_components(&userinfo_key.modulus, &userinfo_key.exponent)
+            .expect("UserInfo decoding key"),
+        &userinfo_validation,
+    )
+    .expect("valid signed UserInfo response")
+    .claims;
     assert_eq!(device_userinfo_body["sub"], "development-user");
     assert_eq!(device_userinfo_body["email"], "admin@example.com");
+    let device_userinfo_post = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::post()
+            .uri("/default/userinfo")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {web_device_access_token}"),
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        device_userinfo_post.status(),
+        actix_web::http::StatusCode::OK
+    );
+    assert_eq!(
+        device_userinfo_post
+            .headers()
+            .get(actix_web::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwt")
+    );
+    let signed_device_userinfo_post = actix_web::test::read_body(device_userinfo_post).await;
+    let signed_device_userinfo_post =
+        std::str::from_utf8(&signed_device_userinfo_post).expect("signed POST UserInfo UTF-8");
+    let post_userinfo_body = decode::<serde_json::Value>(
+        signed_device_userinfo_post,
+        &DecodingKey::from_rsa_components(&userinfo_key.modulus, &userinfo_key.exponent)
+            .expect("POST UserInfo decoding key"),
+        &userinfo_validation,
+    )
+    .expect("valid signed POST UserInfo response")
+    .claims;
+    assert_eq!(post_userinfo_body["sub"], "development-user");
     let invalid_service_response = actix_web::test::call_service(
         &app,
         actix_web::test::TestRequest::post()
@@ -1492,6 +1666,71 @@ async fn persists_and_atomically_consumes_security_state() {
     assert_eq!(service_introspection_body["client_id"], service_client_id);
     assert_eq!(service_introspection_body["sub"], service_client_id);
     assert_eq!(service_introspection_body["scope"], "service.read");
+    let signed_service_introspection = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::post()
+            .uri("/default/introspect")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                service_basic.clone(),
+            ))
+            .insert_header((
+                actix_web::http::header::ACCEPT,
+                "application/token-introspection+jwt",
+            ))
+            .set_form([("token", service_token)])
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        signed_service_introspection.status(),
+        actix_web::http::StatusCode::OK
+    );
+    assert_eq!(
+        signed_service_introspection
+            .headers()
+            .get(actix_web::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/token-introspection+jwt")
+    );
+    let signed_service_introspection =
+        actix_web::test::read_body(signed_service_introspection).await;
+    let signed_service_introspection =
+        std::str::from_utf8(&signed_service_introspection).expect("compact introspection JWT");
+    let signed_header =
+        decode_header(signed_service_introspection).expect("signed introspection header");
+    assert_eq!(
+        signed_header.typ.as_deref(),
+        Some("token-introspection+jwt")
+    );
+    let signing_key = database
+        .public_signing_keys(&web_issuer)
+        .await
+        .expect("introspection response signing keys")
+        .into_iter()
+        .find(|key| Some(key.kid.as_str()) == signed_header.kid.as_deref())
+        .expect("introspection response signing key");
+    let mut signed_validation = Validation::new(Algorithm::RS256);
+    signed_validation.required_spec_claims.clear();
+    signed_validation.validate_exp = false;
+    signed_validation.set_issuer(&[web_issuer.as_str()]);
+    signed_validation.set_audience(&[service_client_id.as_str()]);
+    let signed_introspection = decode::<serde_json::Value>(
+        signed_service_introspection,
+        &DecodingKey::from_rsa_components(&signing_key.modulus, &signing_key.exponent)
+            .expect("introspection response public key"),
+        &signed_validation,
+    )
+    .expect("verified signed introspection response");
+    assert_eq!(
+        signed_introspection.claims["token_introspection"]["active"],
+        true
+    );
+    assert_eq!(
+        signed_introspection.claims["token_introspection"]["client_id"],
+        service_client_id
+    );
+    assert!(signed_introspection.claims.get("sub").is_none());
     let service_userinfo = actix_web::test::call_service(
         &app,
         actix_web::test::TestRequest::get()
@@ -1550,6 +1789,13 @@ async fn persists_and_atomically_consumes_security_state() {
         .expect("expired session cookie is removed");
     assert!(removal.value().is_empty());
     assert!(removal.max_age().is_some_and(|age| age.is_zero()));
+    let opbs_removal = response
+        .response()
+        .cookies()
+        .find(|cookie| cookie.name() == "robine_opbs")
+        .expect("expired OP browser-state cookie is removed");
+    assert!(opbs_removal.value().is_empty());
+    assert!(opbs_removal.max_age().is_some_and(|age| age.is_zero()));
 
     let authorization_parameters = [
         ("response_type", "code"),
@@ -1698,15 +1944,29 @@ async fn persists_and_atomically_consumes_security_state() {
         .expect("SSO redirect");
     assert!(sso_location.contains("code="));
     assert!(sso_location.contains("state=sso-state"));
+    let sso_redirect = url::Url::parse(sso_location).expect("SSO redirect URL");
     assert_eq!(
-        url::Url::parse(sso_location)
-            .expect("SSO redirect URL")
+        sso_redirect
             .query_pairs()
             .find(|(key, _)| key == "iss")
             .map(|(_, value)| value.into_owned())
             .as_deref(),
         Some(web_issuer.as_str())
     );
+    let session_state = sso_redirect
+        .query_pairs()
+        .find(|(key, _)| key == "session_state")
+        .map(|(_, value)| value.into_owned())
+        .expect("OIDC session state");
+    assert_eq!(session_state.len(), 87);
+    assert!(!session_state.contains(' '));
+    let opbs = sso_response
+        .response()
+        .cookies()
+        .find(|cookie| cookie.name() == "robine_opbs")
+        .expect("OP browser state cookie");
+    assert_eq!(opbs.value().len(), 43);
+    assert!(!opbs.http_only().unwrap_or(false));
 
     let form_post_query = format!("{authorization_query}&response_mode=form_post");
     let form_post_response = actix_web::test::call_service(
@@ -1742,6 +2002,7 @@ async fn persists_and_atomically_consumes_security_state() {
     assert!(form_post_body.contains("name=\"code\""));
     assert!(form_post_body.contains("name=\"state\" value=\"sso-state\""));
     assert!(form_post_body.contains(&format!("name=\"iss\" value=\"{web_issuer}\"")));
+    assert!(form_post_body.contains("name=\"session_state\""));
 
     let jarm_query = format!("{authorization_query}&response_mode=query.jwt");
     let jarm_response = actix_web::test::call_service(
@@ -1788,10 +2049,273 @@ async fn persists_and_atomically_consumes_security_state() {
     .expect("valid JARM signature")
     .claims;
     assert_eq!(claims["state"], "sso-state");
+    assert!(
+        claims["session_state"]
+            .as_str()
+            .is_some_and(|state| state.len() == 87 && !state.contains(' '))
+    );
     assert!(claims["code"].as_str().is_some_and(|code| !code.is_empty()));
     assert_eq!(
         claims["exp"].as_i64(),
         claims["iat"].as_i64().map(|iat| iat + 60)
+    );
+
+    let hint_signing_key = database
+        .signing_key(&web_issuer)
+        .await
+        .expect("ID token hint signing key");
+    let now = Utc::now().timestamp();
+    let id_token_hint = tokens::issue_id_token(
+        &hint_signing_key,
+        &IdTokenInput {
+            issuer: &web_issuer,
+            subject: "development-user",
+            audience: "rust-development-client",
+            session_id: None,
+            nonce: Some("prior-nonce"),
+            auth_time: Some(now),
+            mfa_verified: false,
+            at_hash: None,
+            claims: &serde_json::Map::new(),
+            now,
+            lifetime: 300,
+        },
+    )
+    .expect("ID token hint");
+    let authorization_query_with_hint = |hint: &str, prompt: Option<&str>| {
+        let mut parameters = authorization_parameters
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        if let Some(prompt) = prompt {
+            parameters.push(("prompt".to_owned(), prompt.to_owned()));
+        }
+        parameters.push(("id_token_hint".to_owned(), hint.to_owned()));
+        serde_urlencoded::to_string(parameters).expect("authorization query with ID token hint")
+    };
+    let hinted_silent_response = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri(&format!(
+                "/default/authorize?{}",
+                authorization_query_with_hint(&id_token_hint, Some("none"))
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_session",
+                sso_session.clone(),
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        hinted_silent_response.status(),
+        actix_web::http::StatusCode::FOUND
+    );
+    assert!(
+        hinted_silent_response
+            .headers()
+            .get(actix_web::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|location| location.contains("code="))
+    );
+
+    let wrong_audience_hint = successful_device_body["id_token"]
+        .as_str()
+        .expect("device ID token");
+    let wrong_audience_response = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri(&format!(
+                "/default/authorize?{}",
+                authorization_query_with_hint(wrong_audience_hint, Some("none"))
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_session",
+                sso_session.clone(),
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        wrong_audience_response.status(),
+        actix_web::http::StatusCode::FOUND
+    );
+    assert!(
+        wrong_audience_response
+            .headers()
+            .get(actix_web::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|location| location.contains("error=invalid_request"))
+    );
+
+    let other_subject_hint = tokens::issue_id_token(
+        &hint_signing_key,
+        &IdTokenInput {
+            issuer: &web_issuer,
+            subject: "other-user",
+            audience: "rust-development-client",
+            session_id: None,
+            nonce: None,
+            auth_time: Some(now),
+            mfa_verified: false,
+            at_hash: None,
+            claims: &serde_json::Map::new(),
+            now,
+            lifetime: 300,
+        },
+    )
+    .expect("other-subject ID token hint");
+    let other_subject_response = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri(&format!(
+                "/default/authorize?{}",
+                authorization_query_with_hint(&other_subject_hint, Some("none"))
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_session",
+                sso_session.clone(),
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        other_subject_response.status(),
+        actix_web::http::StatusCode::FOUND
+    );
+    assert!(
+        other_subject_response
+            .headers()
+            .get(actix_web::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|location| location.contains("error=login_required"))
+    );
+
+    let interactive_other_subject = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri(&format!(
+                "/default/authorize?{}",
+                authorization_query_with_hint(&other_subject_hint, None)
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_session",
+                sso_session.clone(),
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        interactive_other_subject.status(),
+        actix_web::http::StatusCode::OK
+    );
+    let interactive_csrf = interactive_other_subject
+        .response()
+        .cookies()
+        .find(|cookie| cookie.name() == "robine_csrf")
+        .expect("interactive ID token hint CSRF cookie")
+        .value()
+        .to_owned();
+    let interactive_body = actix_web::test::read_body(interactive_other_subject).await;
+    let interactive_body =
+        std::str::from_utf8(&interactive_body).expect("interactive ID token hint page UTF-8");
+    let interactive_transaction = hidden_form_value(interactive_body, "transaction");
+    let interactive_login_response = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::post()
+            .uri("/default/authorize")
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_session",
+                sso_session.clone(),
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "robine_csrf",
+                interactive_csrf.clone(),
+            ))
+            .set_form([
+                ("transaction", interactive_transaction.as_str()),
+                ("csrf_token", interactive_csrf.as_str()),
+                ("identifier", "admin@example.com"),
+                ("password", "change-me"),
+            ])
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        interactive_login_response.status(),
+        actix_web::http::StatusCode::FOUND
+    );
+    assert!(
+        interactive_login_response
+            .headers()
+            .get(actix_web::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|location| location.contains("error=login_required"))
+    );
+
+    let client_logout_initiation = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::post()
+            .uri("/default/logout")
+            .set_form([
+                ("client_id", "rust-development-client"),
+                (
+                    "post_logout_redirect_uri",
+                    "http://localhost:4002/signed-out",
+                ),
+                ("state", "client-logout-state"),
+                ("ui_locales", "fr"),
+            ])
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        client_logout_initiation.status(),
+        actix_web::http::StatusCode::OK
+    );
+    let client_logout_body = actix_web::test::read_body(client_logout_initiation).await;
+    assert!(
+        client_logout_body
+            .windows("id=\"logout-form\"".len())
+            .any(|value| value == b"id=\"logout-form\"")
+    );
+
+    let expired_logout_hint = tokens::issue_id_token(
+        &hint_signing_key,
+        &IdTokenInput {
+            issuer: &web_issuer,
+            subject: "development-user",
+            audience: "rust-development-client",
+            session_id: None,
+            nonce: None,
+            auth_time: Some(now - 3_600),
+            mfa_verified: false,
+            at_hash: None,
+            claims: &serde_json::Map::new(),
+            now: now - 3_600,
+            lifetime: 300,
+        },
+    )
+    .expect("expired logout ID token hint");
+    let expired_logout_query = serde_urlencoded::to_string([
+        ("client_id", "rust-development-client"),
+        ("id_token_hint", expired_logout_hint.as_str()),
+        (
+            "post_logout_redirect_uri",
+            "http://localhost:4002/signed-out",
+        ),
+    ])
+    .expect("expired logout hint query");
+    let expired_logout_initiation = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri(&format!("/default/logout?{expired_logout_query}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        expired_logout_initiation.status(),
+        actix_web::http::StatusCode::OK
     );
 
     let silent_query = format!("{authorization_query}&prompt=none");
@@ -1898,11 +2422,25 @@ async fn persists_and_atomically_consumes_security_state() {
     )
     .await;
     let metrics_body = actix_web::test::read_body(metrics_response).await;
-    assert!(
-        std::str::from_utf8(&metrics_body)
-            .expect("metrics are UTF-8")
-            .contains("robine_id_ready 0")
-    );
+    let metrics_body = std::str::from_utf8(&metrics_body).expect("metrics are UTF-8");
+    assert!(metrics_body.contains("robine_id_ready 0"));
+    for grant_type in ["client_credentials", "device_code"] {
+        let prefix = format!(
+            "robine_id_token_issuance_total{{grant_type=\"{grant_type}\",outcome=\"success\"}} "
+        );
+        let count = metrics_body
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        assert!(count > 0, "missing successful {grant_type} issuance metric");
+    }
+    let userinfo_success = metrics_body
+        .lines()
+        .find_map(|line| line.strip_prefix("robine_id_userinfo_total{outcome=\"success\"} "))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(userinfo_success > 0, "missing successful UserInfo metric");
 }
 
 fn hidden_form_value(html: &str, name: &str) -> String {

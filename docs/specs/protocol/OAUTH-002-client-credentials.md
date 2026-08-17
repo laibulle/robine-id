@@ -14,7 +14,8 @@ creating an end-user session or an OpenID identity token.
 - Discovery MUST advertise `client_credentials` only when at least one configured client enables
   that grant.
 - A client using `client_credentials` MUST be confidential and MUST authenticate with exactly its
-  configured `client_secret_basic`, `client_secret_post`, or `private_key_jwt` method.
+  configured `client_secret_basic`, `client_secret_post`, `client_secret_jwt`, or `private_key_jwt`
+  method.
 - A service-only client MAY use an empty redirect URI list and does not need the `openid` scope.
   Any client that also enables `authorization_code` MUST still declare a redirect URI and allow
   `openid`.

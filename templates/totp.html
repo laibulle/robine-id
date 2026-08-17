@@ -6,6 +6,7 @@
     <title>{{ messages.totp_title }} · {{ product_name }}</title>
     {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
+    <script defer src="/assets/app.js"></script>
   </head>
   <body>
     <main class="auth-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">

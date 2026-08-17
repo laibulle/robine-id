@@ -45,10 +45,19 @@ pub struct DiscoveryDocument {
     pub device_authorization_endpoint: Option<String>,
     pub pushed_authorization_request_endpoint: String,
     pub introspection_endpoint: String,
+    pub introspection_signing_alg_values_supported: Vec<&'static str>,
     pub revocation_endpoint: String,
     pub userinfo_endpoint: String,
+    pub userinfo_signing_alg_values_supported: Vec<&'static str>,
+    pub protected_resources: Vec<String>,
     pub jwks_uri: String,
     pub end_session_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_session_iframe: Option<String>,
+    pub frontchannel_logout_supported: bool,
+    pub frontchannel_logout_session_supported: bool,
+    pub backchannel_logout_supported: bool,
+    pub backchannel_logout_session_supported: bool,
     pub response_types_supported: Vec<&'static str>,
     pub response_modes_supported: Vec<&'static str>,
     pub grant_types_supported: Vec<&'static str>,
@@ -84,6 +93,24 @@ pub struct DiscoveryDocument {
     pub authorization_response_iss_parameter_supported: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProtectedResourceMetadata {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    pub jwks_uri: String,
+    pub scopes_supported: Vec<String>,
+    pub bearer_methods_supported: Vec<&'static str>,
+    pub resource_signing_alg_values_supported: Vec<&'static str>,
+    pub resource_name: String,
+    pub resource_documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_policy_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_tos_uri: Option<String>,
+    pub dpop_signing_alg_values_supported: Vec<&'static str>,
+    pub dpop_bound_access_tokens_required: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthorizationRequest {
     #[serde(default)]
@@ -117,6 +144,8 @@ pub struct AuthorizationRequest {
     #[serde(default)]
     pub login_hint: Option<String>,
     #[serde(default)]
+    pub id_token_hint: Option<String>,
+    #[serde(default)]
     pub acr_values: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_claims_parameter")]
     pub claims: Option<String>,
@@ -141,6 +170,7 @@ pub struct AuthorizationGrant {
     pub response_mode: Option<String>,
     pub resource: Option<String>,
     pub dpop_jkt: Option<String>,
+    pub session_id: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
@@ -170,6 +200,7 @@ impl DiscoveryDocument {
             "at_hash",
             "acr",
             "amr",
+            "sid",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -185,16 +216,17 @@ impl DiscoveryDocument {
             .collect::<Vec<_>>();
         mapped_claims.sort();
         claims_supported.extend(mapped_claims);
-        let device_authorization_supported = snapshot.configuration.clients.iter().any(|client| {
-            client
-                .grant_types
-                .iter()
-                .any(|grant| grant == DEVICE_CODE_GRANT)
-                && client
-                    .scopes
+        let device_authorization_supported =
+            snapshot.active_clients_for_issuer(issuer_id).any(|client| {
+                client
+                    .grant_types
                     .iter()
-                    .any(|scope| issuer.scopes.contains(scope))
-        });
+                    .any(|grant| grant == DEVICE_CODE_GRANT)
+                    && client
+                        .scopes
+                        .iter()
+                        .any(|scope| issuer.scopes.contains(scope))
+            });
 
         Some(Self {
             issuer: base.clone(),
@@ -204,10 +236,20 @@ impl DiscoveryDocument {
                 .then(|| format!("{base}/device_authorization")),
             pushed_authorization_request_endpoint: format!("{base}/par"),
             introspection_endpoint: format!("{base}/introspect"),
+            introspection_signing_alg_values_supported: vec!["RS256"],
             revocation_endpoint: format!("{base}/revoke"),
             userinfo_endpoint: format!("{base}/userinfo"),
+            userinfo_signing_alg_values_supported: vec!["RS256"],
+            protected_resources: vec![format!("{base}/userinfo")],
             jwks_uri: format!("{base}/jwks.json"),
             end_session_endpoint: format!("{base}/logout"),
+            check_session_iframe: url::Url::parse(&base)
+                .is_ok_and(|url| url.scheme() == "https")
+                .then(|| format!("{base}/check-session")),
+            frontchannel_logout_supported: true,
+            frontchannel_logout_session_supported: true,
+            backchannel_logout_supported: true,
+            backchannel_logout_session_supported: true,
             response_types_supported: vec!["code"],
             response_modes_supported: vec![
                 "query",
@@ -219,7 +261,7 @@ impl DiscoveryDocument {
             grant_types_supported: {
                 let mut grants = vec!["authorization_code"];
                 if issuer.scopes.iter().any(|scope| scope == "offline_access")
-                    && snapshot.configuration.clients.iter().any(|client| {
+                    && snapshot.active_clients_for_issuer(issuer_id).any(|client| {
                         client.scopes.iter().any(|scope| scope == "offline_access")
                             && client
                                 .grant_types
@@ -229,7 +271,7 @@ impl DiscoveryDocument {
                 {
                     grants.push("refresh_token");
                 }
-                if snapshot.configuration.clients.iter().any(|client| {
+                if snapshot.active_clients_for_issuer(issuer_id).any(|client| {
                     client
                         .grant_types
                         .iter()
@@ -247,7 +289,7 @@ impl DiscoveryDocument {
                 }) {
                     grants.push("client_credentials");
                 }
-                if snapshot.configuration.clients.iter().any(|client| {
+                if snapshot.active_clients_for_issuer(issuer_id).any(|client| {
                     client
                         .grant_types
                         .iter()
@@ -264,7 +306,16 @@ impl DiscoveryDocument {
                 }
                 grants
             },
-            subject_types_supported: vec!["public"],
+            subject_types_supported: {
+                let mut subject_types = vec!["public"];
+                if snapshot
+                    .active_clients_for_issuer(issuer_id)
+                    .any(|client| client.subject_type == "pairwise")
+                {
+                    subject_types.push("pairwise");
+                }
+                subject_types
+            },
             acr_values_supported: if snapshot
                 .configuration
                 .authentication
@@ -278,9 +329,7 @@ impl DiscoveryDocument {
             },
             authorization_details_types_supported: {
                 let mut supported = snapshot
-                    .configuration
-                    .clients
-                    .iter()
+                    .active_clients_for_issuer(issuer_id)
                     .filter(|client| {
                         client
                             .scopes
@@ -298,28 +347,37 @@ impl DiscoveryDocument {
                 == "jwt")
                 .then(|| vec!["RS256"]),
             authorization_signing_alg_values_supported: vec!["RS256"],
-            dpop_signing_alg_values_supported: vec!["ES256", "RS256"],
+            dpop_signing_alg_values_supported: vec!["EdDSA", "ES256", "RS256"],
             code_challenge_methods_supported: vec!["S256"],
             token_endpoint_auth_methods_supported: vec![
                 "client_secret_basic",
                 "client_secret_post",
+                "client_secret_jwt",
                 "private_key_jwt",
                 "none",
             ],
-            token_endpoint_auth_signing_alg_values_supported: vec!["RS256"],
+            token_endpoint_auth_signing_alg_values_supported: vec![
+                "EdDSA", "ES256", "HS256", "RS256",
+            ],
             introspection_endpoint_auth_methods_supported: vec![
                 "client_secret_basic",
                 "client_secret_post",
+                "client_secret_jwt",
                 "private_key_jwt",
             ],
-            introspection_endpoint_auth_signing_alg_values_supported: vec!["RS256"],
+            introspection_endpoint_auth_signing_alg_values_supported: vec![
+                "EdDSA", "ES256", "HS256", "RS256",
+            ],
             revocation_endpoint_auth_methods_supported: vec![
                 "client_secret_basic",
                 "client_secret_post",
+                "client_secret_jwt",
                 "private_key_jwt",
                 "none",
             ],
-            revocation_endpoint_auth_signing_alg_values_supported: vec!["RS256"],
+            revocation_endpoint_auth_signing_alg_values_supported: vec![
+                "EdDSA", "ES256", "HS256", "RS256",
+            ],
             service_documentation: documentation_url.to_string(),
             op_policy_uri: branding.privacy_url.clone(),
             op_tos_uri: branding.terms_url.clone(),
@@ -328,12 +386,54 @@ impl DiscoveryDocument {
             ui_locales_supported: branding.locales,
             claims_parameter_supported: true,
             request_parameter_supported: true,
-            request_object_signing_alg_values_supported: vec!["RS256"],
+            request_object_signing_alg_values_supported: vec!["EdDSA", "ES256", "RS256"],
             request_uri_parameter_supported: true,
             require_pushed_authorization_requests: issuer
                 .token_policy
                 .require_pushed_authorization_requests,
             authorization_response_iss_parameter_supported: true,
+        })
+    }
+}
+
+impl ProtectedResourceMetadata {
+    pub fn build(snapshot: &Snapshot, issuer_id: &str) -> Option<Self> {
+        let issuer = snapshot.issuer(issuer_id)?;
+        let base = issuer.url.trim_end_matches('/').to_owned();
+        let branding = snapshot.branding(Some(issuer_id), None);
+        let mut documentation_url =
+            url::Url::parse(&base).expect("validated issuer URL is parseable");
+        documentation_url.set_path("/docs");
+        documentation_url.set_query(None);
+        documentation_url.set_fragment(None);
+
+        let mut scopes_supported = snapshot
+            .configuration
+            .claims
+            .values()
+            .filter(|mapping| issuer.scopes.contains(&mapping.scope))
+            .map(|mapping| mapping.scope.clone())
+            .collect::<Vec<_>>();
+        scopes_supported.sort();
+        scopes_supported.dedup();
+        if issuer.scopes.iter().any(|scope| scope == "openid") {
+            scopes_supported.retain(|scope| scope != "openid");
+            scopes_supported.insert(0, "openid".to_owned());
+        }
+
+        Some(Self {
+            resource: format!("{base}/userinfo"),
+            authorization_servers: vec![base.clone()],
+            jwks_uri: format!("{base}/jwks.json"),
+            scopes_supported,
+            bearer_methods_supported: vec!["header"],
+            resource_signing_alg_values_supported: vec!["RS256"],
+            resource_name: format!("{} UserInfo", branding.product_name),
+            resource_documentation: documentation_url.to_string(),
+            resource_policy_uri: branding.privacy_url.clone(),
+            resource_tos_uri: branding.terms_url.clone(),
+            dpop_signing_alg_values_supported: vec!["EdDSA", "ES256", "RS256"],
+            dpop_bound_access_tokens_required: false,
         })
     }
 }
@@ -351,6 +451,7 @@ impl AuthorizationRequest {
             &mut self.request_object,
             &mut self.request_uri,
             &mut self.login_hint,
+            &mut self.id_token_hint,
             &mut self.acr_values,
             &mut self.claims,
             &mut self.authorization_details,
@@ -411,6 +512,10 @@ impl AuthorizationRequest {
                 .as_deref()
                 .is_some_and(|value| value.len() > 320)
             || self
+                .id_token_hint
+                .as_deref()
+                .is_some_and(|value| value.len() > 16 * 1024)
+            || self
                 .acr_values
                 .as_deref()
                 .is_some_and(|value| value.len() > 2_048)
@@ -418,10 +523,6 @@ impl AuthorizationRequest {
                 .claims
                 .as_deref()
                 .is_some_and(|value| value.len() > MAX_CLAIMS_PARAMETER_LENGTH)
-            || self
-                .authorization_details
-                .as_deref()
-                .is_some_and(|value| value.len() > MAX_AUTHORIZATION_DETAILS_LENGTH)
         {
             return Err(AuthorizationError::new(
                 "invalid_request",
@@ -511,7 +612,7 @@ impl AuthorizationRequest {
         }
 
         let client = snapshot
-            .client(&self.client_id)
+            .client_for_issuer(issuer_id, &self.client_id)
             .ok_or_else(|| AuthorizationError::new("invalid_request", "Unknown client"))?;
         self.authorization_details_value(snapshot, client)?;
         if !client
@@ -901,6 +1002,9 @@ pub fn validated_authorization_details(
     let Some(serialized) = serialized else {
         return Ok(Value::Array(vec![]));
     };
+    if serialized.len() > MAX_AUTHORIZATION_DETAILS_LENGTH {
+        return Err(invalid_authorization_details());
+    }
     let details = serde_json::from_str::<Value>(serialized)
         .ok()
         .and_then(|value| value.as_array().cloned())
@@ -959,10 +1063,10 @@ pub fn validated_authorization_details(
                         return Err(invalid_authorization_details());
                     }
                 }
-                "actions" | "datatypes" | "privileges" => {
-                    if bounded_detail_strings(value).is_none() {
-                        return Err(invalid_authorization_details());
-                    }
+                "actions" | "datatypes" | "privileges"
+                    if bounded_detail_strings(value).is_none() =>
+                {
+                    return Err(invalid_authorization_details());
                 }
                 _ => {}
             }
@@ -1037,7 +1141,12 @@ pub fn authorization_details_subset(requested: &Value, granted: &Value) -> bool 
     !requested.is_empty()
         && requested.iter().all(|requested_detail| {
             granted.iter().any(|granted_detail| {
-                authorization_detail_value_subset(requested_detail, granted_detail)
+                requested_detail
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some()
+                    && requested_detail.get("type") == granted_detail.get("type")
+                    && authorization_detail_value_subset(requested_detail, granted_detail)
             })
         })
 }
@@ -1169,13 +1278,16 @@ fn valid_pkce_challenge(challenge: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{Branding, Issuer, RootConfiguration};
+    use crate::configuration::{AuthorizationDetailType, Branding, Issuer, RootConfiguration};
+    use serde_json::json;
 
     fn snapshot() -> Snapshot {
         Snapshot {
             configuration: RootConfiguration {
                 schema_version: 1,
+                pairwise_subject_salt_reference: None,
                 issuers: vec![Issuer {
+                    enabled: true,
                     id: "default".to_owned(),
                     url: "https://id.example/default".to_owned(),
                     scopes: vec!["openid".to_owned()],
@@ -1183,11 +1295,19 @@ mod tests {
                     branding: None,
                 }],
                 clients: vec![Client {
+                    enabled: true,
+                    issuer_ids: vec![],
                     id: "web".to_owned(),
                     name: "Web".to_owned(),
                     client_type: "public".to_owned(),
+                    subject_type: "public".to_owned(),
+                    sector_identifier: None,
                     redirect_uris: vec!["https://app.example/callback".to_owned()],
                     post_logout_redirect_uris: vec![],
+                    frontchannel_logout_uri: None,
+                    frontchannel_logout_session_required: false,
+                    backchannel_logout_uri: None,
+                    backchannel_logout_session_required: false,
                     resources: vec![],
                     scopes: vec!["openid".to_owned()],
                     grant_types: vec!["authorization_code".to_owned()],
@@ -1195,8 +1315,14 @@ mod tests {
                     nonce_required: None,
                     consent_required: None,
                     introspection_allowed: false,
+                    userinfo_signed_response_alg: None,
                     require_pushed_authorization_requests: false,
+                    require_signed_request_object: false,
+                    request_object_jwks: None,
                     required_acr: None,
+                    max_authentication_age: None,
+                    actor_token_exchange_allowed: false,
+                    authorized_actor_clients: vec![],
                     authorization_details_types: vec![],
                     authentication_method: None,
                     secret_reference: None,
@@ -1214,6 +1340,30 @@ mod tests {
             },
             revision: "revision".to_owned(),
         }
+    }
+
+    #[test]
+    fn discovery_advertises_only_configured_subject_types() {
+        let public = snapshot();
+        assert_eq!(
+            DiscoveryDocument::build(&public, "default")
+                .expect("discovery")
+                .subject_types_supported,
+            vec!["public"]
+        );
+
+        let mut pairwise = snapshot();
+        pairwise.configuration.clients[0].subject_type = "pairwise".to_owned();
+        pairwise.configuration.pairwise_subject_salt_reference = Some(json!({
+            "provider": "env",
+            "key": "PAIRWISE_SUBJECT_SALT"
+        }));
+        assert_eq!(
+            DiscoveryDocument::build(&pairwise, "default")
+                .expect("pairwise discovery")
+                .subject_types_supported,
+            vec!["public", "pairwise"]
+        );
     }
 
     #[test]
@@ -1235,6 +1385,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1272,6 +1423,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1283,6 +1435,46 @@ mod tests {
             request.validate(&snapshot, "default").unwrap_err().code,
             "invalid_target"
         );
+    }
+
+    #[test]
+    fn rejects_authorization_for_a_client_bound_to_another_issuer() {
+        let mut snapshot = snapshot();
+        let mut other = snapshot.configuration.issuers[0].clone();
+        other.id = "other".to_owned();
+        other.url = "https://id.example/other".to_owned();
+        snapshot.configuration.issuers.push(other);
+        snapshot.configuration.clients[0].issuer_ids = vec!["default".to_owned()];
+        let request = AuthorizationRequest {
+            response_type: "code".to_owned(),
+            client_id: "web".to_owned(),
+            redirect_uri: "https://app.example/callback".to_owned(),
+            scope: "openid".to_owned(),
+            state: "state".to_owned(),
+            nonce: "nonce".to_owned(),
+            code_challenge: Some("a".repeat(43)),
+            code_challenge_method: Some("S256".to_owned()),
+            ui_locales: None,
+            prompt: None,
+            max_age: None,
+            response_mode: None,
+            resource: None,
+            request_object: None,
+            request_uri: None,
+            login_hint: None,
+            id_token_hint: None,
+            acr_values: None,
+            claims: None,
+            authorization_details: None,
+            dpop_jkt: None,
+        };
+
+        assert!(request.validate(&snapshot, "default").is_ok());
+        let error = request
+            .validate(&snapshot, "other")
+            .expect_err("client must not cross issuers");
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.description, "Unknown client");
     }
 
     #[test]
@@ -1304,6 +1496,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1340,6 +1533,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1368,6 +1562,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1403,6 +1598,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1441,6 +1637,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1476,17 +1673,37 @@ mod tests {
             discovery.authorization_signing_alg_values_supported,
             vec!["RS256"]
         );
+        assert_eq!(
+            discovery.userinfo_signing_alg_values_supported,
+            vec!["RS256"]
+        );
+        assert_eq!(
+            discovery.protected_resources,
+            vec!["https://id.example/default/userinfo"]
+        );
         assert_eq!(discovery.access_token_signing_alg_values_supported, None);
         assert_eq!(
             discovery.dpop_signing_alg_values_supported,
-            vec!["ES256", "RS256"]
+            vec!["EdDSA", "ES256", "RS256"]
         );
         assert!(discovery.authorization_response_iss_parameter_supported);
+        assert_eq!(
+            discovery.check_session_iframe.as_deref(),
+            Some("https://id.example/default/check-session")
+        );
+        let mut plain_http = snapshot();
+        plain_http.configuration.issuers[0].url = "http://127.0.0.1:4001/default".to_owned();
+        assert_eq!(
+            DiscoveryDocument::build(&plain_http, "default")
+                .expect("loopback discovery")
+                .check_session_iframe,
+            None
+        );
         assert!(discovery.claims_parameter_supported);
         assert!(discovery.request_parameter_supported);
         assert_eq!(
             discovery.request_object_signing_alg_values_supported,
-            vec!["RS256"]
+            vec!["EdDSA", "ES256", "RS256"]
         );
         assert!(discovery.request_uri_parameter_supported);
         assert!(!discovery.require_pushed_authorization_requests);
@@ -1496,16 +1713,49 @@ mod tests {
         );
         assert_eq!(discovery.ui_locales_supported, vec!["en"]);
         assert_eq!(
+            discovery.token_endpoint_auth_methods_supported,
+            vec![
+                "client_secret_basic",
+                "client_secret_post",
+                "client_secret_jwt",
+                "private_key_jwt",
+                "none"
+            ]
+        );
+        assert_eq!(
             discovery.token_endpoint_auth_signing_alg_values_supported,
+            vec!["EdDSA", "ES256", "HS256", "RS256"]
+        );
+        assert_eq!(
+            discovery.introspection_endpoint_auth_methods_supported,
+            vec![
+                "client_secret_basic",
+                "client_secret_post",
+                "client_secret_jwt",
+                "private_key_jwt"
+            ]
+        );
+        assert_eq!(
+            discovery.introspection_signing_alg_values_supported,
             vec!["RS256"]
         );
         assert_eq!(
             discovery.introspection_endpoint_auth_signing_alg_values_supported,
-            vec!["RS256"]
+            vec!["EdDSA", "ES256", "HS256", "RS256"]
+        );
+        assert_eq!(
+            discovery.revocation_endpoint_auth_methods_supported,
+            vec![
+                "client_secret_basic",
+                "client_secret_post",
+                "client_secret_jwt",
+                "private_key_jwt",
+                "none"
+            ]
         );
         assert_eq!(
             discovery.revocation_endpoint_auth_signing_alg_values_supported,
-            vec!["RS256"]
+            vec!["EdDSA", "ES256", "HS256", "RS256"]
         );
         assert_eq!(discovery.service_documentation, "https://id.example/docs");
         assert_eq!(discovery.op_policy_uri, None);
@@ -1541,6 +1791,11 @@ mod tests {
         assert!(discovery.claims_supported.contains(&"at_hash".to_owned()));
         assert!(discovery.claims_supported.contains(&"acr".to_owned()));
         assert!(discovery.claims_supported.contains(&"amr".to_owned()));
+        assert!(discovery.claims_supported.contains(&"sid".to_owned()));
+        assert!(discovery.backchannel_logout_supported);
+        assert!(discovery.backchannel_logout_session_supported);
+        assert!(discovery.frontchannel_logout_supported);
+        assert!(discovery.frontchannel_logout_session_supported);
         assert_eq!(
             discovery.acr_values_supported,
             vec![crate::tokens::PASSWORD_ACR]
@@ -1557,6 +1812,48 @@ mod tests {
                 .acr_values_supported,
             vec![crate::tokens::PASSWORD_ACR, crate::tokens::MFA_ACR]
         );
+    }
+
+    #[test]
+    fn publishes_exact_user_info_protected_resource_metadata() {
+        let metadata =
+            ProtectedResourceMetadata::build(&snapshot(), "default").expect("resource metadata");
+
+        assert_eq!(metadata.resource, "https://id.example/default/userinfo");
+        assert_eq!(
+            metadata.authorization_servers,
+            vec!["https://id.example/default"]
+        );
+        assert_eq!(metadata.jwks_uri, "https://id.example/default/jwks.json");
+        assert_eq!(metadata.scopes_supported, vec!["openid"]);
+        assert_eq!(metadata.bearer_methods_supported, vec!["header"]);
+        assert_eq!(
+            metadata.resource_signing_alg_values_supported,
+            vec!["RS256"]
+        );
+        assert_eq!(
+            metadata.dpop_signing_alg_values_supported,
+            vec!["EdDSA", "ES256", "RS256"]
+        );
+        assert!(!metadata.dpop_bound_access_tokens_required);
+
+        let mut scoped_snapshot = snapshot();
+        scoped_snapshot.configuration.issuers[0].scopes.extend([
+            "profile".to_owned(),
+            "offline_access".to_owned(),
+            "service.read".to_owned(),
+        ]);
+        scoped_snapshot.configuration.claims.insert(
+            "name".to_owned(),
+            crate::configuration::ClaimMapping {
+                source: "name".to_owned(),
+                scope: "profile".to_owned(),
+            },
+        );
+        let scoped = ProtectedResourceMetadata::build(&scoped_snapshot, "default")
+            .expect("scoped resource metadata");
+        assert_eq!(scoped.scopes_supported, vec!["openid", "profile"]);
+        assert!(ProtectedResourceMetadata::build(&snapshot(), "missing").is_none());
     }
 
     #[test]
@@ -1626,6 +1923,39 @@ mod tests {
     }
 
     #[test]
+    fn disabled_clients_do_not_contribute_dynamic_discovery_capabilities() {
+        let mut snapshot = snapshot();
+        snapshot.configuration.issuers[0]
+            .scopes
+            .extend(["offline_access".to_owned(), "service.read".to_owned()]);
+        let client = snapshot
+            .configuration
+            .clients
+            .first_mut()
+            .expect("configured client");
+        client.enabled = false;
+        client.subject_type = "pairwise".to_owned();
+        client
+            .scopes
+            .extend(["offline_access".to_owned(), "service.read".to_owned()]);
+        client.grant_types.extend([
+            "refresh_token".to_owned(),
+            "client_credentials".to_owned(),
+            "urn:ietf:params:oauth:grant-type:token-exchange".to_owned(),
+            DEVICE_CODE_GRANT.to_owned(),
+        ]);
+        client
+            .authorization_details_types
+            .push("account_information".to_owned());
+
+        let discovery = DiscoveryDocument::build(&snapshot, "default").expect("discovery");
+        assert_eq!(discovery.device_authorization_endpoint, None);
+        assert_eq!(discovery.grant_types_supported, vec!["authorization_code"]);
+        assert_eq!(discovery.subject_types_supported, vec!["public"]);
+        assert!(discovery.authorization_details_types_supported.is_empty());
+    }
+
+    #[test]
     fn advertises_token_exchange_only_when_configured() {
         let mut snapshot = snapshot();
         let grant = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -1669,6 +1999,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1708,6 +2039,12 @@ mod tests {
             "invalid_request"
         );
         request.login_hint = None;
+        request.id_token_hint = Some("x".repeat(16 * 1024 + 1));
+        assert_eq!(
+            request.validate(&snapshot(), "default").unwrap_err().code,
+            "invalid_request"
+        );
+        request.id_token_hint = None;
         request.dpop_jkt = Some("short".to_owned());
         assert_eq!(
             request.validate(&snapshot(), "default").unwrap_err().code,
@@ -1736,6 +2073,7 @@ mod tests {
             request_object: Some(String::new()),
             request_uri: Some(String::new()),
             login_hint: Some(String::new()),
+            id_token_hint: Some(String::new()),
             acr_values: Some(String::new()),
             claims: Some(String::new()),
             authorization_details: None,
@@ -1747,6 +2085,7 @@ mod tests {
         assert!(request.response_mode.is_none());
         assert!(request.request_object.is_none());
         assert!(request.request_uri.is_none());
+        assert!(request.id_token_hint.is_none());
     }
 
     #[test]
@@ -1768,6 +2107,7 @@ mod tests {
             request_object: None,
             request_uri: None,
             login_hint: None,
+            id_token_hint: None,
             acr_values: None,
             claims: None,
             authorization_details: None,
@@ -1816,7 +2156,6 @@ mod tests {
                 "invalid_request"
             );
         }
-
         request.acr_values = None;
         request.claims = Some(
             serde_json::json!({
@@ -1901,5 +2240,102 @@ mod tests {
                 .claims_supported
                 .contains(&"department".to_owned())
         );
+    }
+
+    #[test]
+    fn validates_registered_rich_authorization_details() {
+        let mut snapshot = snapshot();
+        snapshot
+            .configuration
+            .authorization_detail_types
+            .push(AuthorizationDetailType {
+                type_id: "account_information".to_owned(),
+                name: "Account information".to_owned(),
+                allowed_fields: vec![
+                    "actions".to_owned(),
+                    "identifier".to_owned(),
+                    "locations".to_owned(),
+                ],
+                required_fields: vec!["actions".to_owned()],
+            });
+        let client = snapshot.configuration.clients.first_mut().expect("client");
+        client.authorization_details_types = vec!["account_information".to_owned()];
+        client.resources = vec!["https://api.example/accounts".to_owned()];
+        let client = snapshot.client("web").expect("client");
+
+        let details = json!([{
+            "type": "account_information",
+            "actions": ["read_balances", "read_transactions"],
+            "identifier": "account-42",
+            "locations": ["https://api.example/accounts"]
+        }]);
+        assert_eq!(
+            validated_authorization_details(Some(&details.to_string()), &snapshot, client)
+                .expect("valid details"),
+            details
+        );
+        assert_eq!(
+            DiscoveryDocument::build(&snapshot, "default")
+                .expect("discovery")
+                .authorization_details_types_supported,
+            ["account_information"]
+        );
+
+        for invalid in [
+            json!([]),
+            json!([{"actions": ["read_balances"]}]),
+            json!([{"type": "unknown", "actions": ["read_balances"]}]),
+            json!([{"type": "account_information"}]),
+            json!([{"type": "account_information", "actions": ["read_balances"], "unknown": true}]),
+            json!([{"type": "account_information", "actions": [], "locations": ["https://evil.example"]}]),
+        ] {
+            assert_eq!(
+                validated_authorization_details(Some(&invalid.to_string()), &snapshot, client)
+                    .unwrap_err()
+                    .code,
+                "invalid_authorization_details"
+            );
+        }
+        let oversized = format!(
+            r#"[{{"type":"account_information","actions":["read_balances"],"identifier":"{}"}}]"#,
+            "x".repeat(MAX_AUTHORIZATION_DETAILS_LENGTH)
+        );
+        assert_eq!(
+            validated_authorization_details(Some(&oversized), &snapshot, client)
+                .unwrap_err()
+                .code,
+            "invalid_authorization_details"
+        );
+    }
+
+    #[test]
+    fn rich_authorization_details_can_only_be_downscoped() {
+        let granted = json!([{
+            "type": "account_information",
+            "actions": ["read_balances", "read_transactions"],
+            "identifier": "account-42"
+        }]);
+        assert!(authorization_details_subset(
+            &json!([{
+                "type": "account_information",
+                "actions": ["read_balances"]
+            }]),
+            &granted
+        ));
+        assert!(!authorization_details_subset(
+            &json!([{
+                "type": "account_information",
+                "actions": ["initiate_payment"]
+            }]),
+            &granted
+        ));
+        assert!(!authorization_details_subset(
+            &json!([{
+                "type": "payment_initiation",
+                "actions": ["read_balances"]
+            }]),
+            &granted
+        ));
+        assert!(!authorization_details_subset(&json!([]), &granted));
     }
 }

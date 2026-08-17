@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="{{ messages.locale }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ messages.signed_out_title }} · {{ product_name }}</title>
+    {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
+    <link rel="stylesheet" href="/assets/app.css">
+    <script defer src="/assets/frontchannel.js"></script>
+  </head>
+  <body>
+    <main
+      id="frontchannel-logout"
+      class="auth-shell"
+      style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}"
+      data-frontchannel-logout
+      data-return-to="{{ destination }}"
+    >
+      <section class="auth-card" aria-labelledby="signed-out-title">
+        {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo">{% else %}<div class="logout-progress" aria-hidden="true"></div>{% endif %}
+        <p class="eyebrow">{{ product_name }}</p>
+        <h1 id="signed-out-title">{{ messages.signed_out_title }}</h1>
+        <p class="auth-intro">{{ messages.signed_out_intro }}</p>
+        <div class="frontchannel-frames" aria-hidden="true">
+          {% for uri in logout_uris %}
+            <iframe
+              src="{{ uri }}"
+              title=""
+              tabindex="-1"
+              sandbox="allow-same-origin allow-scripts"
+              referrerpolicy="no-referrer"
+            ></iframe>
+          {% endfor %}
+        </div>
+        <a id="frontchannel-continue" class="primary-link full-width" href="{{ destination }}">{{ messages.return_home }}</a>
+      </section>
+    </main>
+  </body>
+</html>

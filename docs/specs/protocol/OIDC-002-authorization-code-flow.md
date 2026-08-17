@@ -48,8 +48,12 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
 - A non-negative integer `max_age` MUST force reauthentication when the session authentication time
   is older than requested. `max_age=0` always forces an active credential check and returns
   `login_required` when combined with `prompt=none`.
+- An application `max_authentication_age` policy MUST apply even when the request omits `max_age`;
+  when both are present, the lower value is the effective maximum age.
 - A bounded `login_hint` MAY prefill the identifier field, MUST survive the no-JavaScript login
   form round trip, and MUST never bypass credential verification or appear in logs.
+- A bounded `id_token_hint` follows OIDC-012. It MAY identify the expected subject for SSO but MUST
+  never replace verification of the issuer, audience, browser session, or current client policy.
 - A bounded `acr_values` parameter MAY list up to sixteen Authentication Context Class References
   in preference order. It is a voluntary OIDC request: the server MUST preserve it through direct
   GET/POST, PAR, and signed Request Objects, then return the authentication context actually
@@ -64,7 +68,8 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
 - Authorization-code token requests MUST use `grant_type=authorization_code` and include the code,
   client identifier, exact redirect URI, and PKCE verifier. Refresh requests follow OIDC-006.
 - Public clients authenticate with method `none`. Confidential clients authenticate with their
-  configured secret method or `private_key_jwt` according to OAUTH-004. Credentials supplied
+  configured secret method, `client_secret_jwt` according to OAUTH-010, or `private_key_jwt`
+  according to OAUTH-004. Credentials supplied
   through the wrong transport MUST be rejected.
 - Token success responses MUST set `Cache-Control: no-store` and `Pragma: no-cache`.
 - Browser token requests from a public client MUST support CORS only when `Origin` exactly matches

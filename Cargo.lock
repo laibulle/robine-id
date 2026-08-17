@@ -798,6 +798,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -2064,6 +2065,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "constant_time_eq",
+ "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
  "hmac",
@@ -2072,6 +2074,7 @@ dependencies = [
  "p256",
  "rand_core 0.6.4",
  "rsa",
+ "rustls",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2084,6 +2087,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "vercel_runtime",
+ "webpki-roots 1.0.9",
  "zeroize",
 ]
 

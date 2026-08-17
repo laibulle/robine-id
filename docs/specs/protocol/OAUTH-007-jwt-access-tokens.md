@@ -25,6 +25,8 @@ default. Both formats retain a PostgreSQL digest for introspection and revocatio
   user-authentication claims.
 - Authorized mapped claims MAY be copied into the token. Configuration MUST reserve protocol claim
   names so mappings cannot override signed authority.
+- An actor-aware Token Exchange grant MUST contain the RFC 8693 `act` object, including its bounded
+  nested delegation history. Configured identity claims MUST NOT override `act` or `may_act`.
 - A DPoP-bound token MUST contain `cnf: {"jkt": ...}` and continue to require RFC 9449 proof at
   Robine ID protected endpoints.
 - Authorization Code, Device Authorization, Refresh Token, Client Credentials, and Token Exchange

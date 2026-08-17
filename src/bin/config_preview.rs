@@ -22,6 +22,13 @@ fn main() -> io::Result<()> {
         &desired.configuration.clients,
         |client| &client.id,
         removal_action,
+        |active, desired| {
+            if active.enabled && !desired.enabled {
+                "disable"
+            } else {
+                "update"
+            }
+        },
         &mut operations,
     );
     diff(
@@ -30,6 +37,13 @@ fn main() -> io::Result<()> {
         &desired.configuration.issuers,
         |issuer| &issuer.id,
         removal_action,
+        |active, desired| {
+            if active.enabled && !desired.enabled {
+                "disable"
+            } else {
+                "update"
+            }
+        },
         &mut operations,
     );
     diff(
@@ -38,6 +52,13 @@ fn main() -> io::Result<()> {
         &desired.configuration.users,
         |user| &user.id,
         removal_action,
+        |active, desired| {
+            if active.enabled && !desired.enabled {
+                "disable"
+            } else {
+                "update"
+            }
+        },
         &mut operations,
     );
     diff_single(
@@ -50,6 +71,12 @@ fn main() -> io::Result<()> {
         "claims",
         &active.configuration.claims,
         &desired.configuration.claims,
+        &mut operations,
+    );
+    diff_single(
+        "authorization_detail_types",
+        &active.configuration.authorization_detail_types,
+        &desired.configuration.authorization_detail_types,
         &mut operations,
     );
     diff_single(
@@ -90,36 +117,38 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn diff<T, F>(
+fn diff<T, F, C>(
     resource: &str,
     active: &[T],
     desired: &[T],
     id: F,
     removal_action: &str,
+    changed_action: C,
     operations: &mut Vec<(String, String, String)>,
 ) where
     T: Serialize,
     F: Fn(&T) -> &String,
+    C: Fn(&T, &T) -> &'static str,
 {
-    let index = |items: &[T]| {
-        items
-            .iter()
-            .map(|item| {
-                (
-                    id(item).clone(),
-                    serde_json::to_value(item).unwrap_or(Value::Null),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let active = index(active);
-    let desired = index(desired);
+    let active = active
+        .iter()
+        .map(|item| (id(item).clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let desired = desired
+        .iter()
+        .map(|item| (id(item).clone(), item))
+        .collect::<BTreeMap<_, _>>();
 
-    for (item_id, value) in &desired {
+    for (item_id, desired_item) in &desired {
         let action = match active.get(item_id) {
             None => "create",
-            Some(active) if active == value => "unchanged",
-            Some(_) => "update",
+            Some(active_item)
+                if serde_json::to_value(*active_item).unwrap_or(Value::Null)
+                    == serde_json::to_value(*desired_item).unwrap_or(Value::Null) =>
+            {
+                "unchanged"
+            }
+            Some(active_item) => changed_action(active_item, desired_item),
         };
         operations.push((resource.to_owned(), item_id.clone(), action.to_owned()));
     }
@@ -159,6 +188,7 @@ mod tests {
     struct Resource {
         id: String,
         value: u8,
+        enabled: bool,
     }
 
     #[test]
@@ -166,6 +196,7 @@ mod tests {
         let active = vec![Resource {
             id: "removed".to_owned(),
             value: 1,
+            enabled: true,
         }];
         let desired = Vec::<Resource>::new();
         let mut operations = Vec::new();
@@ -175,6 +206,13 @@ mod tests {
             &desired,
             |resource| &resource.id,
             "delete",
+            |active, desired| {
+                if active.enabled && !desired.enabled {
+                    "disable"
+                } else {
+                    "update"
+                }
+            },
             &mut operations,
         );
         diff_single("telemetry", &1_u8, &2_u8, &mut operations);
@@ -189,5 +227,49 @@ mod tests {
             "global".to_owned(),
             "update".to_owned()
         )));
+    }
+
+    #[test]
+    fn reports_explicit_suspension_as_disable_and_reactivation_as_update() {
+        let active = vec![Resource {
+            id: "application".to_owned(),
+            value: 1,
+            enabled: true,
+        }];
+        let suspended = vec![Resource {
+            id: "application".to_owned(),
+            value: 1,
+            enabled: false,
+        }];
+        let mut operations = Vec::new();
+        let changed_action = |active: &Resource, desired: &Resource| {
+            if active.enabled && !desired.enabled {
+                "disable"
+            } else {
+                "update"
+            }
+        };
+        diff(
+            "clients",
+            &active,
+            &suspended,
+            |resource| &resource.id,
+            "delete",
+            changed_action,
+            &mut operations,
+        );
+        assert_eq!(operations[0].2, "disable");
+
+        operations.clear();
+        diff(
+            "clients",
+            &suspended,
+            &active,
+            |resource| &resource.id,
+            "delete",
+            changed_action,
+            &mut operations,
+        );
+        assert_eq!(operations[0].2, "update");
     }
 }

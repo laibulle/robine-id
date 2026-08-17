@@ -155,6 +155,11 @@ button:focus-visible {
 .brand-logo { display: block; width: 2.65rem; height: 2.65rem; flex: none; object-fit: contain; }
 .auth-brand-logo { display: block; width: 3.5rem; height: 3.5rem; object-fit: contain; }
 .success-mark { display: grid; width: 3rem; height: 3rem; place-items: center; border-radius: 1rem; color: #fffdf6; background: var(--auth-primary); font-size: 1.25rem; font-weight: 900; }
+.frontchannel-frames { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.frontchannel-frames iframe { width: 1px; height: 1px; border: 0; }
+.logout-progress { width: 3rem; height: 3rem; margin-bottom: 1rem; border: 0.25rem solid color-mix(in srgb, var(--auth-primary) 18%, transparent); border-top-color: var(--auth-primary); border-radius: 50%; animation: logout-spin 800ms linear infinite; }
+@keyframes logout-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .logout-progress { animation: none; } }
 
 .configured-logo { display: block; width: auto; max-width: min(100%, 12rem); height: 3rem; object-fit: contain; }
 .nav-logo { max-width: 2.5rem; height: 2.5rem; }
@@ -225,6 +230,10 @@ button:focus-visible {
 }
 
 .primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
   min-height: 3.1rem;
   margin-top: 1rem;
   border: 0;
@@ -281,6 +290,41 @@ button:focus-visible {
 
 .consent-list li { display: flex; align-items: center; gap: 0.7rem; }
 .consent-list span { color: #18794e; font-weight: 900; }
+.authorization-details {
+  display: grid;
+  gap: 0.7rem;
+  margin: -0.25rem 0 1.5rem;
+}
+.authorization-details h2 {
+  margin: 0;
+  color: var(--auth-ink);
+  font-size: 1rem;
+}
+.authorization-detail {
+  overflow: hidden;
+  border: 1px solid var(--auth-border);
+  border-radius: 0.8rem;
+  background: #f8fafc;
+}
+.authorization-detail summary {
+  padding: 0.8rem 0.9rem;
+  color: var(--auth-ink);
+  font-weight: 750;
+  cursor: pointer;
+}
+.authorization-detail p { margin: 0 0.9rem 0.45rem; color: var(--auth-muted); font-size: 0.82rem; }
+.authorization-detail pre {
+  overflow-x: auto;
+  margin: 0;
+  padding: 0.8rem 0.9rem;
+  border-top: 1px solid var(--auth-border);
+  color: #223047;
+  background: white;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .consent-actions { display: grid; gap: 0.65rem; }
 .consent-actions .primary-action { margin-top: 0; }
 .full-width { width: 100%; }
@@ -304,6 +348,10 @@ button:focus-visible {
 }
 
 .secondary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
   min-height: 3rem;
   border: 1px solid var(--auth-border);
   border-radius: 0.8rem;
@@ -314,8 +362,23 @@ button:focus-visible {
   cursor: pointer;
 }
 
+form[data-submitting="true"] button[type="submit"] { pointer-events: none; }
+form[aria-busy="true"] button[type="submit"] { opacity: 0.72; cursor: wait; }
+button.is-submitting::after {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 auto;
+  border: 0.13rem solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: submit-spin 700ms linear infinite;
+  content: "";
+}
+@keyframes submit-spin { to { transform: rotate(360deg); } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+  button.is-submitting::after { animation: none; }
 }
 
 @media (forced-colors: active) {

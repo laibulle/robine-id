@@ -66,6 +66,8 @@
         "consent.approve": "Autoriser",
         "consent.deny": "Annuler",
         "consent.sign_out_note": "Vous pouvez vous déconnecter à tout moment.",
+        "consent.authorization_details": "Accès détaillés",
+        "consent.authorization_detail_payload": "Détails demandés",
         "scope.openid": "Confirmer votre identité",
         "scope.profile": "Consulter votre nom et votre profil",
         "scope.email": "Consulter votre adresse e-mail",

@@ -10,6 +10,7 @@ repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary_directory=$(mktemp -d)
 project="robine-id-release-smoke-$$"
 peer_container="$project-peer"
+backchannel_container="$project-backchannel-rp"
 bind_port=$(printenv ROBINE_ID_SMOKE_PORT 2>/dev/null || printf '4011')
 redirect_port=$(printenv ROBINE_ID_SMOKE_REDIRECT_PORT 2>/dev/null || printf '4012')
 docker_host=$(printenv DOCKER_HOST 2>/dev/null || true)
@@ -31,6 +32,8 @@ case "$docker_host" in
 esac
 issuer_url="http://127.0.0.1:$bind_port/default"
 jwt_issuer_url="http://127.0.0.1:$bind_port/jwt"
+disabled_issuer_url="http://127.0.0.1:$bind_port/disabled"
+session_issuer_url="https://id.release.example/session"
 environment_file="$temporary_directory/release.env"
 configuration_file="$temporary_directory/robine_id.json"
 applications_directory="$temporary_directory/applications"
@@ -41,6 +44,7 @@ root_configuration_json=''
 applications_json=''
 
 cleanup() {
+  docker rm --force "$backchannel_container" >/dev/null 2>&1 || true
   docker rm --force "$peer_container" >/dev/null 2>&1 || true
   if [ -n "$compose_override_file" ]; then
     ROBINE_ID_ENV_FILE="$environment_file" ROBINE_ID_BIND_PORT="$bind_port" \
@@ -72,6 +76,11 @@ mkdir -p "$applications_directory"
 client_assertion_private_key="$temporary_directory/client-assertion-private.pem"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out "$client_assertion_private_key" 2>/dev/null
+client_assertion_ec_private_key="$temporary_directory/client-assertion-ec-private.pem"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  -out "$client_assertion_ec_private_key" 2>/dev/null
+client_assertion_ed_private_key="$temporary_directory/client-assertion-ed-private.pem"
+openssl genpkey -algorithm ED25519 -out "$client_assertion_ed_private_key" 2>/dev/null
 client_assertion_modulus_hex=$(
   openssl rsa -in "$client_assertion_private_key" -noout -modulus 2>/dev/null \
     | sed 's/^Modulus=//'
@@ -83,6 +92,29 @@ client_assertion_modulus=$(
     | tr '+/' '-_' \
     | tr -d '='
 )
+client_assertion_ec_point=$(
+  openssl pkey -in "$client_assertion_ec_private_key" -pubout -outform DER 2>/dev/null \
+    | tail -c 65 \
+    | xxd -p -c 256
+)
+test "$(expr length "$client_assertion_ec_point")" = '130'
+test "$(printf '%s' "$client_assertion_ec_point" | cut -c 1-2)" = '04'
+client_assertion_ec_x=$(
+  printf '%s' "$client_assertion_ec_point" | cut -c 3-66 | xxd -r -p \
+    | openssl base64 -A | tr '+/' '-_' | tr -d '='
+)
+client_assertion_ec_y=$(
+  printf '%s' "$client_assertion_ec_point" | cut -c 67-130 | xxd -r -p \
+    | openssl base64 -A | tr '+/' '-_' | tr -d '='
+)
+client_assertion_ed_x=$(
+  openssl pkey -in "$client_assertion_ed_private_key" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 \
+    | openssl base64 -A \
+    | tr '+/' '-_' \
+    | tr -d '='
+)
+test "$(expr length "$client_assertion_ed_x")" = '43'
 dpop_jkt=$(
   printf '{"e":"AQAB","kty":"RSA","n":"%s"}' "$client_assertion_modulus" \
     | openssl dgst -sha256 -binary \
@@ -91,6 +123,14 @@ dpop_jkt=$(
     | tr -d '='
 )
 test "$(expr length "$dpop_jkt")" = '43'
+dpop_ed_jkt=$(
+  printf '{"crv":"Ed25519","kty":"OKP","x":"%s"}' "$client_assertion_ed_x" \
+    | openssl dgst -sha256 -binary \
+    | openssl base64 -A \
+    | tr '+/' '-_' \
+    | tr -d '='
+)
+test "$(expr length "$dpop_ed_jkt")" = '43'
 
 cat >"$environment_file" <<'EOF'
 POSTGRES_PASSWORD=release-smoke-postgres-password
@@ -100,12 +140,15 @@ ROBINE_ID_RELOAD_INTERVAL=250
 TRUST_PROXY_HEADERS=false
 RUST_LOG=robine_id=info
 INTROSPECTION_CLIENT_SECRET=release-smoke-introspection-secret
+CLIENT_SECRET_JWT_SECRET=release-smoke-client-secret-jwt-0123456789abcdef
 RELEASE_SMOKE_TOTP_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+PAIRWISE_SUBJECT_SALT=release-smoke-pairwise-subject-salt-0123456789abcdef
 EOF
 
 cat >"$configuration_file" <<EOF
 {
   "schema_version": 1,
+  "pairwise_subject_salt_reference": {"provider": "env", "key": "PAIRWISE_SUBJECT_SALT"},
   "issuers": [{
     "id": "default",
     "url": "$issuer_url",
@@ -131,25 +174,71 @@ cat >"$configuration_file" <<EOF
       "clock_skew": 30,
       "signing_key_rotation_interval": 3600
     }
+  }, {
+    "id": "session",
+    "url": "$session_issuer_url",
+    "scopes": ["openid", "profile", "email", "offline_access", "service.read"],
+    "token_policy": {
+      "authorization_code_lifetime": 120,
+      "id_token_lifetime": 900,
+      "access_token_lifetime": 900,
+      "refresh_token_lifetime": 2592000,
+      "clock_skew": 30
+    }
+  }, {
+    "id": "disabled",
+    "enabled": false,
+    "url": "$disabled_issuer_url",
+    "scopes": ["openid", "service.read"]
   }],
   "users": [{
     "id": "release-smoke-user",
     "identifier": "admin@example.com",
     "password_hash": "\$2b\$12\$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+    "issuer_ids": ["default", "jwt", "session"],
     "name": "Release Smoke User",
     "email": "admin@example.com"
   }, {
     "id": "release-smoke-mfa-user",
     "identifier": "mfa@example.com",
     "password_hash": "\$2b\$12\$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+    "issuer_ids": ["default"],
     "totp_secret_reference": {"provider": "env", "key": "RELEASE_SMOKE_TOTP_SECRET"},
     "name": "Release Smoke MFA User",
     "email": "mfa@example.com"
+  }, {
+    "id": "release-smoke-disabled-user",
+    "identifier": "disabled@example.com",
+    "password_hash": "\$2b\$12\$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+    "enabled": false,
+    "issuer_ids": ["default"],
+    "name": "Disabled Release User",
+    "email": "disabled@example.com"
+  }, {
+    "id": "release-session-shared-user",
+    "identifier": "mfa@example.com",
+    "password_hash": "\$2b\$12\$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+    "issuer_ids": ["session"],
+    "name": "Session Tenant Shared Login",
+    "email": "mfa@example.com"
+  }, {
+    "id": "release-default-only-user",
+    "identifier": "default-only@example.com",
+    "password_hash": "\$2b\$12\$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
+    "issuer_ids": ["default"],
+    "name": "Default Tenant User",
+    "email": "default-only@example.com"
   }],
   "claims": {
     "name": {"source": "name", "scope": "profile"},
     "email": {"source": "email", "scope": "email"}
   },
+  "authorization_detail_types": [{
+    "type": "account_information",
+    "name": "Account information",
+    "allowed_fields": ["actions", "identifier", "locations"],
+    "required_fields": ["actions"]
+  }],
   "branding": {
     "product_name": "Robine ID Release Smoke",
     "primary_color": "#176b70",
@@ -181,7 +270,50 @@ cat >"$applications_directory/release-smoke.json" <<EOF
   "authentication_method": "none",
   "pkce_required": true,
   "nonce_required": true,
-  "consent_required": true
+  "consent_required": true,
+  "authorized_actor_clients": ["release-resource-server"],
+  "authorization_details_types": ["account_information"]
+}
+EOF
+
+cat >"$applications_directory/pairwise-client.json" <<EOF
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "release-pairwise-client",
+  "name": "Release Pairwise Client",
+  "type": "public",
+  "subject_type": "pairwise",
+  "sector_identifier": "127.0.0.1",
+  "redirect_uris": ["http://127.0.0.1:$redirect_port/pairwise-callback"],
+  "scopes": ["openid", "profile"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": false
+}
+EOF
+
+cat >"$applications_directory/backchannel-client.json" <<EOF
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "release-backchannel-client",
+  "name": "Release Back-Channel Logout Client",
+  "type": "confidential",
+  "redirect_uris": ["http://127.0.0.1:$redirect_port/backchannel-callback"],
+  "frontchannel_logout_uri": "http://127.0.0.1:$redirect_port/frontchannel-logout?tenant=release",
+  "frontchannel_logout_session_required": true,
+  "backchannel_logout_uri": "http://127.0.0.1:$redirect_port/backchannel-logout?tenant=release",
+  "backchannel_logout_session_required": true,
+  "scopes": ["openid"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "client_secret_basic",
+  "secret_reference": {"provider": "env", "key": "INTROSPECTION_CLIENT_SECRET"},
+  "pkce_required": false,
+  "nonce_required": false,
+  "consent_required": false
 }
 EOF
 
@@ -191,14 +323,34 @@ cat >"$applications_directory/resource-server.json" <<EOF
   "kind": "oidc_application",
   "id": "release-resource-server",
   "name": "Release Resource Server",
+  "issuer_ids": ["default", "jwt"],
   "type": "confidential",
   "redirect_uris": [],
   "resources": ["https://api.release.example", "https://api-exchanged.release.example"],
-  "scopes": ["service.read"],
+  "scopes": ["service.read", "profile"],
   "grant_types": ["client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"],
   "authentication_method": "client_secret_basic",
   "secret_reference": {"provider": "env", "key": "INTROSPECTION_CLIENT_SECRET"},
-  "introspection_allowed": true
+  "introspection_allowed": true,
+  "actor_token_exchange_allowed": true,
+  "authorization_details_types": ["account_information"]
+}
+EOF
+
+cat >"$applications_directory/disabled-service.json" <<EOF
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "release-disabled-service",
+  "name": "Disabled Release Service",
+  "enabled": false,
+  "type": "confidential",
+  "redirect_uris": [],
+  "resources": ["https://api.release.example"],
+  "scopes": ["service.read"],
+  "grant_types": ["client_credentials"],
+  "authentication_method": "client_secret_basic",
+  "secret_reference": {"provider": "env", "key": "INTROSPECTION_CLIENT_SECRET"}
 }
 EOF
 
@@ -221,9 +373,60 @@ cat >"$applications_directory/assertion-client.json" <<EOF
     "alg": "RS256",
     "n": "$client_assertion_modulus",
     "e": "AQAB"
+  }, {
+    "kty": "EC",
+    "kid": "release-assertion-ec-key",
+    "use": "sig",
+    "alg": "ES256",
+    "crv": "P-256",
+    "x": "$client_assertion_ec_x",
+    "y": "$client_assertion_ec_y"
+  }, {
+    "kty": "OKP",
+    "kid": "release-assertion-ed-key",
+    "use": "sig",
+    "alg": "EdDSA",
+    "crv": "Ed25519",
+    "x": "$client_assertion_ed_x"
+  }]},
+  "require_signed_request_object": true,
+  "request_object_jwks": {"keys": [{
+    "kty": "RSA",
+    "kid": "release-assertion-key",
+    "use": "sig",
+    "alg": "RS256",
+    "n": "$client_assertion_modulus",
+    "e": "AQAB"
+  }, {
+    "kty": "OKP",
+    "kid": "release-assertion-ed-key",
+    "use": "sig",
+    "alg": "EdDSA",
+    "crv": "Ed25519",
+    "x": "$client_assertion_ed_x"
   }]},
   "pkce_required": false,
   "nonce_required": false,
+  "introspection_allowed": true
+}
+EOF
+
+cat >"$applications_directory/secret-assertion-client.json" <<EOF
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "release-secret-assertion-client",
+  "name": "Release Secret Assertion Client",
+  "type": "confidential",
+  "redirect_uris": ["http://127.0.0.1:$redirect_port/secret-assertion-callback"],
+  "resources": ["https://api.release.example"],
+  "scopes": ["openid", "service.read"],
+  "grant_types": ["authorization_code", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code"],
+  "authentication_method": "client_secret_jwt",
+  "secret_reference": {"provider": "env", "key": "CLIENT_SECRET_JWT_SECRET"},
+  "pkce_required": false,
+  "nonce_required": false,
+  "consent_required": false,
   "introspection_allowed": true
 }
 EOF
@@ -259,7 +462,9 @@ cat >"$applications_directory/device-client.json" <<'EOF'
   "authentication_method": "none",
   "pkce_required": true,
   "nonce_required": true,
-  "consent_required": true
+  "consent_required": true,
+  "userinfo_signed_response_alg": "RS256",
+  "authorization_details_types": ["account_information"]
 }
 EOF
 
@@ -277,15 +482,19 @@ cat >"$applications_directory/mfa-client.json" <<EOF
   "pkce_required": true,
   "nonce_required": true,
   "consent_required": true,
-  "required_acr": "urn:robine-id:acr:password+totp"
+  "required_acr": "urn:robine-id:acr:password+totp",
+  "max_authentication_age": 300
 }
 EOF
 
 root_configuration_json=$(tr -d '\n' <"$configuration_file")
-applications_json=$(printf '[%s,%s,%s,%s,%s,%s]' \
+applications_json=$(printf '[%s,%s,%s,%s,%s,%s,%s,%s,%s]' \
   "$(tr -d '\n' <"$applications_directory/release-smoke.json")" \
+  "$(tr -d '\n' <"$applications_directory/pairwise-client.json")" \
+  "$(tr -d '\n' <"$applications_directory/backchannel-client.json")" \
   "$(tr -d '\n' <"$applications_directory/resource-server.json")" \
   "$(tr -d '\n' <"$applications_directory/assertion-client.json")" \
+  "$(tr -d '\n' <"$applications_directory/secret-assertion-client.json")" \
   "$(tr -d '\n' <"$applications_directory/par-required-client.json")" \
   "$(tr -d '\n' <"$applications_directory/device-client.json")" \
   "$(tr -d '\n' <"$applications_directory/mfa-client.json")")
@@ -401,6 +610,95 @@ client_assertion() {
   printf '%s.%s' "$assertion_signing_input" "$assertion_signature"
 }
 
+client_ec_assertion() {
+  assertion_audience=$1
+  assertion_jti=$2
+  assertion_now=$(date +%s)
+  assertion_exp=$((assertion_now + 120))
+  assertion_header=$(
+    printf '%s' '{"alg":"ES256","kid":"release-assertion-ec-key","typ":"JWT"}' \
+      | encode_base64url
+  )
+  assertion_payload=$(
+    printf '{"iss":"release-assertion-client","sub":"release-assertion-client","aud":"%s","iat":%s,"exp":%s,"jti":"%s"}' \
+      "$assertion_audience" "$assertion_now" "$assertion_exp" "$assertion_jti" \
+      | encode_base64url
+  )
+  assertion_signing_input="$assertion_header.$assertion_payload"
+  assertion_der_signature="$temporary_directory/client-assertion-ec-signature.der"
+  printf '%s' "$assertion_signing_input" \
+    | openssl dgst -sha256 -sign "$client_assertion_ec_private_key" \
+        -out "$assertion_der_signature"
+  assertion_integers=$(
+    openssl asn1parse -inform DER -in "$assertion_der_signature" \
+      | sed -n 's/.*INTEGER *://p'
+  )
+  assertion_r=$(printf '%s\n' "$assertion_integers" | sed -n '1p')
+  assertion_s=$(printf '%s\n' "$assertion_integers" | sed -n '2p')
+  if [ "$(expr length "$assertion_r")" = '66' ]; then
+    assertion_r=${assertion_r#00}
+  fi
+  if [ "$(expr length "$assertion_s")" = '66' ]; then
+    assertion_s=${assertion_s#00}
+  fi
+  test "$(expr length "$assertion_r")" -le '64'
+  test "$(expr length "$assertion_s")" -le '64'
+  assertion_r=$(printf '%064s' "$assertion_r" | tr ' ' '0')
+  assertion_s=$(printf '%064s' "$assertion_s" | tr ' ' '0')
+  assertion_signature=$(
+    printf '%s%s' "$assertion_r" "$assertion_s" | xxd -r -p | encode_base64url
+  )
+  printf '%s.%s' "$assertion_signing_input" "$assertion_signature"
+}
+
+client_ed_assertion() {
+  assertion_audience=$1
+  assertion_jti=$2
+  assertion_now=$(date +%s)
+  assertion_exp=$((assertion_now + 120))
+  assertion_header=$(
+    printf '%s' '{"alg":"EdDSA","kid":"release-assertion-ed-key","typ":"JWT"}' \
+      | encode_base64url
+  )
+  assertion_payload=$(
+    printf '{"iss":"release-assertion-client","sub":"release-assertion-client","aud":"%s","iat":%s,"exp":%s,"jti":"%s"}' \
+      "$assertion_audience" "$assertion_now" "$assertion_exp" "$assertion_jti" \
+      | encode_base64url
+  )
+  assertion_signing_input="$assertion_header.$assertion_payload"
+  assertion_signing_file="$temporary_directory/client-assertion-ed-input"
+  printf '%s' "$assertion_signing_input" >"$assertion_signing_file"
+  assertion_signature=$(
+    openssl pkeyutl -sign -rawin -in "$assertion_signing_file" \
+        -inkey "$client_assertion_ed_private_key" \
+      | encode_base64url
+  )
+  printf '%s.%s' "$assertion_signing_input" "$assertion_signature"
+}
+
+client_secret_assertion() {
+  assertion_audience=$1
+  assertion_jti=$2
+  assertion_now=$(date +%s)
+  assertion_exp=$((assertion_now + 120))
+  assertion_secret='release-smoke-client-secret-jwt-0123456789abcdef'
+  assertion_header=$(
+    printf '%s' '{"alg":"HS256","typ":"JWT"}' | encode_base64url
+  )
+  assertion_payload=$(
+    printf '{"iss":"release-secret-assertion-client","sub":"release-secret-assertion-client","aud":"%s","iat":%s,"exp":%s,"jti":"%s"}' \
+      "$assertion_audience" "$assertion_now" "$assertion_exp" "$assertion_jti" \
+      | encode_base64url
+  )
+  assertion_signing_input="$assertion_header.$assertion_payload"
+  assertion_signature=$(
+    printf '%s' "$assertion_signing_input" \
+      | openssl dgst -sha256 -mac HMAC -macopt "key:$assertion_secret" -binary \
+      | encode_base64url
+  )
+  printf '%s.%s' "$assertion_signing_input" "$assertion_signature"
+}
+
 authorization_request_object() {
   request_jti=$1
   request_state=$2
@@ -420,6 +718,32 @@ authorization_request_object() {
   request_signature=$(
     printf '%s' "$request_signing_input" \
       | openssl dgst -sha256 -sign "$client_assertion_private_key" -binary \
+      | encode_base64url
+  )
+  printf '%s.%s' "$request_signing_input" "$request_signature"
+}
+
+authorization_request_object_ed() {
+  request_jti=$1
+  request_state=$2
+  request_now=$(date +%s)
+  request_exp=$((request_now + 120))
+  request_header=$(
+    printf '%s' '{"alg":"EdDSA","kid":"release-assertion-ed-key","typ":"oauth-authz-req+jwt"}' \
+      | encode_base64url
+  )
+  request_payload=$(
+    printf '{"iss":"release-assertion-client","aud":"%s","iat":%s,"exp":%s,"jti":"%s","response_type":"code","client_id":"release-assertion-client","redirect_uri":"http://127.0.0.1:%s/assertion-callback","scope":"openid","state":"%s"}' \
+      "$issuer_url" "$request_now" "$request_exp" "$request_jti" "$redirect_port" \
+      "$request_state" \
+      | encode_base64url
+  )
+  request_signing_input="$request_header.$request_payload"
+  request_signing_file="$temporary_directory/authorization-request-ed-input"
+  printf '%s' "$request_signing_input" >"$request_signing_file"
+  request_signature=$(
+    openssl pkeyutl -sign -rawin -in "$request_signing_file" \
+        -inkey "$client_assertion_ed_private_key" \
       | encode_base64url
   )
   printf '%s.%s' "$request_signing_input" "$request_signature"
@@ -474,6 +798,42 @@ dpop_proof() {
   printf '%s.%s' "$proof_signing_input" "$proof_signature"
 }
 
+dpop_ed_proof() {
+  proof_method=$1
+  proof_uri=$2
+  proof_jti=$3
+  proof_access_token=${4-}
+  proof_nonce=${5-}
+  proof_now=$(date +%s)
+  proof_header=$(
+    printf '{"alg":"EdDSA","typ":"dpop+jwt","jwk":{"kty":"OKP","crv":"Ed25519","x":"%s"}}' \
+      "$client_assertion_ed_x" \
+      | encode_base64url
+  )
+  proof_optional_claims=''
+  if [ -n "$proof_access_token" ]; then
+    proof_ath=$(dpop_access_token_hash "$proof_access_token")
+    proof_optional_claims="$proof_optional_claims,\"ath\":\"$proof_ath\""
+  fi
+  if [ -n "$proof_nonce" ]; then
+    proof_optional_claims="$proof_optional_claims,\"nonce\":\"$proof_nonce\""
+  fi
+  proof_payload=$(
+    printf '{"jti":"%s","htm":"%s","htu":"%s","iat":%s%s}' \
+      "$proof_jti" "$proof_method" "$proof_uri" "$proof_now" "$proof_optional_claims" \
+      | encode_base64url
+  )
+  proof_signing_input="$proof_header.$proof_payload"
+  proof_signing_file="$temporary_directory/dpop-ed-input"
+  printf '%s' "$proof_signing_input" >"$proof_signing_file"
+  proof_signature=$(
+    openssl pkeyutl -sign -rawin -in "$proof_signing_file" \
+        -inkey "$client_assertion_ed_private_key" \
+      | encode_base64url
+  )
+  printf '%s.%s' "$proof_signing_input" "$proof_signature"
+}
+
 wait_for_peer() {
   attempt=0
   while [ "$attempt" -lt 60 ]; do
@@ -496,12 +856,49 @@ compose config --quiet
 compose up --detach --build --wait
 
 base_url="http://$access_host:$bind_port"
-curl --fail --silent "$base_url/health/live" | grep -q '"status":"live"'
-curl --fail --silent "$base_url/health/ready" | grep -q '"status":"ready"'
+live_headers="$temporary_directory/health-live.headers"
+ready_headers="$temporary_directory/health-ready.headers"
+curl --fail --silent --dump-header "$live_headers" "$base_url/health/live" \
+  | grep -q '"status":"live"'
+curl --fail --silent --dump-header "$ready_headers" "$base_url/health/ready" \
+  | grep -q '"status":"ready"'
+for health_headers in "$live_headers" "$ready_headers"; do
+  grep -qi '^cache-control: no-store' "$health_headers"
+  grep -qi '^pragma: no-cache' "$health_headers"
+done
+not_found_headers="$temporary_directory/not-found.headers"
+test "$(
+  curl --silent --dump-header "$not_found_headers" --output /dev/null --write-out '%{http_code}' \
+    "$base_url/not-routed"
+)" = '404'
+grep -qi '^cache-control: no-store' "$not_found_headers"
+grep -qi '^pragma: no-cache' "$not_found_headers"
+test "$(
+  curl --silent --head --output /dev/null --write-out '%{http_code}' \
+    "$base_url/health/live"
+)" = '200'
+test "$(
+  curl --silent --head --output /dev/null --write-out '%{http_code}' \
+    "$base_url/health/ready"
+)" = '200'
 curl --fail --silent "$base_url/docs" | grep -q 'Authorization Code with PKCE'
-curl --fail --silent "$base_url/metrics" | grep -q 'robine_id_ready 1'
+metrics_headers="$temporary_directory/metrics.headers"
+curl --fail --silent --dump-header "$metrics_headers" "$base_url/metrics" \
+  | grep -q 'robine_id_ready 1'
+grep -qi '^cache-control: no-store' "$metrics_headers"
+grep -qi '^pragma: no-cache' "$metrics_headers"
 curl --fail --silent "$base_url/metrics" \
   | grep -Eq 'robine_id_http_requests_total [1-9][0-9]*'
+method_error_headers="$temporary_directory/method-not-allowed.headers"
+method_error_body="$temporary_directory/method-not-allowed.json"
+test "$(
+  curl --silent --dump-header "$method_error_headers" --output "$method_error_body" \
+    --write-out '%{http_code}' "$base_url/default/token"
+)" = '405'
+tr -d '\r' <"$method_error_headers" | grep -qi '^allow: POST, OPTIONS$'
+grep -qi '^cache-control: no-store' "$method_error_headers"
+grep -qi '^pragma: no-cache' "$method_error_headers"
+grep -q '"error":"method_not_allowed"' "$method_error_body"
 token_cors_headers="$temporary_directory/token-cors.headers"
 curl --fail --silent --request OPTIONS --dump-header "$token_cors_headers" --output /dev/null \
   --header "Origin: http://127.0.0.1:$redirect_port" \
@@ -514,14 +911,80 @@ tr -d '\r' <"$token_cors_headers" \
   | grep -qi '^access-control-allow-methods: POST$'
 tr -d '\r' <"$token_cors_headers" \
   | grep -qi '^access-control-expose-headers: DPoP-Nonce$'
+unregistered_cors_headers="$temporary_directory/unregistered-token-cors.headers"
 unregistered_cors_status=$(
-  curl --silent --request OPTIONS --output /dev/null --write-out '%{http_code}' \
+  curl --silent --request OPTIONS --dump-header "$unregistered_cors_headers" \
+    --output /dev/null --write-out '%{http_code}' \
     --header 'Origin: https://attacker.example' \
     --header 'Access-Control-Request-Method: POST' \
     --header 'Access-Control-Request-Headers: Content-Type' \
     "$base_url/default/token"
 )
 test "$unregistered_cors_status" = "403"
+grep -qi '^cache-control: no-store' "$unregistered_cors_headers"
+grep -qi '^pragma: no-cache' "$unregistered_cors_headers"
+revocation_cors_headers="$temporary_directory/revocation-cors.headers"
+curl --fail --silent --request OPTIONS --dump-header "$revocation_cors_headers" \
+  --output /dev/null \
+  --header "Origin: http://127.0.0.1:$redirect_port" \
+  --header 'Access-Control-Request-Method: POST' \
+  --header 'Access-Control-Request-Headers: Content-Type' \
+  "$base_url/default/revoke"
+tr -d '\r' <"$revocation_cors_headers" \
+  | grep -qi "^access-control-allow-origin: http://127.0.0.1:$redirect_port$"
+tr -d '\r' <"$revocation_cors_headers" \
+  | grep -qi '^access-control-allow-methods: POST$'
+tr -d '\r' <"$revocation_cors_headers" \
+  | grep -qi '^access-control-allow-headers: Content-Type$'
+revocation_response_headers="$temporary_directory/revocation-response.headers"
+curl --fail --silent --dump-header "$revocation_response_headers" --output /dev/null \
+  --header "Origin: http://127.0.0.1:$redirect_port" \
+  --data-urlencode 'token=not-an-issued-release-token' \
+  --data-urlencode 'client_id=release-smoke-client' \
+  "$base_url/default/revoke"
+tr -d '\r' <"$revocation_response_headers" \
+  | grep -qi "^access-control-allow-origin: http://127.0.0.1:$redirect_port$"
+grep -qi '^cache-control: no-store' "$revocation_response_headers"
+grep -qi '^pragma: no-cache' "$revocation_response_headers"
+malformed_revocation_headers="$temporary_directory/malformed-revocation.headers"
+malformed_revocation_body="$temporary_directory/malformed-revocation.json"
+test "$(
+  curl --silent --dump-header "$malformed_revocation_headers" \
+    --output "$malformed_revocation_body" --write-out '%{http_code}' \
+    --header "Origin: http://127.0.0.1:$redirect_port" \
+    --data-urlencode 'client_id=release-smoke-client' \
+    "$base_url/default/revoke"
+)" = '400'
+tr -d '\r' <"$malformed_revocation_headers" \
+  | grep -qi "^access-control-allow-origin: http://127.0.0.1:$redirect_port$"
+grep -qi '^cache-control: no-store' "$malformed_revocation_headers"
+grep -qi '^pragma: no-cache' "$malformed_revocation_headers"
+grep -q '"error":"invalid_request"' "$malformed_revocation_body"
+oversized_revocation_form="$temporary_directory/oversized-revocation.form"
+{
+  printf '%s' 'client_id=release-smoke-client&token='
+  dd if=/dev/zero bs=17000 count=1 2>/dev/null | tr '\000' 'a'
+} >"$oversized_revocation_form"
+oversized_revocation_headers="$temporary_directory/oversized-revocation.headers"
+test "$(
+  curl --silent --dump-header "$oversized_revocation_headers" --output /dev/null \
+    --write-out '%{http_code}' \
+    --header "Origin: http://127.0.0.1:$redirect_port" \
+    --header 'Content-Type: application/x-www-form-urlencoded' \
+    --data-binary "@$oversized_revocation_form" \
+    "$base_url/default/revoke"
+)" = '400'
+tr -d '\r' <"$oversized_revocation_headers" \
+  | grep -qi "^access-control-allow-origin: http://127.0.0.1:$redirect_port$"
+grep -qi '^cache-control: no-store' "$oversized_revocation_headers"
+grep -qi '^pragma: no-cache' "$oversized_revocation_headers"
+test "$(
+  curl --silent --request OPTIONS --output /dev/null --write-out '%{http_code}' \
+    --header 'Origin: https://attacker.example' \
+    --header 'Access-Control-Request-Method: POST' \
+    --header 'Access-Control-Request-Headers: Content-Type' \
+    "$base_url/default/revoke"
+)" = '403'
 response_request_id=$(
   curl --fail --silent --dump-header - --output /dev/null \
     --header 'x-request-id: release_smoke.123' "$base_url/health/live" \
@@ -529,8 +992,30 @@ response_request_id=$(
     | tail -n 1
 )
 test "$response_request_id" = "release_smoke.123"
-curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q "\"issuer\":\"$issuer_url\""
+legacy_discovery=$(curl --fail --silent \
+  "$base_url/default/.well-known/openid-configuration")
+compatible_discovery=$(curl --fail --silent \
+  "$base_url/.well-known/openid-configuration/default")
+test "$compatible_discovery" = "$legacy_discovery"
+printf '%s' "$compatible_discovery" | grep -q "\"issuer\":\"$issuer_url\""
+disabled_issuer_metadata="$temporary_directory/disabled-issuer-metadata.json"
+test "$(
+  curl --silent --output "$disabled_issuer_metadata" --write-out '%{http_code}' \
+    "$base_url/disabled/.well-known/openid-configuration"
+)" = '404'
+grep -q '"error":"invalid_request"' "$disabled_issuer_metadata"
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$base_url/.well-known/openid-configuration/disabled"
+)" = '404'
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$base_url/.well-known/oauth-authorization-server/disabled"
+)" = '404'
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$base_url/disabled/jwks.json"
+)" = '404'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q "\"introspection_endpoint\":\"$issuer_url/introspect\""
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
@@ -543,6 +1028,12 @@ curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"response_modes_supported":\["query","form_post","jwt","query.jwt","form_post.jwt"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"authorization_signing_alg_values_supported":\["RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"request_object_signing_alg_values_supported":\["EdDSA","ES256","RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"userinfo_signing_alg_values_supported":\["RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q "\"protected_resources\":\[\"$issuer_url/userinfo\"\]"
 if curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"access_token_signing_alg_values_supported"'; then
   printf '%s\n' 'opaque issuer unexpectedly advertised JWT access-token signing' >&2
@@ -551,13 +1042,21 @@ fi
 curl --fail --silent "$base_url/jwt/.well-known/openid-configuration" \
   | grep -q '"access_token_signing_alg_values_supported":\["RS256"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q '"dpop_signing_alg_values_supported":\["ES256","RS256"\]'
+  | grep -q '"dpop_signing_alg_values_supported":\["EdDSA","ES256","RS256"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q '"token_endpoint_auth_signing_alg_values_supported":\["RS256"\]'
+  | grep -q '"token_endpoint_auth_methods_supported":\["client_secret_basic","client_secret_post","client_secret_jwt","private_key_jwt","none"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q '"introspection_endpoint_auth_signing_alg_values_supported":\["RS256"\]'
+  | grep -q '"introspection_endpoint_auth_methods_supported":\["client_secret_basic","client_secret_post","client_secret_jwt","private_key_jwt"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
-  | grep -q '"revocation_endpoint_auth_signing_alg_values_supported":\["RS256"\]'
+  | grep -q '"revocation_endpoint_auth_methods_supported":\["client_secret_basic","client_secret_post","client_secret_jwt","private_key_jwt","none"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"token_endpoint_auth_signing_alg_values_supported":\["EdDSA","ES256","HS256","RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"introspection_endpoint_auth_signing_alg_values_supported":\["EdDSA","ES256","HS256","RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"introspection_signing_alg_values_supported":\["RS256"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"revocation_endpoint_auth_signing_alg_values_supported":\["EdDSA","ES256","HS256","RS256"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q "\"service_documentation\":\"http://127.0.0.1:$bind_port/docs\""
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
@@ -566,17 +1065,57 @@ curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"op_tos_uri":"https://docs.release.example/terms"'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"authorization_response_iss_parameter_supported":true'
+if curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"check_session_iframe"'; then
+  printf '%s\n' 'plain HTTP issuer unexpectedly advertised OIDC Session Management' >&2
+  exit 1
+fi
+curl --fail --silent "$base_url/session/.well-known/openid-configuration" \
+  | grep -q "\"check_session_iframe\":\"$session_issuer_url/check-session\""
+check_session_headers="$temporary_directory/check-session.headers"
+check_session_body="$temporary_directory/check-session.html"
+curl --fail --silent --dump-header "$check_session_headers" \
+  --output "$check_session_body" "$base_url/session/check-session"
+grep -q 'src="/assets/check-session.js"' "$check_session_body"
+grep -qi "frame-ancestors \*" "$check_session_headers"
+grep -qi '^cross-origin-resource-policy: cross-origin' "$check_session_headers"
+if grep -qi '^x-frame-options:' "$check_session_headers"; then
+  printf '%s\n' 'OIDC check-session iframe unexpectedly blocks registered RP framing' >&2
+  exit 1
+fi
+curl --fail --silent "$base_url/assets/check-session.js" \
+  | grep -q 'crypto.subtle.digest'
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    --get --data-urlencode 'client_id=release-secret-assertion-client' \
+    --data-urlencode "origin=http://127.0.0.1:$redirect_port" \
+    "$base_url/session/check-session/origin"
+)" = '204'
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    --get --data-urlencode 'client_id=release-secret-assertion-client' \
+    --data-urlencode 'origin=https://attacker.release.example' \
+    "$base_url/session/check-session/origin"
+)" = '400'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"backchannel_logout_supported":true'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"backchannel_logout_session_supported":true'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"acr_values_supported":\["urn:robine-id:acr:password","urn:robine-id:acr:password+totp"\]'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"claims_parameter_supported":true'
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"authorization_details_types_supported":\["account_information"\]'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q "\"pushed_authorization_request_endpoint\":\"$issuer_url/par\""
 curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
   | grep -q '"request_uri_parameter_supported":true'
+curl --fail --silent "$base_url/default/.well-known/openid-configuration" \
+  | grep -q '"ui_locales_supported":\["en","fr"\]'
 discovery_headers="$temporary_directory/discovery.headers"
 curl --fail --silent --dump-header "$discovery_headers" --output /dev/null \
-  "$base_url/default/.well-known/openid-configuration"
+  "$base_url/.well-known/openid-configuration/default"
 discovery_etag=$(
   awk 'tolower($1) == "etag:" {gsub("\r", "", $2); print $2}' "$discovery_headers" \
     | tail -n 1
@@ -586,17 +1125,80 @@ grep -qi 's-maxage=300' "$discovery_headers"
 test "$(
   curl --silent --output /dev/null --write-out '%{http_code}' \
     --header "If-None-Match: $discovery_etag" \
-    "$base_url/default/.well-known/openid-configuration"
+    "$base_url/.well-known/openid-configuration/default"
 )" = "304"
-curl --fail --silent "$base_url/.well-known/oauth-authorization-server/default" \
-  | grep -q "\"issuer\":\"$issuer_url\""
-webfinger_response=$(
-  curl --fail --silent --get \
+oauth_metadata=$(curl --fail --silent \
+  "$base_url/.well-known/oauth-authorization-server/default")
+printf '%s' "$oauth_metadata" | grep -q "\"issuer\":\"$issuer_url\""
+printf '%s' "$oauth_metadata" \
+  | grep -q "\"authorization_endpoint\":\"$issuer_url/authorize\""
+printf '%s' "$oauth_metadata" \
+  | grep -q "\"token_endpoint\":\"$issuer_url/token\""
+printf '%s' "$oauth_metadata" \
+  | grep -q '"response_types_supported":\["code"\]'
+printf '%s' "$oauth_metadata" \
+  | grep -q '"code_challenge_methods_supported":\["S256"\]'
+oauth_metadata_headers="$temporary_directory/oauth-metadata.headers"
+curl --fail --silent --dump-header "$oauth_metadata_headers" --output /dev/null \
+  "$base_url/.well-known/oauth-authorization-server/default"
+grep -qi '^etag:' "$oauth_metadata_headers"
+grep -qi 's-maxage=300' "$oauth_metadata_headers"
+test "$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$base_url/.well-known/oauth-authorization-server/missing"
+)" = '404'
+protected_resource_metadata=$(
+  curl --fail --silent \
+    "$base_url/.well-known/oauth-protected-resource/default/userinfo"
+)
+printf '%s' "$protected_resource_metadata" \
+  | grep -q "\"resource\":\"$issuer_url/userinfo\""
+printf '%s' "$protected_resource_metadata" \
+  | grep -q "\"authorization_servers\":\[\"$issuer_url\"\]"
+printf '%s' "$protected_resource_metadata" \
+  | grep -q '"bearer_methods_supported":\["header"\]'
+printf '%s' "$protected_resource_metadata" \
+  | grep -q '"dpop_signing_alg_values_supported":\["EdDSA","ES256","RS256"\]'
+userinfo_metadata_headers="$temporary_directory/userinfo-metadata-challenge.headers"
+test "$(
+  curl --silent --dump-header "$userinfo_metadata_headers" --output /dev/null \
+    --write-out '%{http_code}' "$base_url/default/userinfo"
+)" = '401'
+grep -qi "resource_metadata=\"http://127.0.0.1:${bind_port}/.well-known/oauth-protected-resource/default/userinfo\"" \
+  "$userinfo_metadata_headers"
+webfinger_headers="$temporary_directory/webfinger.headers"
+webfinger_body="$temporary_directory/webfinger.json"
+curl --fail --silent --get --dump-header "$webfinger_headers" --output "$webfinger_body" \
+  --data-urlencode "resource=$issuer_url/not-a-user" \
+  --data-urlencode "rel=http://openid.net/specs/connect/1.0/issuer" \
+  "$base_url/.well-known/webfinger"
+grep -q "\"href\":\"$issuer_url\"" "$webfinger_body"
+grep -qi '^access-control-allow-origin: \*' "$webfinger_headers"
+grep -qi '^cross-origin-resource-policy: cross-origin' "$webfinger_headers"
+grep -qi 's-maxage=300' "$webfinger_headers"
+webfinger_etag=$(
+  awk 'tolower($1) == "etag:" {gsub("\r", "", $2); print $2}' "$webfinger_headers" \
+    | tail -n 1
+)
+test -n "$webfinger_etag"
+test "$(
+  curl --silent --get --output /dev/null --write-out '%{http_code}' \
+    --header "If-None-Match: $webfinger_etag" \
     --data-urlencode "resource=$issuer_url/not-a-user" \
     --data-urlencode "rel=http://openid.net/specs/connect/1.0/issuer" \
     "$base_url/.well-known/webfinger"
-)
-printf '%s' "$webfinger_response" | grep -q "\"href\":\"$issuer_url\""
+)" = '304'
+webfinger_options_headers="$temporary_directory/webfinger-options.headers"
+test "$(
+  curl --silent --request OPTIONS --dump-header "$webfinger_options_headers" \
+    --output /dev/null --write-out '%{http_code}' \
+    --header 'Origin: https://browser.example' \
+    --header 'Access-Control-Request-Method: GET' \
+    --header 'Access-Control-Request-Headers: If-None-Match' \
+    "$base_url/.well-known/webfinger"
+)" = '204'
+grep -qi '^access-control-allow-methods: GET, HEAD, OPTIONS' "$webfinger_options_headers"
+grep -qi '^access-control-allow-headers: If-None-Match' "$webfinger_options_headers"
 compose exec --no-TTY robine-id validate_config | grep -q 'configuration is valid'
 compose exec --no-TTY robine-id config_apply | grep -q '^unchanged'
 compose exec --no-TTY postgres \
@@ -611,6 +1213,11 @@ docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" \
   | grep -q 'no-new-privileges'
 network=$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$container_id")
 image=$(docker inspect --format '{{.Config.Image}}' "$container_id")
+docker run --detach --name "$backchannel_container" \
+  --network "container:$container_id" \
+  --entrypoint /bin/sh postgres:17-alpine \
+  -c "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n' | nc -l -p $redirect_port; done" \
+  >/dev/null
 docker run --rm --entrypoint /bin/sh "$image" -c \
   'test -x /usr/local/bin/robine-id-healthcheck && ! command -v curl'
 embedded_configuration="$temporary_directory/embedded-config.json"
@@ -706,7 +1313,9 @@ docker run --detach --name "$peer_container" \
   --env DRAIN_DELAY_MILLISECONDS=5000 \
   --env SHUTDOWN_TIMEOUT_SECONDS=10 \
   --env INTROSPECTION_CLIENT_SECRET=release-smoke-introspection-secret \
+  --env CLIENT_SECRET_JWT_SECRET=release-smoke-client-secret-jwt-0123456789abcdef \
   --env RELEASE_SMOKE_TOTP_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ \
+  --env PAIRWISE_SUBJECT_SALT=release-smoke-pairwise-subject-salt-0123456789abcdef \
   --env "ROBINE_ID_CONFIG_JSON=$root_configuration_json" \
   --env "ROBINE_ID_APPLICATIONS_JSON=$applications_json" \
   "$image" >/dev/null
@@ -714,6 +1323,74 @@ wait_for_peer
 peer_port=$(docker port "$peer_container" 4001/tcp | tail -n 1 | sed 's/.*://')
 peer_url="http://$access_host:$peer_port"
 curl --fail --silent "$peer_url/health/ready" | grep -q '"status":"ready"'
+
+disabled_service_token="$temporary_directory/disabled-service-token.json"
+test "$(
+  curl --silent --output "$disabled_service_token" --write-out '%{http_code}' \
+    --user 'release-disabled-service:release-smoke-introspection-secret' \
+    --data-urlencode 'grant_type=client_credentials' \
+    --data-urlencode 'scope=service.read' \
+    "$base_url/default/token"
+)" = '401'
+grep -q '"error":"invalid_client"' "$disabled_service_token"
+
+cross_issuer_service="$temporary_directory/cross-issuer-service.json"
+test "$(
+  curl --silent --output "$cross_issuer_service" --write-out '%{http_code}' \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --data-urlencode 'grant_type=client_credentials' \
+    --data-urlencode 'scope=service.read' \
+    "$base_url/session/token"
+)" = '401'
+grep -q '"error":"invalid_client"' "$cross_issuer_service"
+
+tenant_user_cookie_jar="$temporary_directory/tenant-user-cookies.txt"
+tenant_user_login="$temporary_directory/tenant-user-login.html"
+curl --fail --silent --get --cookie-jar "$tenant_user_cookie_jar" \
+  --data-urlencode 'response_type=code' \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/secret-assertion-callback" \
+  --data-urlencode 'scope=openid' \
+  --data-urlencode 'state=tenant-user-isolation' \
+  "$base_url/session/authorize" >"$tenant_user_login"
+tenant_user_csrf=$(hidden_value csrf_token "$tenant_user_login")
+tenant_user_transaction=$(hidden_value transaction "$tenant_user_login")
+test -n "$tenant_user_csrf"
+test -n "$tenant_user_transaction"
+test "$(
+  curl --silent --cookie "$tenant_user_cookie_jar" --cookie-jar "$tenant_user_cookie_jar" \
+    --output "$tenant_user_login" --write-out '%{http_code}' \
+    --data-urlencode "csrf_token=$tenant_user_csrf" \
+    --data-urlencode "transaction=$tenant_user_transaction" \
+    --data-urlencode 'identifier=default-only@example.com' \
+    --data-urlencode 'password=change-me' \
+    "$base_url/session/authorize"
+)" = '422'
+grep -q 'id="login-error"' "$tenant_user_login"
+grep -q 'value="default-only@example.com"' "$tenant_user_login"
+if grep -q 'change-me' "$tenant_user_login"; then
+  printf 'failed: cross-issuer identity password was rendered back to the browser\n' >&2
+  exit 1
+fi
+tenant_user_csrf=$(hidden_value csrf_token "$tenant_user_login")
+tenant_user_transaction=$(hidden_value transaction "$tenant_user_login")
+test -n "$tenant_user_csrf"
+test -n "$tenant_user_transaction"
+tenant_shared_headers="$temporary_directory/tenant-shared-login.headers"
+test "$(
+  curl --silent --cookie "$tenant_user_cookie_jar" --cookie-jar "$tenant_user_cookie_jar" \
+    --dump-header "$tenant_shared_headers" --output /dev/null --write-out '%{http_code}' \
+    --data-urlencode "csrf_token=$tenant_user_csrf" \
+    --data-urlencode "transaction=$tenant_user_transaction" \
+    --data-urlencode 'identifier=mfa@example.com' \
+    --data-urlencode 'password=change-me' \
+    "$base_url/session/authorize"
+)" = '302'
+tenant_shared_location=$(header_value location "$tenant_shared_headers")
+printf '%s' "$tenant_shared_location" | grep -q '[?&]code='
+printf '%s' "$tenant_shared_location" | grep -q '[?&]state=tenant-user-isolation'
+printf '%s' "$tenant_shared_location" \
+  | grep -q '[?&]iss=https%3A%2F%2Fid.release.example%2Fsession'
 
 invalid_service_token="$temporary_directory/invalid-service-token.json"
 test "$(
@@ -761,6 +1438,29 @@ printf '%s' "$service_introspection" | grep -q '"client_id":"release-resource-se
 printf '%s' "$service_introspection" | grep -q '"sub":"release-resource-server"'
 printf '%s' "$service_introspection" | grep -q '"scope":"service.read"'
 printf '%s' "$service_introspection" | grep -q '"aud":"https://api.release.example"'
+signed_introspection_headers="$temporary_directory/signed-introspection.headers"
+signed_service_introspection=$(
+  curl --fail --silent --dump-header "$signed_introspection_headers" \
+    --header 'Accept: application/token-introspection+jwt' \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --data-urlencode "token=$service_access_token" \
+    "$peer_url/default/introspect"
+)
+grep -qi '^content-type: application/token-introspection+jwt' "$signed_introspection_headers"
+test "$(printf '%s' "$signed_service_introspection" | awk -F. '{print NF}')" = '3'
+signed_introspection_header=$(
+  decode_base64url "$(printf '%s' "$signed_service_introspection" | cut -d. -f1)"
+)
+signed_introspection_payload=$(
+  decode_base64url "$(printf '%s' "$signed_service_introspection" | cut -d. -f2)"
+)
+printf '%s' "$signed_introspection_header" | grep -q '"typ":"token-introspection+jwt"'
+printf '%s' "$signed_introspection_header" | grep -q '"alg":"RS256"'
+printf '%s' "$signed_introspection_header" | grep -Eq '"kid":"[^"]+"'
+printf '%s' "$signed_introspection_payload" | grep -q "\"iss\":\"$issuer_url\""
+printf '%s' "$signed_introspection_payload" | grep -q '"aud":"release-resource-server"'
+printf '%s' "$signed_introspection_payload" | grep -q '"token_introspection":{"active":true'
+printf '%s' "$signed_introspection_payload" | grep -q '"client_id":"release-resource-server"'
 
 jwt_service_response="$temporary_directory/jwt-service-token.json"
 curl --fail --silent --output "$jwt_service_response" \
@@ -768,6 +1468,7 @@ curl --fail --silent --output "$jwt_service_response" \
   --data-urlencode 'grant_type=client_credentials' \
   --data-urlencode 'scope=service.read' \
   --data-urlencode 'resource=https://api.release.example' \
+  --data-urlencode 'authorization_details=[{"type":"account_information","actions":["read_balances"]}]' \
   "$base_url/jwt/token"
 jwt_service_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$jwt_service_response")
 test -n "$jwt_service_token"
@@ -786,6 +1487,8 @@ printf '%s' "$jwt_access_payload" | grep -q '"scope":"service.read"'
 printf '%s' "$jwt_access_payload" | grep -Eq '"jti":"[^"]+"'
 printf '%s' "$jwt_access_payload" | grep -Eq '"iat":[0-9]+'
 printf '%s' "$jwt_access_payload" | grep -Eq '"exp":[0-9]+'
+printf '%s' "$jwt_access_payload" | grep -q '"authorization_details":'
+printf '%s' "$jwt_access_payload" | grep -q 'read_balances'
 if printf '%s' "$jwt_access_payload" | grep -Eq '"(auth_time|acr|amr)"'; then
   printf '%s\n' 'client_credentials JWT unexpectedly contains user authentication context' >&2
   exit 1
@@ -800,6 +1503,8 @@ jwt_service_introspection=$(
 )
 printf '%s' "$jwt_service_introspection" | grep -q '"active":true'
 printf '%s' "$jwt_service_introspection" | grep -q '"client_id":"release-resource-server"'
+printf '%s' "$jwt_service_introspection" | grep -q '"authorization_details":'
+printf '%s' "$jwt_service_introspection" | grep -q 'read_balances'
 if printf '%s' "$jwt_service_introspection" | grep -Eq '"(auth_time|acr|amr)"'; then
   printf '%s\n' 'client_credentials introspection unexpectedly contains user authentication context' >&2
   exit 1
@@ -821,8 +1526,11 @@ printf '%s' "$jwt_exchanged_header" | grep -q '"typ":"at+jwt"'
 printf '%s' "$jwt_exchanged_payload" \
   | grep -q '"aud":"https://api-exchanged.release.example"'
 printf '%s' "$jwt_exchanged_payload" | grep -q '"scope":"service.read"'
+printf '%s' "$jwt_exchanged_payload" | grep -q '"authorization_details":'
+printf '%s' "$jwt_exchanged_payload" | grep -q 'read_balances'
 grep -q '"issued_token_type":"urn:ietf:params:oauth:token-type:access_token"' \
   "$jwt_exchange_response"
+grep -q '"authorization_details":' "$jwt_exchange_response"
 jwt_exchanged_introspection=$(
   curl --fail --silent \
     --user 'release-resource-server:release-smoke-introspection-secret' \
@@ -833,7 +1541,7 @@ printf '%s' "$jwt_exchanged_introspection" | grep -q '"active":true'
 printf '%s' "$jwt_exchanged_introspection" \
   | grep -q '"aud":"https://api-exchanged.release.example"'
 
-jwt_dpop_proof=$(dpop_proof POST "$jwt_issuer_url/token" 'jwt-service-dpop')
+jwt_dpop_proof=$(dpop_ed_proof POST "$jwt_issuer_url/token" 'jwt-service-ed-dpop')
 jwt_dpop_response="$temporary_directory/jwt-dpop-service-token.json"
 curl --fail --silent --output "$jwt_dpop_response" \
   --header "DPoP: $jwt_dpop_proof" \
@@ -846,7 +1554,7 @@ jwt_dpop_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$jwt_dpop_respo
 test -n "$jwt_dpop_token"
 grep -q '"token_type":"DPoP"' "$jwt_dpop_response"
 jwt_dpop_payload=$(decode_base64url "$(printf '%s' "$jwt_dpop_token" | cut -d. -f2)")
-printf '%s' "$jwt_dpop_payload" | grep -q "\"cnf\":{\"jkt\":\"$dpop_jkt\"}"
+printf '%s' "$jwt_dpop_payload" | grep -q "\"cnf\":{\"jkt\":\"$dpop_ed_jkt\"}"
 jwt_dpop_introspection=$(
   curl --fail --silent \
     --user 'release-resource-server:release-smoke-introspection-secret' \
@@ -854,7 +1562,7 @@ jwt_dpop_introspection=$(
     "$peer_url/jwt/introspect"
 )
 printf '%s' "$jwt_dpop_introspection" | grep -q '"token_type":"DPoP"'
-printf '%s' "$jwt_dpop_introspection" | grep -q "\"cnf\":{\"jkt\":\"$dpop_jkt\"}"
+printf '%s' "$jwt_dpop_introspection" | grep -q "\"cnf\":{\"jkt\":\"$dpop_ed_jkt\"}"
 curl --fail --silent --output /dev/null \
   --user 'release-resource-server:release-smoke-introspection-secret' \
   --data-urlencode "token=$jwt_service_token" \
@@ -890,12 +1598,36 @@ test "$(
 )" = '400'
 grep -q '"error":"invalid_request"' "$invalid_actor_exchange"
 
+actor_token_response="$temporary_directory/actor-token.json"
+curl --fail --silent --output "$actor_token_response" \
+  --user 'release-resource-server:release-smoke-introspection-secret' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'scope=service.read' \
+  --data-urlencode 'resource=https://api.release.example' \
+  "$peer_url/default/token"
+actor_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$actor_token_response")
+test -n "$actor_access_token"
+
+missing_actor_type="$temporary_directory/missing-token-exchange-actor-type.json"
+test "$(
+  curl --silent --output "$missing_actor_type" --write-out '%{http_code}' \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+    --data-urlencode "subject_token=$service_access_token" \
+    --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+    --data-urlencode "actor_token=$actor_access_token" \
+    "$base_url/default/token"
+)" = '400'
+grep -q '"error":"invalid_request"' "$missing_actor_type"
+
 exchange_response="$temporary_directory/token-exchange.json"
 curl --fail --silent --output "$exchange_response" \
   --user 'release-resource-server:release-smoke-introspection-secret' \
   --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
   --data-urlencode "subject_token=$service_access_token" \
   --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode "actor_token=$actor_access_token" \
+  --data-urlencode 'actor_token_type=urn:ietf:params:oauth:token-type:access_token' \
   --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
   --data-urlencode 'scope=service.read' \
   --data-urlencode 'audience=https://api-exchanged.release.example' \
@@ -920,6 +1652,29 @@ printf '%s' "$exchanged_introspection" | grep -q '"active":true'
 printf '%s' "$exchanged_introspection" | grep -q '"client_id":"release-resource-server"'
 printf '%s' "$exchanged_introspection" | grep -q '"sub":"release-resource-server"'
 printf '%s' "$exchanged_introspection" | grep -q '"aud":"https://api-exchanged.release.example"'
+printf '%s' "$exchanged_introspection" | grep -q '"act":{"sub":"release-resource-server"}'
+
+nested_exchange_response="$temporary_directory/nested-token-exchange.json"
+curl --fail --silent --output "$nested_exchange_response" \
+  --user 'release-resource-server:release-smoke-introspection-secret' \
+  --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  --data-urlencode "subject_token=$exchanged_access_token" \
+  --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode "actor_token=$actor_access_token" \
+  --data-urlencode 'actor_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode 'scope=service.read' \
+  --data-urlencode 'resource=https://api-exchanged.release.example' \
+  "$base_url/default/token"
+nested_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$nested_exchange_response")
+test -n "$nested_access_token"
+nested_introspection=$(
+  curl --fail --silent \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --data-urlencode "token=$nested_access_token" \
+    "$peer_url/default/introspect"
+)
+printf '%s' "$nested_introspection" | grep -q '"active":true'
+printf '%s' "$nested_introspection" | grep -q '"act":{"act":{"sub":"release-resource-server"}'
 test "$(
   curl --silent --output /dev/null --write-out '%{http_code}' \
     --header "Authorization: Bearer $service_access_token" \
@@ -935,6 +1690,112 @@ curl --fail --silent \
   "$base_url/default/introspect" | grep -q '"active":false'
 
 assertion_type='urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+
+secret_device_assertion=$(client_secret_assertion "$issuer_url/device_authorization" 'secret-device-single-use')
+secret_device_response="$temporary_directory/secret-assertion-device.json"
+curl --fail --silent --output "$secret_device_response" \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode 'scope=openid' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$secret_device_assertion" \
+  "$base_url/default/device_authorization"
+grep -q '"device_code":"' "$secret_device_response"
+grep -q '"user_code":"' "$secret_device_response"
+
+secret_par_assertion=$(client_secret_assertion "$issuer_url/par" 'secret-par-single-use')
+secret_par_response="$temporary_directory/secret-assertion-par.json"
+curl --fail --silent --output "$secret_par_response" \
+  --data-urlencode 'response_type=code' \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/secret-assertion-callback" \
+  --data-urlencode 'scope=openid' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$secret_par_assertion" \
+  "$base_url/default/par"
+grep -q '"request_uri":"urn:ietf:params:oauth:request_uri:' "$secret_par_response"
+
+secret_token_assertion=$(client_secret_assertion "$issuer_url/token" 'secret-token-single-use')
+secret_token_response="$temporary_directory/secret-assertion-token.json"
+curl --fail --silent --output "$secret_token_response" \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode 'scope=service.read' \
+  --data-urlencode 'resource=https://api.release.example' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$secret_token_assertion" \
+  "$base_url/default/token"
+secret_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$secret_token_response")
+test -n "$secret_access_token"
+grep -q '"token_type":"Bearer"' "$secret_token_response"
+
+secret_replay_response="$temporary_directory/secret-assertion-replay.json"
+test "$(
+  curl --silent --output "$secret_replay_response" --write-out '%{http_code}' \
+    --data-urlencode 'grant_type=client_credentials' \
+    --data-urlencode 'client_id=release-secret-assertion-client' \
+    --data-urlencode 'scope=service.read' \
+    --data-urlencode "client_assertion_type=$assertion_type" \
+    --data-urlencode "client_assertion=$secret_token_assertion" \
+    "$peer_url/default/token"
+)" = '401'
+grep -q '"error":"invalid_client"' "$secret_replay_response"
+
+secret_wrong_audience=$(client_secret_assertion "$issuer_url/revoke" 'secret-wrong-audience')
+secret_wrong_audience_response="$temporary_directory/secret-assertion-wrong-audience.json"
+test "$(
+  curl --silent --output "$secret_wrong_audience_response" --write-out '%{http_code}' \
+    --data-urlencode 'grant_type=client_credentials' \
+    --data-urlencode 'client_id=release-secret-assertion-client' \
+    --data-urlencode 'scope=service.read' \
+    --data-urlencode "client_assertion_type=$assertion_type" \
+    --data-urlencode "client_assertion=$secret_wrong_audience" \
+    "$base_url/default/token"
+)" = '401'
+grep -q '"error":"invalid_client"' "$secret_wrong_audience_response"
+
+secret_introspection_assertion=$(client_secret_assertion "$issuer_url/introspect" 'secret-introspection')
+secret_introspection=$(
+  curl --fail --silent \
+    --data-urlencode "token=$secret_access_token" \
+    --data-urlencode 'client_id=release-secret-assertion-client' \
+    --data-urlencode "client_assertion_type=$assertion_type" \
+    --data-urlencode "client_assertion=$secret_introspection_assertion" \
+    "$peer_url/default/introspect"
+)
+printf '%s' "$secret_introspection" | grep -q '"active":true'
+printf '%s' "$secret_introspection" | grep -q '"client_id":"release-secret-assertion-client"'
+
+secret_revocation_assertion=$(client_secret_assertion "$issuer_url/revoke" 'secret-revocation')
+curl --fail --silent --output /dev/null \
+  --data-urlencode "token=$secret_access_token" \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$secret_revocation_assertion" \
+  "$base_url/default/revoke"
+secret_post_revoke_assertion=$(client_secret_assertion "$issuer_url/introspect" 'secret-post-revoke')
+curl --fail --silent \
+  --data-urlencode "token=$secret_access_token" \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$secret_post_revoke_assertion" \
+  "$peer_url/default/introspect" | grep -q '"active":false'
+
+unsigned_request_object_headers="$temporary_directory/unsigned-request-object.headers"
+test "$(
+  curl --silent --get --output /dev/null --dump-header "$unsigned_request_object_headers" \
+    --write-out '%{http_code}' \
+    --data-urlencode 'response_type=code' \
+    --data-urlencode 'client_id=release-assertion-client' \
+    --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/assertion-callback" \
+    --data-urlencode 'scope=openid' \
+    --data-urlencode 'state=unsigned-request-object' \
+    "$base_url/default/authorize"
+)" = '302'
+unsigned_request_object_location=$(header_value location "$unsigned_request_object_headers")
+printf '%s' "$unsigned_request_object_location" | grep -q '[?&]error=invalid_request'
+printf '%s' "$unsigned_request_object_location" \
+  | grep -q '[?&]state=unsigned-request-object'
+
 direct_request_object=$(authorization_request_object 'direct-request-single-use' 'signed-direct-state')
 direct_request_page="$temporary_directory/direct-request-object.html"
 curl --fail --silent --get --output "$direct_request_page" \
@@ -953,6 +1814,14 @@ test "$(
     --data-urlencode "request=$direct_request_object" \
     "$base_url/default/authorize"
 )" = '400'
+direct_ed_request_object=$(authorization_request_object_ed 'direct-ed-request-single-use' 'signed-ed-direct-state')
+direct_ed_request_page="$temporary_directory/direct-ed-request-object.html"
+curl --fail --silent --get --output "$direct_ed_request_page" \
+  --data-urlencode 'client_id=release-assertion-client' \
+  --data-urlencode "request=$direct_ed_request_object" \
+  "$peer_url/default/authorize"
+grep -q 'id="login-form"' "$direct_ed_request_page"
+test -n "$(hidden_value transaction "$direct_ed_request_page")"
 request_mismatch=$(authorization_request_object 'request-mismatch' 'signed-mismatch-state')
 test "$(
   curl --silent --get --output /dev/null --write-out '%{http_code}' \
@@ -1025,6 +1894,34 @@ assertion_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$assert
 test -n "$assertion_access_token"
 grep -q '"resource":"https://api.release.example"' "$assertion_token_response"
 grep -q '"token_type":"DPoP"' "$assertion_token_response"
+
+ec_assertion_token=$(client_ec_assertion "$issuer_url/token" 'ec-token-single-use')
+ec_assertion_token_response="$temporary_directory/ec-assertion-token.json"
+curl --fail --silent --output "$ec_assertion_token_response" \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=release-assertion-client' \
+  --data-urlencode 'scope=service.read' \
+  --data-urlencode 'resource=https://api.release.example' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$ec_assertion_token" \
+  "$peer_url/default/token"
+ec_assertion_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$ec_assertion_token_response")
+test -n "$ec_assertion_access_token"
+grep -q '"token_type":"Bearer"' "$ec_assertion_token_response"
+ed_assertion_introspection=$(client_ed_assertion "$issuer_url/introspect" 'ed-introspection-single-use')
+curl --fail --silent \
+  --data-urlencode "token=$ec_assertion_access_token" \
+  --data-urlencode 'client_id=release-assertion-client' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$ed_assertion_introspection" \
+  "$base_url/default/introspect" | grep -q '"active":true'
+ec_assertion_revocation=$(client_ec_assertion "$issuer_url/revoke" 'ec-revocation-single-use')
+curl --fail --silent --output /dev/null \
+  --data-urlencode "token=$ec_assertion_access_token" \
+  --data-urlencode 'client_id=release-assertion-client' \
+  --data-urlencode "client_assertion_type=$assertion_type" \
+  --data-urlencode "client_assertion=$ec_assertion_revocation" \
+  "$base_url/default/revoke"
 
 missing_exchange_proof_assertion=$(client_assertion "$issuer_url/token" 'missing-exchange-proof')
 missing_exchange_proof="$temporary_directory/missing-token-exchange-proof.json"
@@ -1155,6 +2052,8 @@ challenge=$(
 )
 state='release-smoke-state'
 nonce='release-smoke-nonce'
+authorization_details='[{"type":"account_information","actions":["read_balances","read_transactions"],"identifier":"primary-account"}]'
+downscoped_authorization_details='[{"type":"account_information","actions":["read_balances"]}]'
 redirect_uri="http://127.0.0.1:$redirect_port/callback"
 logout_uri="http://127.0.0.1:$redirect_port/signed-out"
 login_page="$temporary_directory/login.html"
@@ -1303,6 +2202,7 @@ curl --fail --silent --get --cookie-jar "$cookie_jar" \
   --data-urlencode "nonce=$nonce" \
   --data-urlencode "code_challenge=$challenge" \
   --data-urlencode 'code_challenge_method=S256' \
+  --data-urlencode "authorization_details=$authorization_details" \
   --data-urlencode "dpop_jkt=$dpop_jkt" \
   "$base_url/default/authorize" >"$login_page"
 csrf_token=$(hidden_value csrf_token "$login_page")
@@ -1310,6 +2210,29 @@ login_transaction=$(hidden_value transaction "$login_page")
 test -n "$csrf_token"
 test -n "$login_transaction"
 initial_login_transaction=$login_transaction
+
+disabled_login_page="$temporary_directory/disabled-login.html"
+disabled_login_status=$(
+  curl --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+    --output "$disabled_login_page" --write-out '%{http_code}' \
+    --data-urlencode "csrf_token=$csrf_token" \
+    --data-urlencode "transaction=$login_transaction" \
+    --data-urlencode 'identifier=disabled@example.com' \
+    --data-urlencode 'password=change-me' \
+    "$base_url/default/authorize"
+)
+test "$disabled_login_status" = '422'
+grep -q 'id="login-error"' "$disabled_login_page"
+grep -q 'value="disabled@example.com"' "$disabled_login_page"
+if grep -q 'change-me' "$disabled_login_page"; then
+  printf 'failed: disabled identity password was rendered back to the browser\n' >&2
+  exit 1
+fi
+csrf_token=$(hidden_value csrf_token "$disabled_login_page")
+login_transaction=$(hidden_value transaction "$disabled_login_page")
+test -n "$csrf_token"
+test -n "$login_transaction"
+test "$login_transaction" != "$initial_login_transaction"
 
 invalid_login_page="$temporary_directory/invalid-login.html"
 invalid_login_status=$(
@@ -1350,6 +2273,9 @@ curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
   --data-urlencode 'password=change-me' \
   "$base_url/default/authorize"
 grep -q 'id="consent-form"' "$consent_page"
+grep -q 'Fine-grained access' "$consent_page"
+grep -q 'Account information' "$consent_page"
+grep -q 'read_balances' "$consent_page"
 transaction=$(hidden_value transaction "$consent_page")
 test -n "$transaction"
 
@@ -1365,6 +2291,37 @@ test -n "$code"
 printf '%s' "$authorization_location" | grep -q "[?&]state=$state"
 printf '%s' "$authorization_location" \
   | grep -q "[?&]iss=http%3A%2F%2F127.0.0.1%3A${bind_port}%2Fdefault"
+
+session_management_headers="$temporary_directory/session-management.headers"
+curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --dump-header "$session_management_headers" --output /dev/null \
+  --data-urlencode 'response_type=code' \
+  --data-urlencode 'client_id=release-secret-assertion-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/secret-assertion-callback" \
+  --data-urlencode 'scope=openid' \
+  --data-urlencode 'state=session-management-state' \
+  --data-urlencode 'prompt=none' \
+  "$base_url/session/authorize"
+session_management_location=$(header_value location "$session_management_headers")
+printf '%s' "$session_management_location" | grep -q '[?&]state=session-management-state'
+printf '%s' "$session_management_location" \
+  | grep -q '[?&]iss=https%3A%2F%2Fid.release.example%2Fsession'
+session_state=$(printf '%s' "$session_management_location" \
+  | sed -n 's/.*[?&]session_state=\([^&]*\).*/\1/p')
+test "$(expr length "$session_state")" = '87'
+session_state_salt=${session_state#*.}
+test "$(expr length "$session_state_salt")" = '43'
+op_browser_state=$(awk '$6 == "robine_opbs" {value = $7} END {print value}' "$cookie_jar")
+test "$(expr length "$op_browser_state")" = '43'
+expected_session_state=$(
+  printf '%s' "release-secret-assertion-client http://127.0.0.1:$redirect_port $op_browser_state $session_state_salt" \
+    | openssl dgst -sha256 -binary \
+    | openssl base64 -A \
+    | tr '+/' '-_' \
+    | tr -d '='
+)
+test "$session_state" = "$expected_session_state.$session_state_salt"
+grep -qi '^set-cookie: robine_opbs=' "$session_management_headers"
 
 authorization_code_dpop=$(dpop_proof POST "$issuer_url/token" 'authorization-code-token-dpop' '' "$authorization_server_dpop_nonce")
 curl --fail --silent \
@@ -1382,6 +2339,9 @@ test -n "$access_token"
 test -n "$id_token"
 test -n "$refresh_token"
 grep -q '"token_type":"DPoP"' "$token_response"
+grep -q '"authorization_details":' "$token_response"
+grep -q 'read_balances' "$token_response"
+grep -q 'read_transactions' "$token_response"
 
 jwt_header=$(decode_base64url "$(printf '%s' "$id_token" | cut -d. -f1)")
 jwt_payload=$(decode_base64url "$(printf '%s' "$id_token" | cut -d. -f2)")
@@ -1395,8 +2355,99 @@ printf '%s' "$jwt_payload" | grep -q "\"nonce\":\"$nonce\""
 printf '%s' "$jwt_payload" | grep -Eq '"auth_time":[0-9]+'
 printf '%s' "$jwt_payload" | grep -q '"acr":"urn:robine-id:acr:password"'
 printf '%s' "$jwt_payload" | grep -q '"amr":\["pwd"\]'
+printf '%s' "$jwt_payload" | grep -Eq '"sid":"[A-Za-z0-9_-]{43}"'
+id_token_sid=$(printf '%s' "$jwt_payload" | sed -n 's/.*"sid":"\([^"]*\)".*/\1/p')
+test "$(expr length "$id_token_sid")" = '43'
 at_hash=$(printf '%s' "$jwt_payload" | sed -n 's/.*"at_hash":"\([^"]*\)".*/\1/p')
 test "$at_hash" = "$(oidc_access_token_hash "$access_token")"
+
+pairwise_authorization_headers="$temporary_directory/pairwise-authorization.headers"
+curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --dump-header "$pairwise_authorization_headers" --output /dev/null \
+  --data-urlencode 'response_type=code' \
+  --data-urlencode 'client_id=release-pairwise-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/pairwise-callback" \
+  --data-urlencode 'scope=openid profile' \
+  --data-urlencode 'state=pairwise-state' \
+  --data-urlencode 'nonce=pairwise-nonce' \
+  --data-urlencode "code_challenge=$challenge" \
+  --data-urlencode 'code_challenge_method=S256' \
+  --data-urlencode 'prompt=none' \
+  "$base_url/default/authorize"
+pairwise_location=$(header_value location "$pairwise_authorization_headers")
+pairwise_code=$(printf '%s' "$pairwise_location" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+test -n "$pairwise_code"
+printf '%s' "$pairwise_location" | grep -q '[?&]state=pairwise-state'
+pairwise_token_response="$temporary_directory/pairwise-token.json"
+curl --fail --silent --output "$pairwise_token_response" \
+  --data-urlencode 'grant_type=authorization_code' \
+  --data-urlencode "code=$pairwise_code" \
+  --data-urlencode 'client_id=release-pairwise-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/pairwise-callback" \
+  --data-urlencode "code_verifier=$verifier" \
+  "$peer_url/default/token"
+pairwise_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$pairwise_token_response")
+pairwise_id_token=$(sed -n 's/.*"id_token":"\([^"]*\)".*/\1/p' "$pairwise_token_response")
+test -n "$pairwise_access_token"
+test -n "$pairwise_id_token"
+pairwise_id_payload=$(decode_base64url "$(printf '%s' "$pairwise_id_token" | cut -d. -f2)")
+pairwise_subject=$(printf '%s' "$pairwise_id_payload" | sed -n 's/.*"sub":"\([^"]*\)".*/\1/p')
+test "$(expr length "$pairwise_subject")" = '43'
+test "$pairwise_subject" != 'release-smoke-user'
+pairwise_userinfo=$(curl --fail --silent \
+  --header "Authorization: Bearer $pairwise_access_token" \
+  "$base_url/default/userinfo")
+printf '%s' "$pairwise_userinfo" | grep -q "\"sub\":\"$pairwise_subject\""
+pairwise_introspection=$(curl --fail --silent \
+  --user 'release-resource-server:release-smoke-introspection-secret' \
+  --data-urlencode "token=$pairwise_access_token" \
+  "$peer_url/default/introspect")
+printf '%s' "$pairwise_introspection" | grep -q '"active":true'
+printf '%s' "$pairwise_introspection" | grep -q "\"sub\":\"$pairwise_subject\""
+
+delegation_without_actor="$temporary_directory/delegation-without-actor.json"
+delegation_without_actor_dpop=$(dpop_proof POST "$issuer_url/token" 'delegation-without-actor' '' "$authorization_server_dpop_nonce")
+test "$(
+  curl --silent --output "$delegation_without_actor" --write-out '%{http_code}' \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --header "DPoP: $delegation_without_actor_dpop" \
+    --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+    --data-urlencode "subject_token=$access_token" \
+    --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+    --data-urlencode 'scope=profile' \
+    --data-urlencode 'resource=https://api-exchanged.release.example' \
+    "$peer_url/default/token"
+)" = '400'
+grep -q '"error":"invalid_request"' "$delegation_without_actor"
+
+delegated_exchange_response="$temporary_directory/delegated-token-exchange.json"
+delegated_exchange_dpop=$(dpop_proof POST "$issuer_url/token" 'delegated-token-exchange' '' "$authorization_server_dpop_nonce")
+curl --fail --silent --output "$delegated_exchange_response" \
+  --user 'release-resource-server:release-smoke-introspection-secret' \
+  --header "DPoP: $delegated_exchange_dpop" \
+  --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  --data-urlencode "subject_token=$access_token" \
+  --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode "actor_token=$actor_access_token" \
+  --data-urlencode 'actor_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  --data-urlencode 'scope=profile' \
+  --data-urlencode 'resource=https://api-exchanged.release.example' \
+  "$base_url/default/token"
+delegated_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$delegated_exchange_response")
+test -n "$delegated_access_token"
+grep -q '"token_type":"DPoP"' "$delegated_exchange_response"
+delegated_introspection=$(
+  curl --fail --silent \
+    --user 'release-resource-server:release-smoke-introspection-secret' \
+    --data-urlencode "token=$delegated_access_token" \
+    "$peer_url/default/introspect"
+)
+printf '%s' "$delegated_introspection" | grep -q '"active":true'
+printf '%s' "$delegated_introspection" | grep -q '"client_id":"release-resource-server"'
+printf '%s' "$delegated_introspection" | grep -q '"sub":"release-smoke-user"'
+printf '%s' "$delegated_introspection" | grep -q '"scope":"profile"'
+printf '%s' "$delegated_introspection" | grep -q '"act":{"sub":"release-resource-server"}'
+printf '%s' "$delegated_introspection" | grep -q '"cnf":{"jkt":"'
 
 mfa_policy_cookie_jar="$temporary_directory/mfa-policy-denied-cookies.txt"
 mfa_policy_login_page="$temporary_directory/mfa-policy-denied-login.html"
@@ -1543,6 +2594,36 @@ test -n "$mfa_refreshed_id_token"
 mfa_refreshed_payload=$(decode_base64url "$(printf '%s' "$mfa_refreshed_id_token" | cut -d. -f2)")
 printf '%s' "$mfa_refreshed_payload" | grep -q '"acr":"urn:robine-id:acr:password+totp"'
 printf '%s' "$mfa_refreshed_payload" | grep -q '"amr":\["pwd","otp"\]'
+compose exec --no-TTY postgres \
+  psql --username robine_id --dbname robine_id --command \
+    "UPDATE access_tokens SET auth_time = 0 WHERE client_id = 'release-mfa-client';" \
+  >/dev/null
+mfa_step_up_probe=$(dpop_proof GET "$issuer_url/userinfo" 'mfa-step-up-probe' "$mfa_access_token" "$authorization_server_dpop_nonce")
+mfa_step_up_nonce_headers="$temporary_directory/mfa-step-up-nonce.headers"
+test "$(
+  curl --silent --dump-header "$mfa_step_up_nonce_headers" --output /dev/null \
+    --write-out '%{http_code}' \
+    --header "Authorization: DPoP $mfa_access_token" \
+    --header "DPoP: $mfa_step_up_probe" \
+    "$base_url/default/userinfo"
+)" = '401'
+mfa_step_up_nonce=$(header_value dpop-nonce "$mfa_step_up_nonce_headers")
+test -n "$mfa_step_up_nonce"
+mfa_step_up_proof=$(dpop_proof GET "$issuer_url/userinfo" 'mfa-step-up-proof' "$mfa_access_token" "$mfa_step_up_nonce")
+mfa_step_up_headers="$temporary_directory/mfa-step-up.headers"
+mfa_step_up_response="$temporary_directory/mfa-step-up.json"
+test "$(
+  curl --silent --dump-header "$mfa_step_up_headers" --output "$mfa_step_up_response" \
+    --write-out '%{http_code}' \
+    --header "Authorization: DPoP $mfa_access_token" \
+    --header "DPoP: $mfa_step_up_proof" \
+    "$peer_url/default/userinfo"
+)" = '401'
+grep -q '"error":"insufficient_user_authentication"' "$mfa_step_up_response"
+grep -q 'DPoP error="insufficient_user_authentication"' "$mfa_step_up_headers"
+grep -q 'max_age="300"' "$mfa_step_up_headers"
+grep -q "resource_metadata=\"http://127.0.0.1:${bind_port}/.well-known/oauth-protected-resource/default/userinfo\"" \
+  "$mfa_step_up_headers"
 curl --fail --silent "$base_url/metrics" \
   | grep -Eq 'robine_id_mfa_total\{outcome="success"\} [1-9][0-9]*'
 
@@ -1573,12 +2654,26 @@ test "$(
 )" = '400'
 grep -q '"error":"invalid_dpop_proof"' "$missing_refresh_dpop_response"
 
+expanded_refresh_response="$temporary_directory/expanded-refresh.json"
+expanded_refresh_dpop=$(dpop_proof POST "$issuer_url/token" 'expanded-refresh-dpop' '' "$authorization_server_dpop_nonce")
+test "$(
+  curl --silent --output "$expanded_refresh_response" --write-out '%{http_code}' \
+    --header "DPoP: $expanded_refresh_dpop" \
+    --data-urlencode 'grant_type=refresh_token' \
+    --data-urlencode "refresh_token=$refresh_token" \
+    --data-urlencode 'client_id=release-smoke-client' \
+    --data-urlencode 'authorization_details=[{"type":"account_information","actions":["initiate_payment"]}]' \
+    "$peer_url/default/token"
+)" = '400'
+grep -q '"error":"invalid_authorization_details"' "$expanded_refresh_response"
+
 refresh_dpop=$(dpop_proof POST "$issuer_url/token" 'first-refresh-dpop' '' "$authorization_server_dpop_nonce")
 curl --fail --silent \
   --header "DPoP: $refresh_dpop" \
   --data-urlencode 'grant_type=refresh_token' \
   --data-urlencode "refresh_token=$refresh_token" \
   --data-urlencode 'client_id=release-smoke-client' \
+  --data-urlencode "authorization_details=$downscoped_authorization_details" \
   "$peer_url/default/token" >"$refresh_response"
 refreshed_access_token=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' "$refresh_response")
 refreshed_id_token=$(sed -n 's/.*"id_token":"\([^"]*\)".*/\1/p' "$refresh_response")
@@ -1588,6 +2683,12 @@ test -n "$refreshed_id_token"
 test -n "$rotated_refresh_token"
 test "$rotated_refresh_token" != "$refresh_token"
 grep -q '"token_type":"DPoP"' "$refresh_response"
+grep -q '"authorization_details":' "$refresh_response"
+grep -q 'read_balances' "$refresh_response"
+if grep -q 'read_transactions' "$refresh_response"; then
+  printf '%s\n' 'refresh-token downscoping retained a removed authorization detail' >&2
+  exit 1
+fi
 refreshed_payload=$(decode_base64url "$(printf '%s' "$refreshed_id_token" | cut -d. -f2)")
 printf '%s' "$refreshed_payload" | grep -q "\"auth_time\":$original_auth_time"
 printf '%s' "$refreshed_payload" | grep -q '"acr":"urn:robine-id:acr:password"'
@@ -1603,6 +2704,12 @@ refreshed_introspection=$(
 printf '%s' "$refreshed_introspection" | grep -q "\"auth_time\":$original_auth_time"
 printf '%s' "$refreshed_introspection" | grep -q '"acr":"urn:robine-id:acr:password"'
 printf '%s' "$refreshed_introspection" | grep -q '"amr":\["pwd"\]'
+printf '%s' "$refreshed_introspection" | grep -q '"authorization_details":'
+printf '%s' "$refreshed_introspection" | grep -q 'read_balances'
+if printf '%s' "$refreshed_introspection" | grep -q 'read_transactions'; then
+  printf '%s\n' 'introspection retained a removed authorization detail' >&2
+  exit 1
+fi
 if printf '%s' "$refreshed_payload" | grep -q '"nonce"'; then
   printf '%s\n' 'refreshed ID token unexpectedly contains a nonce' >&2
   exit 1
@@ -1663,6 +2770,8 @@ printf '%s' "$introspection" | grep -q "\"cnf\":{\"jkt\":\"$dpop_jkt\"}"
 printf '%s' "$introspection" | grep -q "\"auth_time\":$original_auth_time"
 printf '%s' "$introspection" | grep -q '"acr":"urn:robine-id:acr:password"'
 printf '%s' "$introspection" | grep -q '"amr":\["pwd"\]'
+printf '%s' "$introspection" | grep -q '"authorization_details":'
+printf '%s' "$introspection" | grep -q 'read_transactions'
 userinfo_post_dpop=$(dpop_proof POST "$issuer_url/userinfo" 'original-userinfo-post-dpop' "$access_token" "$userinfo_dpop_nonce")
 user_info_post=$(curl --fail --silent --request POST \
   --header "Authorization: DPoP $access_token" \
@@ -1683,6 +2792,7 @@ device_authorization_response="$temporary_directory/device-authorization.json"
 curl --fail --silent --output "$device_authorization_response" \
   --data-urlencode 'client_id=release-device-client' \
   --data-urlencode 'scope=openid profile email offline_access' \
+  --data-urlencode "authorization_details=$authorization_details" \
   "$base_url/default/device_authorization"
 device_code=$(sed -n 's/.*"device_code":"\([^"]*\)".*/\1/p' "$device_authorization_response")
 device_user_code=$(sed -n 's/.*"user_code":"\([^"]*\)".*/\1/p' "$device_authorization_response")
@@ -1719,6 +2829,9 @@ curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
   "$peer_url/default/device" >"$device_confirmation_page"
 grep -q 'id="device-confirm-form"' "$device_confirmation_page"
 grep -q 'id="device-approve"' "$device_confirmation_page"
+grep -q 'Fine-grained access' "$device_confirmation_page"
+grep -q 'Account information' "$device_confirmation_page"
+grep -q 'read_transactions' "$device_confirmation_page"
 if grep -q 'id="device_password"' "$device_confirmation_page"; then
   printf '%s\n' 'device confirmation unexpectedly lost the shared browser session' >&2
   exit 1
@@ -1750,8 +2863,27 @@ test -n "$device_access_token"
 test -n "$device_refresh_token"
 grep -q '"id_token":"[^"]*"' "$device_token_response"
 grep -q '"scope":"openid profile email offline_access"' "$device_token_response"
-curl --fail --silent --header "Authorization: Bearer $device_access_token" \
-  "$base_url/default/userinfo" | grep -q '"sub":"release-smoke-user"'
+grep -q '"authorization_details":' "$device_token_response"
+grep -q 'read_transactions' "$device_token_response"
+device_userinfo_headers="$temporary_directory/device-userinfo.headers"
+device_userinfo_response="$temporary_directory/device-userinfo.jwt"
+curl --fail --silent --dump-header "$device_userinfo_headers" \
+  --output "$device_userinfo_response" \
+  --header "Authorization: Bearer $device_access_token" \
+  "$base_url/default/userinfo"
+tr -d '\r' <"$device_userinfo_headers" \
+  | grep -qi '^content-type: application/jwt$'
+grep -qi '^cache-control: no-store' "$device_userinfo_headers"
+grep -qi '^pragma: no-cache' "$device_userinfo_headers"
+device_userinfo=$(cat "$device_userinfo_response")
+test "$(printf '%s' "$device_userinfo" | awk -F. '{print NF}')" = '3'
+device_userinfo_header=$(decode_base64url "$(printf '%s' "$device_userinfo" | cut -d. -f1)")
+device_userinfo_payload=$(decode_base64url "$(printf '%s' "$device_userinfo" | cut -d. -f2)")
+printf '%s' "$device_userinfo_header" | grep -q '"alg":"RS256"'
+printf '%s' "$device_userinfo_payload" | grep -q "\"iss\":\"$issuer_url\""
+printf '%s' "$device_userinfo_payload" | grep -q '"aud":"release-device-client"'
+printf '%s' "$device_userinfo_payload" | grep -q '"sub":"release-smoke-user"'
+printf '%s' "$device_userinfo_payload" | grep -q '"email":"admin@example.com"'
 device_introspection=$(
   curl --fail --silent \
     --user 'release-resource-server:release-smoke-introspection-secret' \
@@ -1760,6 +2892,8 @@ device_introspection=$(
 )
 printf '%s' "$device_introspection" | grep -q '"active":true'
 printf '%s' "$device_introspection" | grep -q '"client_id":"release-device-client"'
+printf '%s' "$device_introspection" | grep -q '"authorization_details":'
+printf '%s' "$device_introspection" | grep -q 'read_transactions'
 
 device_refresh_response="$temporary_directory/device-refresh.json"
 curl --fail --silent --output "$device_refresh_response" \
@@ -1769,6 +2903,8 @@ curl --fail --silent --output "$device_refresh_response" \
   "$base_url/default/token"
 grep -q '"access_token":"[^"]*"' "$device_refresh_response"
 grep -q '"refresh_token":"[^"]*"' "$device_refresh_response"
+grep -q '"authorization_details":' "$device_refresh_response"
+grep -q 'read_transactions' "$device_refresh_response"
 
 mfa_device_authorization="$temporary_directory/mfa-device-authorization.json"
 curl --fail --silent --output "$mfa_device_authorization" \
@@ -2057,6 +3193,7 @@ silent_location=$(
     --data-urlencode "code_challenge=$challenge" \
     --data-urlencode 'code_challenge_method=S256' \
     --data-urlencode 'prompt=none' \
+    --data-urlencode "id_token_hint=$id_token" \
     "$peer_url/default/authorize" \
     | awk 'tolower($1) == "location:" {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' \
     | tail -n 1
@@ -2065,6 +3202,25 @@ printf '%s' "$silent_location" | grep -q 'error=consent_required'
 printf '%s' "$silent_location" | grep -q 'state=silent-state'
 printf '%s' "$silent_location" \
   | grep -q "[?&]iss=http%3A%2F%2F127.0.0.1%3A${bind_port}%2Fdefault"
+
+wrong_audience_hint_location=$(
+  curl --silent --get --dump-header - --output /dev/null --cookie "$cookie_jar" \
+    --data-urlencode 'response_type=code' \
+    --data-urlencode 'client_id=release-smoke-client' \
+    --data-urlencode "redirect_uri=$redirect_uri" \
+    --data-urlencode 'scope=openid' \
+    --data-urlencode 'state=wrong-audience-hint-state' \
+    --data-urlencode 'nonce=wrong-audience-hint-nonce' \
+    --data-urlencode "code_challenge=$challenge" \
+    --data-urlencode 'code_challenge_method=S256' \
+    --data-urlencode 'prompt=none' \
+    --data-urlencode "id_token_hint=$mfa_id_token" \
+    "$base_url/default/authorize" \
+    | awk 'tolower($1) == "location:" {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' \
+    | tail -n 1
+)
+printf '%s' "$wrong_audience_hint_location" | grep -q 'error=invalid_request'
+printf '%s' "$wrong_audience_hint_location" | grep -q 'state=wrong-audience-hint-state'
 
 replay_status=$(
   curl --silent --output "$temporary_directory/replay.json" --write-out '%{http_code}' \
@@ -2078,9 +3234,48 @@ replay_status=$(
 test "$replay_status" = '400'
 grep -q '"error":"invalid_grant"' "$temporary_directory/replay.json"
 
+client_id_logout_page="$temporary_directory/client-id-logout.html"
+curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --output "$client_id_logout_page" \
+  --data-urlencode 'client_id=release-smoke-client' \
+  --data-urlencode "post_logout_redirect_uri=$logout_uri" \
+  --data-urlencode 'state=client-id-logout-state' \
+  --data-urlencode 'ui_locales=fr-FR' \
+  "$peer_url/default/logout"
+grep -q 'id="logout-form"' "$client_id_logout_page"
+grep -q '<html lang="fr">' "$client_id_logout_page"
+grep -q 'Se déconnecter ?' "$client_id_logout_page"
+test -n "$(hidden_value transaction "$client_id_logout_page")"
+
+test "$(
+  curl --silent --get --output /dev/null --write-out '%{http_code}' \
+    --data-urlencode 'client_id=release-mfa-client' \
+    --data-urlencode "id_token_hint=$id_token" \
+    "$base_url/default/logout"
+)" = '400'
+
+backchannel_authorization_headers="$temporary_directory/backchannel-authorization.headers"
+curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --dump-header "$backchannel_authorization_headers" --output /dev/null \
+  --data-urlencode 'response_type=code' \
+  --data-urlencode 'client_id=release-backchannel-client' \
+  --data-urlencode "redirect_uri=http://127.0.0.1:$redirect_port/backchannel-callback" \
+  --data-urlencode 'scope=openid' \
+  --data-urlencode 'state=backchannel-session-registration' \
+  --data-urlencode 'prompt=none' \
+  "$peer_url/default/authorize"
+backchannel_authorization_location=$(header_value location "$backchannel_authorization_headers")
+printf '%s' "$backchannel_authorization_location" \
+  | grep -q "^http://127.0.0.1:$redirect_port/backchannel-callback?"
+printf '%s' "$backchannel_authorization_location" | grep -q 'code='
+printf '%s' "$backchannel_authorization_location" \
+  | grep -q 'state=backchannel-session-registration'
+
 logout_page="$temporary_directory/logout.html"
 logout_headers="$temporary_directory/logout.headers"
+frontchannel_page="$temporary_directory/frontchannel-logout.html"
 curl --fail --silent --get --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
+  --data-urlencode 'client_id=release-smoke-client' \
   --data-urlencode "id_token_hint=$id_token" \
   --data-urlencode "post_logout_redirect_uri=$logout_uri" \
   --data-urlencode 'state=release-smoke-logout-state' \
@@ -2090,15 +3285,73 @@ logout_csrf=$(hidden_value csrf_token "$logout_page")
 test -n "$logout_transaction"
 test -n "$logout_csrf"
 curl --fail --silent --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
-  --dump-header "$logout_headers" --output /dev/null \
+  --dump-header "$logout_headers" --output "$frontchannel_page" \
   --data-urlencode "transaction=$logout_transaction" \
   --data-urlencode "csrf_token=$logout_csrf" \
   "$base_url/default/logout"
-logout_location=$(header_value location "$logout_headers")
-printf '%s' "$logout_location" | grep -q "^$logout_uri?state=release-smoke-logout-state$"
+grep -q 'id="frontchannel-logout"' "$frontchannel_page"
+grep -q 'src="/assets/frontchannel.js"' "$frontchannel_page"
+grep -q "frontchannel-logout?tenant=release" "$frontchannel_page"
+grep -q 'iss=http%3A%2F%2F127.0.0.1' "$frontchannel_page"
+grep -q "sid=$id_token_sid" "$frontchannel_page"
+grep -q "data-return-to=\"$logout_uri?state=release-smoke-logout-state\"" \
+  "$frontchannel_page"
+if header_value location "$logout_headers" | grep -q .; then
+  printf '%s\n' 'front-channel logout unexpectedly skipped the iframe interstitial' >&2
+  exit 1
+fi
+docker run --rm \
+  --network "container:$container_id" \
+  --entrypoint /bin/sh postgres:17-alpine \
+  -c "wget -q -O /dev/null 'http://127.0.0.1:$redirect_port/frontchannel-logout?tenant=release&iss=$issuer_url&sid=$id_token_sid'"
+backchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
+printf '%s' "$backchannel_request" | grep -q '^POST /backchannel-logout?tenant=release HTTP/1.1$'
+printf '%s' "$backchannel_request" | grep -q '^GET /frontchannel-logout?tenant=release&iss='
+printf '%s' "$backchannel_request" | grep -q "sid=$id_token_sid HTTP/1.1$"
+backchannel_logout_token=$(
+  printf '%s\n' "$backchannel_request" | sed -n 's/^logout_token=//p' | tail -n 1
+)
+test -n "$backchannel_logout_token"
+backchannel_header=$(
+  decode_base64url "$(printf '%s' "$backchannel_logout_token" | cut -d. -f1)"
+)
+backchannel_payload=$(
+  decode_base64url "$(printf '%s' "$backchannel_logout_token" | cut -d. -f2)"
+)
+printf '%s' "$backchannel_header" | grep -q '"typ":"logout+jwt"'
+printf '%s' "$backchannel_payload" | grep -q "\"iss\":\"$issuer_url\""
+printf '%s' "$backchannel_payload" | grep -q '"sub":"release-smoke-user"'
+printf '%s' "$backchannel_payload" | grep -q '"aud":"release-backchannel-client"'
+printf '%s' "$backchannel_payload" | grep -q "\"sid\":\"$id_token_sid\""
+printf '%s' "$backchannel_payload" \
+  | grep -q '"events":{"http://schemas.openid.net/event/backchannel-logout":{}}'
+if printf '%s' "$backchannel_payload" | grep -q '"nonce"'; then
+  printf '%s\n' 'back-channel Logout Token unexpectedly contains nonce' >&2
+  exit 1
+fi
 compose exec --no-TTY postgres \
   psql --username robine_id --dbname robine_id --tuples-only --command \
   "SELECT count(*) FROM authenticated_sessions WHERE revoked_at IS NOT NULL;" | grep -Eq '[1-9]'
+
+token_metrics=$(curl --fail --silent "$base_url/metrics")
+for grant_type in \
+  authorization_code \
+  refresh_token \
+  client_credentials \
+  device_code \
+  token_exchange
+do
+  printf '%s\n' "$token_metrics" \
+    | grep -Eq "robine_id_token_issuance_total\\{grant_type=\"$grant_type\",outcome=\"success\"\\} [1-9][0-9]*"
+done
+printf '%s\n' "$token_metrics" \
+  | grep -Eq 'robine_id_token_exchange_total\{outcome="success"\} [1-9][0-9]*'
+printf '%s\n' "$token_metrics" \
+  | grep -Eq 'robine_id_userinfo_total\{outcome="success"\} [1-9][0-9]*'
+for http_method in GET POST HEAD OPTIONS; do
+  printf '%s\n' "$token_metrics" \
+    | grep -Eq "robine_id_http_method_requests_total\\{method=\"$http_method\"\\} [1-9][0-9]*"
+done
 
 compose exec --no-TTY postgres \
   psql --username robine_id --dbname robine_id --command \

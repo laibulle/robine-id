@@ -11,6 +11,10 @@ Robine ID supports two deployment modes from the same source tree:
 
 The standalone mode remains the default and requires no configuration changes.
 
+The retained SQLite migration chain is replayable from an empty database. CI and local parity
+checks can set `ROBINE_ID_TEST_DATABASE` to a disposable path before running `mix precommit`; the
+default remains `robine_id_test.db` at the repository root.
+
 ## Dependency
 
 During development, a sibling application can use a path dependency:

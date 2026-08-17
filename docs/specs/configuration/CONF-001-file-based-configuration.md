@@ -28,15 +28,26 @@ and secrets.
 ## Document Model
 
 The root is a JSON object with `schema_version: 1`. Supported sections are `issuers`, `users`,
-`claims`, `branding`, `reconciliation`, `authentication`, and `telemetry`. A `storage` object is
+`claims`, `authorization_detail_types`, `branding`, `reconciliation`, `authentication`, and `telemetry`. A `storage` object is
 accepted only as legacy Phoenix compatibility metadata and does not configure Rust persistence.
 Unknown fields at all validated levels are errors. A legacy root `clients` list MAY be composed for
 compatibility but new applications MUST use individual documents.
 
-- `issuers` requires unique string `id` and absolute `url`; optional fields are `scopes`, `token_policy`, `claim_mappings`, and `branding`.
-- `applications/*.json` contains one `oidc_application` document per relying application and follows APPL-001 after composition.
-- `users` follows IDEN-001.
+- `issuers` requires unique string `id` and absolute `url`; optional `enabled` defaults to `true`,
+  while `false` retains the validated tenant declaration but removes it from routing, WebFinger,
+  default-page selection, and automatic key rotation. Other optional fields are `scopes`,
+  `token_policy`, `claim_mappings`, and `branding`.
+- `applications/*.json` contains one `oidc_application` document per relying application and
+  follows APPL-001 after composition; optional `enabled` defaults to `true`, while `false` retains
+  the validated declaration but excludes it from active client resolution. Optional `issuer_ids`
+  is a unique list of configured tenant identifiers; omitted or empty means all active issuers.
+- `users` follows IDEN-001; optional `enabled` defaults to `true`, while `false` keeps the record
+  configured but excludes it from every active identity lookup. Optional `issuer_ids` is a unique
+  list of configured tenant identifiers; omitted or empty means all active issuers. Login
+  identifiers may repeat only across disjoint non-empty issuer sets.
 - `claims` maps an OIDC claim to a source field and required scope.
+- `authorization_detail_types` registers bounded RFC 9396 type identifiers, display names, allowed
+  fields, and the required-field subset. Applications opt in with `authorization_details_types`.
 - `branding` follows UX-002.
 - `reconciliation.deletion_policy` is one of `disable`, `retain`, or `delete`.
 - `authentication.methods` requires `password` and may additionally contain `totp` once; session
@@ -64,7 +75,15 @@ documents. The issuer value is global; the application value targets only that a
 client.
 An interactive application MAY set `required_acr` to `urn:robine-id:acr:password` or
 `urn:robine-id:acr:password+totp`. The latter requires the global `totp` method and rejects
-password-only browser sessions and accounts without an operator-provisioned factor.
+password-only browser sessions and accounts without an operator-provisioned factor. It MAY also
+set `max_authentication_age` to a non-negative number of seconds. This forces active browser
+reauthentication after that age and lets UserInfo return an RFC 9470 `max_age` challenge when an
+existing access token is too old.
+`actor_token_exchange_allowed` defaults to `false`. Enabling it requires a confidential application
+with both `client_credentials` and Token Exchange grants and permits only same-client RFC 8693
+actor-token delegation unless a distinct source application names it in `authorized_actor_clients`.
+That source-side list defaults empty, accepts only configured actor-token clients, and is the
+authority for cross-client delegation.
 
 ## Loading and Paths
 

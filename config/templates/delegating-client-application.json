@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "delegating-web-client",
+  "name": "Delegating web client",
+  "type": "public",
+  "redirect_uris": ["https://app.example.test/callback"],
+  "resources": ["https://api.example.test"],
+  "scopes": ["openid", "profile"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "authorized_actor_clients": ["service-token-broker"]
+}

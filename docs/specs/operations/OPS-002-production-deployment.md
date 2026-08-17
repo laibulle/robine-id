@@ -35,11 +35,16 @@ the shared durable store for protocol state and encrypted signing keys.
   commands plus transactional key re-encryption; startup and conventional maintenance MUST prune
   only persisted deadlines that elapsed.
 - The canonical container image MUST contain the Rust runtime and MUST NOT require BEAM, Erlang, Elixir, Node.js, or Phoenix.
+- Default browser assets MUST be embedded in that Rust runtime so both the conventional image and
+  Vercel entrypoint work without a mutable or separately deployed static directory.
 - Container readiness MUST use the bounded native Rust healthcheck binary; the runtime image MUST
   NOT install a general-purpose HTTP client solely to poll itself.
 - The image's embedded runtime configuration MUST contain no development identity or relying
   application; development examples MAY be mounted only by the development Compose profile.
 - The same route implementation MUST compile for the conventional Actix server and Vercel Function entrypoint.
+- Public compressible representations MUST negotiate supported content encodings through that
+  shared route implementation and emit `Vary: Accept-Encoding`; sensitive routes MUST remain
+  outside compression.
 - A warm Vercel process MUST reuse one initialized Actix route service and apply bounded
   back-pressure plus a fixed concurrency ceiling instead of constructing a new Actix system or
   spawning unbounded request work for every invocation. Saturation MUST return a non-sensitive,

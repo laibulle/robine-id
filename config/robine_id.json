@@ -63,6 +63,8 @@
         "consent.approve": "Autoriser",
         "consent.deny": "Annuler",
         "consent.sign_out_note": "Vous pouvez vous déconnecter à tout moment.",
+        "consent.authorization_details": "Accès détaillés",
+        "consent.authorization_detail_payload": "Détails demandés",
         "device.title": "Connecter un appareil",
         "device.intro": "Saisissez le code affiché par l’appareil à connecter.",
         "device.code": "Code de l’appareil",

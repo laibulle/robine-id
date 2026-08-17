@@ -6,6 +6,7 @@
     <title>{{ messages.consent_title }} · {{ client_name }} · {{ product_name }}</title>
     {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
+    <script defer src="/assets/app.js"></script>
   </head>
   <body>
     <main class="auth-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
@@ -17,6 +18,14 @@
         <ul class="consent-list">
           {% for scope in scopes %}<li><span aria-hidden="true">✓</span>{{ scope }}</li>{% endfor %}
         </ul>
+        {% if !authorization_details.is_empty() %}<section class="authorization-details" aria-labelledby="authorization-details-title">
+          <h2 id="authorization-details-title">{{ messages.consent_authorization_details }}</h2>
+          {% for detail in authorization_details %}<details class="authorization-detail">
+            <summary>{{ detail.name }}</summary>
+            <p>{{ messages.consent_authorization_detail_payload }}</p>
+            <pre><code>{{ detail.payload }}</code></pre>
+          </details>{% endfor %}
+        </section>{% endif %}
         <form id="consent-form" method="post" action="/{{ issuer_id }}/authorize/consent" class="consent-actions">
           <input type="hidden" name="transaction" value="{{ transaction }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

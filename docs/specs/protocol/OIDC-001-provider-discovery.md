@@ -10,6 +10,9 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 
 ## Requirements
 
+- A configured issuer with `enabled: false` MUST be indistinguishable from an unknown issuer at
+  both OIDC and RFC 8414 metadata routes and MUST NOT be returned through WebFinger.
+
 - The server MUST expose `/.well-known/openid-configuration` for every configured issuer.
 - The response MUST contain the issuer, authorization endpoint, token endpoint, user-info endpoint, JWKS URI, supported response types, supported subject types, supported signing algorithms, supported scopes, and supported claims.
 - Every advertised capability MUST be enabled and usable in the active configuration.
@@ -17,8 +20,15 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 - Discovery responses MUST use `application/json`, expose a representation ETag, and permit
   browser and shared-CDN caching for at most five minutes. A matching `If-None-Match`, including a
   weak validator, MUST return HTTP 304 without a body.
+- Public discovery responses MUST allow credential-free cross-origin reads with
+  `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy: cross-origin`. `GET` and
+  bodyless `HEAD` MUST be supported, and `OPTIONS` MUST advertise only `GET, HEAD, OPTIONS` plus
+  the `If-None-Match` request header with a bounded preflight lifetime.
 - Secrets and internal-only configuration MUST never appear in discovery metadata.
 - Discovery MUST be available at `GET /:issuer_id/.well-known/openid-configuration`.
+- The RFC 8414-shaped compatibility route
+  `GET /.well-known/openid-configuration/:issuer_id` MUST return the identical OIDC document and
+  preserve the same CORS, cache, ETag, conditional GET, `HEAD`, and `OPTIONS` behavior.
 - OAuth Authorization Server Metadata MUST expose the same truthful document at the RFC 8414 path
   `GET /.well-known/oauth-authorization-server/:issuer_id`; the issuer-suffix compatibility path
   MAY also be served.
@@ -27,28 +37,47 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
   so the response cannot reveal whether a user exists.
 - WebFinger MUST filter unrelated `rel` values, support browser CORS, bound reflected inputs, and
   return the OpenID issuer relationship with the exact configured issuer URL.
+- WebFinger JRD responses MUST expose a weak content ETag and bounded browser/shared-cache policy.
+  `GET`, bodyless `HEAD`, matching `If-None-Match`, and the same credential-free public `OPTIONS`
+  policy as provider metadata MUST work on conventional Actix and Vercel runtimes.
 - Endpoint URLs MUST be derived from the configured issuer URL after removing a trailing slash.
 - The provider MUST advertise only `code`, configured `authorization_code`/`refresh_token`/`client_credentials`/token-exchange grants,
   public subjects, the password authentication context, `RS256`, PKCE `S256`, and token endpoint authentication methods `none`,
-  `client_secret_basic`, `client_secret_post`, and `private_key_jwt`.
-- Because `private_key_jwt` is advertised, token, introspection, and revocation authentication
-  metadata MUST also advertise `RS256` through their corresponding
+  `client_secret_basic`, `client_secret_post`, `client_secret_jwt`, and `private_key_jwt`.
+- Because JWT client authentication is advertised, token, introspection, and revocation
+  metadata MUST also advertise `EdDSA`, `ES256`, `HS256`, and `RS256` through their corresponding
   `*_auth_signing_alg_values_supported` members.
+- DPoP metadata MUST advertise the asymmetric proof algorithms EdDSA, ES256, and RS256.
 - The provider MUST advertise query and form-post authorization responses and
   `authorization_response_iss_parameter_supported: true`.
-- Signed RS256 JWT request objects MUST be advertised through `request_parameter_supported` and
-  `request_object_signing_alg_values_supported`. The `claims` request parameter MUST be advertised
-  and implemented according to OIDC-011.
+- Signed EdDSA, ES256, and RS256 JWT request objects MUST be advertised through
+  `request_parameter_supported` and `request_object_signing_alg_values_supported`. The `claims`
+  request parameter MUST be advertised and implemented according to OIDC-011.
 - JARM MUST advertise `jwt`, `query.jwt`, and `form_post.jwt` response modes plus RS256 through
   `authorization_signing_alg_values_supported`.
   PAR request URIs MUST be advertised as supported, together with the pushed
   authorization request endpoint and the fact that PAR is optional. Supported user-interface
-  locales MUST reflect resolved issuer branding.
+  locales MUST reflect resolved issuer branding; the default theme advertises `en` and `fr`.
 - The discovery document MUST advertise the end-session endpoint.
+- The discovery document MUST advertise session-bound Back-Channel Logout through
+  `backchannel_logout_supported: true` and `backchannel_logout_session_supported: true` according
+  to OIDC-014.
+- The discovery document MUST advertise Front-Channel Logout through
+  `frontchannel_logout_supported: true` and `frontchannel_logout_session_supported: true`
+  according to OIDC-015.
+- HTTPS issuer discovery MUST advertise the OIDC-016 OP iframe through
+  `check_session_iframe`. Plain-HTTP issuers MUST omit it because the Session Management standard
+  requires an HTTPS iframe URL.
+- The discovery document MUST advertise RS256 signed UserInfo support through
+  `userinfo_signing_alg_values_supported`.
 - The discovery document MUST link `service_documentation` to the routed `/docs` page and SHOULD
   expose configured privacy and terms links as `op_policy_uri` and `op_tos_uri`.
 - The discovery document MUST advertise protected introspection and client-bound revocation
   endpoints plus the client-authentication methods each endpoint supports.
+- The discovery document MUST advertise RS256 signed introspection responses through
+  `introspection_signing_alg_values_supported` according to OAUTH-011.
+- The discovery document MUST enumerate the issuer's UserInfo resource through
+  `protected_resources` so it cross-references OAUTH-012 metadata.
 - Scope metadata MUST use the issuer's configured scopes, falling back to `openid`, `profile`, and `email` when omitted.
 - Unknown issuers MUST return HTTP 404 with an `invalid_request` response and MUST NOT enumerate valid issuer identifiers.
 
@@ -56,7 +85,8 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 
 The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`,
 `introspection_endpoint`, `revocation_endpoint`, `userinfo_endpoint`, `jwks_uri`,
-`end_session_endpoint`, `response_types_supported`, `response_modes_supported`, `grant_types_supported`,
+`userinfo_signing_alg_values_supported`,
+`end_session_endpoint`, optional `check_session_iframe`, `frontchannel_logout_supported`, `frontchannel_logout_session_supported`, `backchannel_logout_supported`, `backchannel_logout_session_supported`, `response_types_supported`, `response_modes_supported`, `grant_types_supported`,
 `subject_types_supported`, `id_token_signing_alg_values_supported`,
 `acr_values_supported`,
 `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`,
@@ -85,9 +115,15 @@ essential-claim behavior.
 - Every URL in discovery corresponds to a routed endpoint and uses the exact configured issuer origin and path.
 - WebFinger returns the same issuer link for existing-looking and unknown account local parts on a
   configured authority, and no issuer for an unrelated authority.
+- WebFinger returns the same validator through `GET` and `HEAD`; revalidation yields a bodyless 304
+  and its preflight permits only `GET`, `HEAD`, `OPTIONS`, and `If-None-Match`.
 - The response contains no password hash, secret reference, storage path, signing private key, or user record.
 - Unchanged metadata returns HTTP 304 for its ETag, while a configuration change affecting the
   selected representation produces a different ETag and full response.
+- Both OIDC Discovery route shapes return byte-equivalent metadata and the same representation
+  validator; disabled and unknown issuers remain indistinguishable on either route.
+- A browser on an unrelated origin can read public discovery metadata and revalidate it, while the
+  response grants neither credentials nor access to any sensitive endpoint.
 
 ## Non-Goals
 

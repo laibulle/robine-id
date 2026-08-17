@@ -5,7 +5,17 @@ configuration as the conventional server. PostgreSQL remains authoritative for c
 refresh grants, sessions, rate limits, browser transactions, and signing keys, so function instances are stateless
 apart from bounded in-process metrics and their immutable configuration snapshot.
 The adapter caps request bodies at 16 KiB before forwarding them into Actix, matching the form
-limit used by the conventional server.
+limit used by the conventional server. For token, PAR, and revocation only, an adapter-level 413
+echoes `Access-Control-Allow-Origin` after the exact path and origin pass the same active
+public-client redirect-origin policy; every other oversized request remains same-origin.
+Liveness and readiness probes preserve the shared Actix `GET`/bodyless-`HEAD` contract and always
+emit `Cache-Control: no-store` plus `Pragma: no-cache`; Vercel and intermediary caches must not
+retain an instance's former traffic-acceptance state.
+The same adapter preserves the route layer's non-cacheable policy for JSON errors, unknown issuers,
+rejected browser preflights, and session-origin validation. Only the explicit public metadata and
+static-asset helpers opt into shared caching.
+Known protocol paths also preserve Actix method negotiation through Vercel: unsupported verbs return
+HTTP 405, the endpoint's exact `Allow` header, and a non-cacheable bounded JSON error.
 Each warm function process owns one long-lived Actix worker instead of rebuilding an Actix system
 and router for every invocation. A bounded 128-request channel provides back-pressure and a
 semaphore permits at most 32 requests to execute concurrently on the worker's local Actix
@@ -13,9 +23,15 @@ scheduler, while request-body collection remains on the Vercel Tokio runtime. A 
 unavailable worker returns a security-hardened HTTP 503 with `Retry-After: 1`; it is also counted in
 HTTP metrics. Configuration, the SQL pool, migrations, metrics, and the route service are therefore
 initialized at most once per warm process.
-Public browser clients can use the shared token and PAR routes cross-origin when their exact origin is
-derived from a registered redirect URI. The preflight permits only POST with `Content-Type` and
-never enables browser CORS for confidential-client credentials.
+HTTP method counters and duration summaries use only `GET`, `POST`, `HEAD`, `OPTIONS`, and `other`.
+Body-limit 413 and worker/queue 503 responses are recorded even when rejection happens before Actix;
+an arbitrary extension method can never become a Prometheus label or tracing-span value. These
+adapter-generated rejections carry both `Cache-Control: no-store` and `Pragma: no-cache`, matching
+route-layer transient errors.
+Public browser clients can use the shared token, PAR, and revocation routes cross-origin when their
+exact origin is derived from a registered redirect URI. Revocation preflight permits only POST with
+`Content-Type` and never enables browser `Authorization` or CORS for confidential-client
+credentials.
 Pushed authorization requests use the same PostgreSQL authority as conventional Actix instances,
 so a PAR reference created by one warm function process can be consumed by another. References are
 single-use and short-lived; clients must not assume invocation affinity.
@@ -23,10 +39,28 @@ Form-post success and error pages pass through the same adapter with their no-st
 redirect-origin-specific CSP intact.
 Client-credentials access grants use that same database authority. A token issued by one warm
 function process can be introspected or revoked by another without session affinity.
-Discovery and JWKS responses publish content-derived ETags plus `s-maxage=300` and a bounded
-stale-while-revalidate window. Vercel's shared cache can therefore answer repeated metadata reads
-without transferring the JSON representation on every request, while a changed configuration or
-rotated key produces a new validator.
+Discovery, WebFinger, and JWKS responses publish weak content-derived ETags plus `s-maxage=300` and
+a bounded stale-while-revalidate window. Vercel's shared cache can therefore answer repeated
+metadata reads without transferring the JSON or JRD representation on every request, while a
+changed configuration or rotated key produces a new validator.
+OIDC Discovery is available through both `/:issuer_id/.well-known/openid-configuration` and the
+RFC 8414-shaped compatibility path `/.well-known/openid-configuration/:issuer_id`; both forward to
+the same Actix representation and therefore share their validator and cache policy.
+Discovery, WebFinger, OAuth and protected-resource metadata, and JWKS allow credential-free reads
+from any origin. Their public preflight is bounded to `GET`, `HEAD`, `OPTIONS`, and `If-None-Match`;
+this does not broaden the registered-origin policy of token, PAR, UserInfo, or other sensitive
+routes.
+Default visual assets and `robots.txt` are compiled into the same Rust binary rather than read from
+an invocation filesystem. They expose exact media types, bounded cache lifetimes, content-derived
+ETags, conditional GET, and bodyless HEAD responses through the same Actix adapter.
+The complete English/French Askama message catalogs are embedded as well; regional `ui_locales`
+lookup and configured per-key overrides therefore behave identically on warm and cold functions.
+Configured remote logo and favicon URLs remain supported without bundling their bytes; validation
+permits safe HTTPS targets and the rendered URL receives the semantic-revision cache key after any
+operator-supplied query parameters.
+The shared route layer negotiates standard Actix compression only for public resources such as
+assets, metadata, documentation, health, and metrics. Authentication and token-bearing routes are
+deliberately outside that middleware; `Accept-Encoding` never enables compression for them.
 
 ## Required environment
 
@@ -64,7 +98,9 @@ The entrypoint refuses an implicit fallback to the checked-in development config
 2. Deploy one immutable configuration revision and wait for `/health/ready` to return that revision.
 3. Verify discovery uses the public HTTPS issuer and every endpoint resolves through `vercel.json`.
 4. Complete Authorization Code with PKCE, consented `offline_access`, cross-instance refresh
-   rotation, Client Credentials, UserInfo, protected introspection, client-bound revocation, and RP-initiated logout
+   rotation, Client Credentials, UserInfo, protected introspection, client-bound revocation,
+   RP-initiated logout, session-bound front/back-channel notifications, and the embeddable OIDC
+   Session Management iframe
    through real clients.
 5. Exercise two concurrent function instances against the same database when the platform permits.
 6. Restore a PostgreSQL backup with the matching key-encryption secret and verify current and

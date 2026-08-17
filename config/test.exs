@@ -9,7 +9,8 @@ config :robine_id, :configuration_reload_interval, :disabled
 # to provide built-in test partitioning in CI environment.
 # Run `mix help test` for more information.
 config :robine_id, RobineId.Repo,
-  database: Path.expand("../robine_id_test.db", __DIR__),
+  database:
+    System.get_env("ROBINE_ID_TEST_DATABASE", Path.expand("../robine_id_test.db", __DIR__)),
   pool_size: 5,
   pool: Ecto.Adapters.SQL.Sandbox
 

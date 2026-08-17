@@ -12,9 +12,11 @@ registered atomically in PostgreSQL so replay is rejected across Actix and Verce
 
 ## Requirements
 
-- Discovery MUST advertise `dpop_signing_alg_values_supported` with ES256 and RS256.
+- Discovery MUST advertise `dpop_signing_alg_values_supported` with EdDSA, ES256, and RS256.
 - A DPoP proof MUST be a bounded signed JWT with `typ=dpop+jwt`, an inline public asymmetric JWK,
-  and an ES256 or RS256 signature. Private JWK parameters and remote key references MUST be rejected.
+  and an EdDSA, ES256, or RS256 signature over a matching Ed25519, P-256, or RSA public key. Private
+  JWK parameters, cross-family parameters, algorithm confusion, and remote key references MUST be
+  rejected.
 - The proof MUST contain bounded `jti`, exact uppercase `htm`, exact canonical endpoint `htu`, and a
   recent `iat`. The `htu` value MUST NOT contain a query or fragment.
 - A protected-resource proof MUST additionally contain `ath`, computed as the base64url SHA-256
@@ -43,6 +45,8 @@ registered atomically in PostgreSQL so replay is rejected across Actix and Verce
 - Introspection MUST report `token_type=DPoP` and `cnf.jkt` for a bound access token.
 - DPoP proof values, access tokens, JWK private material, and raw `jti` values MUST NOT be logged or
   persisted.
+- Accepted-proof diagnostics MUST record only bounded endpoint/outcome categories; the JWK
+  thumbprint, proof `jti`, and nonce MUST remain absent even at debug level.
 
 ## Acceptance Criteria
 
@@ -56,6 +60,8 @@ registered atomically in PostgreSQL so replay is rejected across Actix and Verce
 - With nonce enforcement enabled, a client can obtain a challenge from one instance and retry with
   the supplied nonce on another; authorization-server nonces MUST NOT satisfy UserInfo.
 - Discovery and the Vercel adapter expose the same DPoP metadata and behavior as Actix.
+- An automated tracing capture verifies that accepted UserInfo proof diagnostics contain the
+  endpoint/outcome but none of the proof thumbprint, identifier, or nonce.
 
 ## Standards
 
@@ -64,5 +70,6 @@ registered atomically in PostgreSQL so replay is rejected across Actix and Verce
 
 ## Non-Goals
 
-mTLS sender-constrained tokens, symmetric proof keys, and EdDSA proofs are outside this extension.
-JWT formatting and its `cnf.jkt` claim are defined by OAUTH-007.
+mTLS sender-constrained tokens, symmetric proof keys, and proof algorithms other than EdDSA, ES256,
+and RS256 are outside this extension. JWT formatting and its `cnf.jkt` claim are defined by
+OAUTH-007.

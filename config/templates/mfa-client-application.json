@@ -26,5 +26,6 @@
   "pkce_required": true,
   "nonce_required": true,
   "consent_required": true,
-  "required_acr": "urn:robine-id:acr:password+totp"
+  "required_acr": "urn:robine-id:acr:password+totp",
+  "max_authentication_age": 900
 }

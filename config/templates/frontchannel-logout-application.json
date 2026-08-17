@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "frontchannel-logout-client",
+  "name": "Front-channel logout browser client",
+  "type": "confidential",
+  "redirect_uris": ["https://app.example.com/oidc/callback"],
+  "post_logout_redirect_uris": ["https://app.example.com/"],
+  "frontchannel_logout_uri": "https://app.example.com/oidc/frontchannel-logout",
+  "frontchannel_logout_session_required": true,
+  "scopes": ["openid", "profile", "email"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "client_secret_basic",
+  "secret_reference": {
+    "provider": "env",
+    "key": "FRONTCHANNEL_LOGOUT_CLIENT_SECRET"
+  },
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true
+}

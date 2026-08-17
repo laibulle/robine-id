@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "signed-userinfo-client",
+  "name": "Signed UserInfo Client",
+  "type": "public",
+  "redirect_uris": ["https://app.example.com/callback"],
+  "post_logout_redirect_uris": ["https://app.example.com/signed-out"],
+  "scopes": ["openid", "profile", "email"],
+  "grant_types": ["authorization_code"],
+  "authentication_method": "none",
+  "pkce_required": true,
+  "nonce_required": true,
+  "consent_required": true,
+  "userinfo_signed_response_alg": "RS256"
+}

@@ -15,17 +15,27 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - State-changing browser requests MUST use CSRF protection.
 - Authentication attempts MUST be rate-limited by configurable, privacy-preserving dimensions.
 - Passwords, authorization codes, access tokens, refresh tokens, session identifiers, and client secrets MUST never appear in logs.
+- DPoP proof thumbprints, proof `jti` values, and nonces MUST NOT appear in logs. Accepted proofs
+  MAY emit only bounded fields such as endpoint and outcome.
+- Environment-resolved client and TOTP secrets MUST use zeroizing memory wrappers so transient
+  buffers are overwritten when released.
 - Failed-login responses MUST not disclose account existence by default.
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.
 - Browser cookies MUST contain only an opaque, high-entropy session credential; subject and policy state MUST remain server-side.
+- The public OIDC `sid` MUST be a distinct opaque value and MUST NOT reveal or be accepted as the
+  browser's session credential.
+- OIDC Session Management MUST keep the browser authentication credential `HttpOnly`. Its separate
+  JavaScript-readable OP browser-state cookie MUST be one-way derived, non-authenticating,
+  `SameSite=None; Secure` on HTTPS, and removed with the authenticated session.
 - Authentication success MUST issue a fresh session credential before storing the subject registration.
 - Idle and absolute age MUST be evaluated on each browser request. An invalid or unknown authenticated session MUST be cleared and replaced with a fresh anonymous session.
 - Concurrent-session enforcement MUST retain no more than the configured maximum most-recent session identifiers for a subject.
-- Rate limiting MUST enforce independent counters for the remote network address and the normalized
-  submitted identifier, use a bounded time window, and return HTTP 429 with `Retry-After` when
+- Rate limiting MUST enforce independent counters for the remote network address and the selected
+  issuer plus normalized submitted identifier, use a bounded time window, and return HTTP 429 with `Retry-After` when
   either dimension is exhausted. This prevents rotating identifiers from bypassing a network limit
-  and rotating source addresses from bypassing protection for one account.
+  and rotating source addresses from bypassing protection for one account, without allowing one
+  tenant to exhaust another tenant's same-identifier account counter.
 - A trusted `X-Forwarded-For` value used for authentication throttling MUST parse as an IP address
   and be canonicalized; malformed or untrusted values MUST fall back to the socket peer.
 - Password comparison and PKCE comparison MUST use appropriate cryptographic verification functions.
@@ -45,17 +55,30 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - A validated authenticated session MAY satisfy a later authorization request without another
   password check, except when prompt policy explicitly requires interaction or the user's current
   factor policy requires TOTP and the stored session did not verify it.
+- A global browser session whose active subject is not available on the selected issuer MUST be
+  treated as unauthenticated for that request without deleting its cookie. Deleted or disabled
+  subjects and insufficient current authentication context MAY clear it.
 - Refresh tokens MUST rotate on successful use. Reuse of an already consumed token MUST revoke its
   entire refresh family without logging any member of that family.
 - Authorization success and redirected error responses MUST identify the issuer according to RFC
   9207 so multi-provider clients can detect authorization-server mix-up.
 - Form-post authorization responses MAY replace only the static CSP `form-action` directive with
   the exact registered redirect origin; all other restrictive directives MUST remain active.
+- HTTP compression MUST be limited to public resources. Authentication forms, consent, Device
+  verification, token and UserInfo responses, logout, and other credential-bearing representations
+  MUST remain uncompressed even when the client advertises `Accept-Encoding`.
+- JSON errors, rejected cross-origin preflights, and session-origin validation responses MUST emit
+  `Cache-Control: no-store` and `Pragma: no-cache`. Public metadata is cacheable only through its
+  dedicated ETag-aware response path.
+- A known OAuth/OIDC protocol route invoked with an unsupported HTTP method MUST return HTTP 405,
+  an exact bounded `Allow` header, and the same non-cacheable JSON error policy. It MUST remain
+  distinguishable from an unknown route's HTTP 404 without exposing issuer or client state.
 
 ## Session State
 
-The cookie carries only a random session credential. PostgreSQL is authoritative for the subject,
-creation time, last-seen time, absolute expiry, revocation, and concurrent-session policy. Restarting
+The cookie carries only a random session credential. PostgreSQL is authoritative for the distinct
+public `sid`, subject, creation time, last-seen time, absolute expiry, revocation, participating RPs,
+and concurrent-session policy. Restarting
 or routing to another instance preserves the session when both instances share the database and cookie policy.
 
 The absolute timeout is measured from `session_started_at`; idle timeout is measured from `session_last_seen_at`. Successful validation updates the last-seen timestamp without extending the absolute deadline.
@@ -68,9 +91,15 @@ The absolute timeout is measured from `session_started_at`; idle timeout is meas
 - Exceeding maximum concurrent sessions invalidates the oldest retained registration.
 - Changing identifiers from one source or changing sources against one identifier cannot bypass
   the corresponding authentication-attempt counter.
+- Two issuers using the same normalized login identifier share the global source-address counter
+  but retain independent account counters.
+- Visiting an issuer outside an active subject's `issuer_ids` cannot destroy the browser session
+  that remains valid for an authorized issuer.
 - Restarting the process preserves unexpired authenticated registrations through PostgreSQL.
 - Silent authorization never displays login or consent and returns a standard interaction-required
   protocol error when the existing session is insufficient.
+- Unsupported methods on authorization, consent, PAR, device, token, introspection, revocation,
+  UserInfo, and logout routes return exact method negotiation rather than a misleading 404.
 
 ## Threat Boundaries
 

@@ -23,7 +23,7 @@ through the browser.
 - `POST /:issuer_id/par` MUST accept the same bounded authorization parameters and validation rules
   as the interactive authorization endpoint.
 - The PAR endpoint MUST authenticate confidential clients with their configured
-  `client_secret_basic`, `client_secret_post`, or `private_key_jwt` method. A public client MUST provide its
+  `client_secret_basic`, `client_secret_post`, `client_secret_jwt`, or `private_key_jwt` method. A public client MUST provide its
   `client_id` without a secret.
 - OIDC-009 signed JWT request objects MAY be pushed after client authentication and validation.
   External request URI dereferencing remains unsupported. A PAR response MUST return

@@ -19,5 +19,6 @@
     "provider": "env",
     "key": "SERVICE_TOKEN_BROKER_SECRET"
   },
-  "introspection_allowed": true
+  "introspection_allowed": true,
+  "actor_token_exchange_allowed": true
 }

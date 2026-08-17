@@ -28,8 +28,8 @@ placing the shared authenticator secret in versioned configuration or browser st
 - PostgreSQL MUST retain the greatest accepted time-step counter for each issuer and subject. A
   counter already accepted through any challenge, purpose, or application instance MUST be rejected
   and the attempted challenge consumed.
-- TOTP attempts MUST share the independent network and account rate limits used by password
-  authentication. User-visible failures MUST not reveal the shared secret or whether a replay,
+- TOTP attempts MUST share the independent network and issuer-bound account rate limits used by
+  password authentication. User-visible failures MUST not reveal the shared secret or whether a replay,
   skew, or incorrect code caused rejection.
 - Both Authorization Code and Device Authorization browser journeys MUST enforce TOTP for a
   configured user. A pre-existing password-only session MUST NOT bypass the second factor after a
