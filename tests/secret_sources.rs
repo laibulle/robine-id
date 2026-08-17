@@ -123,3 +123,34 @@ fn process_loads_file_sources_and_reports_policy_without_disclosing_them() {
     fs::remove_file(database_path).expect("remove database URL file");
     fs::remove_file(encryption_path).expect("remove encryption key file");
 }
+
+#[test]
+fn process_validates_metrics_file_tokens_without_disclosing_them() {
+    let invalid_path = temporary_secret_path("metrics-token-path-marker");
+    let invalid_token = "metrics token value marker that contains spaces";
+    fs::write(&invalid_path, format!("{invalid_token}\n")).expect("write invalid metrics token");
+    let invalid_path_text = invalid_path.to_string_lossy().into_owned();
+    let output = run_server(&[("METRICS_BEARER_TOKEN_FILE", &invalid_path_text)]);
+    let diagnostic = diagnostic(&output);
+
+    assert!(!output.status.success());
+    assert!(diagnostic.contains(
+        "METRICS_BEARER_TOKEN must contain between 32 and 256 URL-safe ASCII characters"
+    ));
+    assert!(!diagnostic.contains(invalid_token));
+    assert!(!diagnostic.contains(&invalid_path_text));
+    fs::remove_file(invalid_path).expect("remove invalid metrics token file");
+
+    let valid_path = temporary_secret_path("valid-metrics-token-path-marker");
+    let valid_token = "valid_metrics_token_abcdefghijklmnopqrstuvwxyz0123456789";
+    fs::write(&valid_path, format!("{valid_token}\n")).expect("write valid metrics token");
+    let valid_path_text = valid_path.to_string_lossy().into_owned();
+    let output = run_server(&[("METRICS_BEARER_TOKEN_FILE", &valid_path_text)]);
+    let diagnostic = diagnostic(&output);
+
+    assert!(!output.status.success());
+    assert!(!diagnostic.contains("METRICS_BEARER_TOKEN must contain"));
+    assert!(!diagnostic.contains(valid_token));
+    assert!(!diagnostic.contains(&valid_path_text));
+    fs::remove_file(valid_path).expect("remove valid metrics token file");
+}

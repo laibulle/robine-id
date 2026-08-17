@@ -132,9 +132,11 @@ dpop_ed_jkt=$(
 )
 test "$(expr length "$dpop_ed_jkt")" = '43'
 
-cat >"$environment_file" <<'EOF'
+metrics_bearer_token=release_smoke_metrics_token_abcdefghijklmnopqrstuvwxyz0123456789
+cat >"$environment_file" <<EOF
 POSTGRES_PASSWORD=release-smoke-postgres-password
 KEY_ENCRYPTION_SECRET=release-smoke-key-encryption-secret-32-bytes-minimum
+METRICS_BEARER_TOKEN=$metrics_bearer_token
 DATABASE_MAX_CONNECTIONS=4
 ROBINE_ID_RELOAD_INTERVAL=250
 TRUST_PROXY_HEADERS=false
@@ -883,11 +885,20 @@ test "$(
 )" = '200'
 curl --fail --silent "$base_url/docs" | grep -q 'Authorization Code with PKCE'
 metrics_headers="$temporary_directory/metrics.headers"
-curl --fail --silent --dump-header "$metrics_headers" "$base_url/metrics" \
+metrics_unauthorized_headers="$temporary_directory/metrics-unauthorized.headers"
+test "$(
+  curl --silent --dump-header "$metrics_unauthorized_headers" --output /dev/null \
+    --write-out '%{http_code}' "$base_url/metrics"
+)" = '401'
+grep -qi '^www-authenticate: Bearer realm="metrics"' "$metrics_unauthorized_headers"
+grep -qi '^cache-control: no-store' "$metrics_unauthorized_headers"
+curl --fail --silent --dump-header "$metrics_headers" \
+  --header "Authorization: Bearer $metrics_bearer_token" "$base_url/metrics" \
   | grep -q 'robine_id_ready 1'
 grep -qi '^cache-control: no-store' "$metrics_headers"
 grep -qi '^pragma: no-cache' "$metrics_headers"
-curl --fail --silent "$base_url/metrics" \
+curl --fail --silent --header "Authorization: Bearer $metrics_bearer_token" \
+  "$base_url/metrics" \
   | grep -Eq 'robine_id_http_requests_total [1-9][0-9]*'
 method_error_headers="$temporary_directory/method-not-allowed.headers"
 method_error_body="$temporary_directory/method-not-allowed.json"
@@ -2697,7 +2708,8 @@ grep -q 'DPoP error="insufficient_user_authentication"' "$mfa_step_up_headers"
 grep -q 'max_age="300"' "$mfa_step_up_headers"
 grep -q "resource_metadata=\"http://127.0.0.1:${bind_port}/.well-known/oauth-protected-resource/default/userinfo\"" \
   "$mfa_step_up_headers"
-curl --fail --silent "$base_url/metrics" \
+curl --fail --silent --header "Authorization: Bearer $metrics_bearer_token" \
+  "$base_url/metrics" \
   | grep -Eq 'robine_id_mfa_total\{outcome="success"\} [1-9][0-9]*'
 
 jwks_headers="$temporary_directory/jwks.headers"
@@ -3419,7 +3431,10 @@ compose exec --no-TTY postgres \
   psql --username robine_id --dbname robine_id --tuples-only --command \
   "SELECT count(*) FROM authenticated_sessions WHERE revoked_at IS NOT NULL;" | grep -Eq '[1-9]'
 
-token_metrics=$(curl --fail --silent "$base_url/metrics")
+token_metrics=$(
+  curl --fail --silent --header "Authorization: Bearer $metrics_bearer_token" \
+    "$base_url/metrics"
+)
 for grant_type in \
   authorization_code \
   refresh_token \
