@@ -16,6 +16,9 @@ the shared durable store for protocol state and encrypted signing keys.
 - The canonical operator generator MUST emit an environment-file-safe `KEY_ENCRYPTION_SECRET`
   containing exactly 384 bits of operating-system entropy, zeroize its raw random buffer, and be
   included in the production image.
+- One canonical command MUST emit independent environment-file-safe `POSTGRES_PASSWORD` and
+  `KEY_ENCRYPTION_SECRET` assignments, each containing exactly 384 bits of operating-system
+  entropy, without requiring OpenSSL or another host runtime.
 - A staged encryption-secret rotation MUST support a distinct, equally strong
   `KEY_ENCRYPTION_SECRET_PREVIOUS`, an atomic re-encryption command, and removal of the previous
   secret after verification.

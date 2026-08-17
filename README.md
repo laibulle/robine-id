@@ -777,6 +777,9 @@ transient storage while SQLx constructs its connection pool.
 Generate the wrapping secret with `make encryption-secret`; it emits one environment-file-safe
 `KEY_ENCRYPTION_SECRET` containing 384 bits of operating-system entropy. Store that value with the
 matching database backups and do not commit it.
+For a new release deployment, prefer `make deployment-secrets`: it emits independent 384-bit
+`POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` assignments ready for `.env.release`, without a
+host OpenSSL dependency.
 
 ### Container release
 

@@ -45,9 +45,11 @@ the same cost.
 Generate independent secrets:
 
 ```sh
-openssl rand -base64 48 # POSTGRES_PASSWORD
-make encryption-secret # KEY_ENCRYPTION_SECRET
+make deployment-secrets
 ```
+
+Copy both emitted assignments into `.env.release`. Each value contains an independent 384 bits of
+operating-system entropy and uses only environment-file-safe Base64URL characters.
 
 `KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
 requires both the PostgreSQL backup and the matching encryption secret. Do not rotate this secret
