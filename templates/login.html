@@ -16,7 +16,7 @@
         <h1 id="sign-in-title">{{ messages.sign_in_title }}</h1>
         <p class="auth-intro">{{ messages.sign_in_intro }} <strong>{{ client_name }}</strong>.</p>
 
-        {% if let Some(error) = error %}<div class="error-summary" role="alert"><strong>We couldn't sign you in</strong><span>{{ error }}</span></div>{% endif %}
+        {% if let Some(error) = error %}<div id="login-error" class="error-summary" role="alert" tabindex="-1" data-error-summary><strong>We couldn't sign you in</strong><span>{{ error }}</span></div>{% endif %}
 
         <form id="login-form" method="post" action="/{{ issuer_id }}/authorize" class="auth-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -31,10 +31,10 @@
           {% if let Some(ui_locales) = request.ui_locales %}<input type="hidden" name="ui_locales" value="{{ ui_locales }}">{% endif %}
 
           <label for="login_identifier">{{ messages.sign_in_identifier }}</label>
-          <input id="login_identifier" name="identifier" type="email" autocomplete="username" inputmode="email" required autofocus>
+          <input id="login_identifier" name="identifier" type="email" value="{{ identifier }}" autocomplete="username" inputmode="email" required{% if has_error %} aria-invalid="true" aria-describedby="login-error"{% else %} autofocus{% endif %}>
           <label for="login_password">{{ messages.sign_in_password }}</label>
           <div class="password-field">
-            <input id="login_password" name="password" type="password" autocomplete="current-password" required>
+            <input id="login_password" name="password" type="password" autocomplete="current-password" required{% if has_error %} aria-invalid="true" aria-describedby="login-error"{% endif %}>
             <button type="button" class="reveal-password" data-password-toggle aria-label="Show password">Show</button>
           </div>
           <button id="login-submit" type="submit" class="primary-action">{{ messages.sign_in_submit }}</button>

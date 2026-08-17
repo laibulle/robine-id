@@ -7,9 +7,9 @@ on:
 
 jobs:
   package:
-    image: debian:bookworm-slim
-    shell: /bin/bash
-    timeout: 30m
+    image: docker:28-cli
+    shell: /bin/sh
+    timeout: 40m
     env:
       DOCKER_HOST: tcp://docker:2375
       DOCKER_TLS_CERTDIR: ""
@@ -26,21 +26,13 @@ jobs:
     steps:
       - name: Checkout tagged revision
         uses: checkout
-      - name: Install Docker client
+      - name: Install release dependencies
         run: |
-          mkdir -p /tmp/apt-archives/partial
-          chmod 0777 /tmp/apt-archives /tmp/apt-archives/partial
-          apt-get -o APT::Sandbox::User=root \
-            -o Dir::Cache::archives=/tmp/apt-archives update
-          DEBIAN_FRONTEND=noninteractive apt-get \
-            -o APT::Sandbox::User=root \
-            -o Dir::Cache::archives=/tmp/apt-archives \
-            install --yes --no-install-recommends ca-certificates curl
-          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.5.2.tgz -o /tmp/docker.tgz
-          echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
-          tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker
-          rm /tmp/docker.tgz
+          apk add --no-cache curl make openssl
           docker version
+          docker compose version
+      - name: Exercise production topology
+        run: make release-smoke
       - name: Build production image
         run: docker build --tag robine-id:release .
       - name: Prepare release payload

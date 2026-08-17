@@ -428,11 +428,14 @@ impl Snapshot {
                     path.display()
                 )));
             }
-            let client = serde_json::from_value::<Client>(serde_json::Value::Object(document))
+            let mut client = serde_json::from_value::<Client>(serde_json::Value::Object(document))
                 .map_err(|source| ConfigurationError::Json {
                     path: path.clone(),
                     source,
                 })?;
+            if client.name.is_empty() {
+                client.name = client.id.clone();
+            }
             configuration.clients.push(client);
         }
 
@@ -473,7 +476,10 @@ impl Snapshot {
     }
 
     pub fn default_issuer(&self) -> Option<&Issuer> {
-        self.configuration.issuers.first()
+        self.configuration
+            .issuers
+            .iter()
+            .min_by(|left, right| left.id.cmp(&right.id))
     }
 
     pub fn user_by_identifier(&self, identifier: &str) -> Option<&User> {
@@ -966,7 +972,6 @@ fn validate_primary_color(color: &str) -> Result<(), ConfigurationError> {
 
 fn valid_secret_reference(reference: &serde_json::Value) -> bool {
     match reference {
-        serde_json::Value::String(secret) => !secret.is_empty(),
         serde_json::Value::Object(reference) => {
             reference.len() == 2
                 && reference
@@ -1238,6 +1243,12 @@ mod tests {
         .expect("inline configuration");
 
         assert!(snapshot.client("inline-client").is_some());
+        assert_eq!(
+            snapshot
+                .client("inline-client")
+                .map(|client| client.name.as_str()),
+            Some("inline-client")
+        );
     }
 
     #[test]
@@ -1340,6 +1351,28 @@ mod tests {
         assert!(matches!(
             validate(&configuration),
             Err(ConfigurationError::Invalid(message)) if message.contains("must require PKCE")
+        ));
+
+        let mut configuration: RootConfiguration =
+            serde_json::from_str(EMBEDDED_ROOT).expect("embedded configuration");
+        configuration.clients.push(Client {
+            id: "plaintext-secret".to_owned(),
+            name: "Plaintext secret".to_owned(),
+            client_type: "confidential".to_owned(),
+            redirect_uris: vec!["https://app.example/callback".to_owned()],
+            post_logout_redirect_uris: vec![],
+            scopes: vec!["openid".to_owned()],
+            grant_types: vec!["authorization_code".to_owned()],
+            pkce_required: None,
+            nonce_required: None,
+            consent_required: None,
+            authentication_method: Some("client_secret_basic".to_owned()),
+            secret_reference: Some(serde_json::json!("must-not-be-inline")),
+            branding: None,
+        });
+        assert!(matches!(
+            validate(&configuration),
+            Err(ConfigurationError::Invalid(message)) if message.contains("secret reference")
         ));
     }
 }

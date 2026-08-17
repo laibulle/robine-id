@@ -4,14 +4,14 @@
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-id/coverage.svg)](https://ci.base59.dev/repositories)
 [![release](https://img.shields.io/github/v/release/laibulle/robine-id?display_name=tag&sort=semver)](https://github.com/laibulle/robine-id/releases)
 
-Robine ID is a file-configured OpenID Connect provider. The established runtime uses Elixir and
-Phoenix; its portable replacement uses Rust, Actix Web, and Askama. It implements the Authorization
+Robine ID is a file-configured OpenID Connect provider. Its production runtime uses Rust, Actix Web,
+Askama, and PostgreSQL. It implements the Authorization
 Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated
 logout.
 
-It can run as a standalone service or as an embedded OTP dependency mounted inside another Phoenix application. Both modes use the same protocol implementation and configuration model. See [`docs/embedding.md`](docs/embedding.md) for the host contract.
-
-The implementation follows clean architecture. Business domains expose one facade made of `defdelegate` calls; Phoenix, file loading, bcrypt, Ecto, JOSE, Logger, and runtime stores are adapters around use cases and ports. See [`AGENTS.md`](AGENTS.md) for the architectural contract and [`docs/specs`](docs/specs) for normative product requirements.
+The former Phoenix implementation remains in the repository as a parity oracle and regression suite;
+it is no longer packaged by the canonical `Dockerfile` or release Compose stack. The same Actix
+application runs as a conventional server and through the Vercel Function entrypoint.
 
 ## Getting started with Docker
 
@@ -19,32 +19,20 @@ You only need Docker. Clone the repository, then prepare the runtime environment
 
 ```sh
 cp .env.release.example .env.release
-openssl rand -base64 64
+openssl rand -base64 48
+openssl rand -base64 48
 ```
 
-Put the generated value in `SECRET_KEY_BASE` inside `.env.release`. Set `PHX_HOST` to the hostname that will expose the provider.
+Put independent generated values in `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` inside
+`.env.release`. Keep both in the deployment secret store.
 
-The container runs without root privileges. Make the read-only configuration mounts accessible, then build the image:
+The application container runs without root privileges. Make the read-only configuration mounts
+accessible, then start the Rust application and PostgreSQL:
 
 ```sh
 chmod 755 deploy deploy/config deploy/config/applications
 chmod 644 deploy/config/robine_id.json
-docker build -t robine-id:local .
-```
-
-Create persistent storage and start the provider:
-
-```sh
-docker volume create robine-id-data
-docker run --detach \
-  --name robine-id \
-  --publish 127.0.0.1:4001:4001 \
-  --env-file .env.release \
-  --env DATABASE_PATH=/data/robine_id.db \
-  --volume "$PWD/deploy/config/robine_id.json:/config/robine_id.json:ro" \
-  --volume "$PWD/deploy/config/applications:/config/applications:ro" \
-  --volume robine-id-data:/data \
-  robine-id:local
+docker compose --env-file .env.release -f compose.release.yml up --detach --build --wait
 ```
 
 Check readiness and open the built-in documentation:
@@ -59,46 +47,47 @@ curl --fail http://127.0.0.1:4001/health/ready
 
 Production relying applications belong in `deploy/config/applications/`, one JSON file per application. That directory is intentionally empty by default; the examples under `config/applications/` are development material and are not mounted into the container. Replace the example identity and issuer in `deploy/config/robine_id.json` before exposing the service publicly.
 
-Stop and remove the container without deleting its persistent SQLite and signing-key volume:
+Stop the stack without deleting the persistent PostgreSQL volume:
 
 ```sh
-docker stop robine-id
-docker rm robine-id
+docker compose --env-file .env.release -f compose.release.yml down
 ```
 
 ## Local setup
 
-Requirements:
+Rust runtime requirements:
 
-- Elixir 1.17 or newer
-- Erlang/OTP compatible with the installed Elixir version
-- a C compiler for the bcrypt adapter
+- Rust 1.88 or newer
+- Docker with Compose for PostgreSQL
 
 Run:
 
 ```sh
-mix setup
-mix phx.server
+make dev
 ```
 
 Run the complete quality gate and generate the coverage reports locally with:
 
 ```sh
-mix precommit
-mix coverage
+make rust-preflight
+make rust-integration
+make release-smoke
 ```
 
-Coverage reports are written to `cover/`. The project enforces a 70% threshold;
-Robine CI retains the reports for 14 days and publishes the percentage through
-the badge above.
+`make release-smoke` uses an isolated production Compose project. It completes Authorization Code
+with PKCE across two Actix instances, calls UserInfo, rejects a replayed code, performs RP-initiated
+logout, then dumps, recreates, and restores PostgreSQL before checking the restored access grant and
+signing key. It removes only its own temporary containers, network, volume, and files.
+
+The legacy Phoenix regression suite remains available through `mix precommit`; its coverage reports
+are written to `cover/` and retained by Robine CI.
 
 Then open <http://localhost:4001>.
 
-## Rust migration preview
+## Rust runtime
 
-The replacement runtime is being introduced alongside Phoenix so protocol behaviour can be
-migrated and verified incrementally. It uses Actix Web for both the conventional HTTP server and
-the Vercel Function entrypoint, with Askama for server-rendered HTML.
+The production runtime uses Actix Web for both the conventional HTTP server and the Vercel Function
+entrypoint, with Askama for server-rendered HTML.
 
 Run the Rust server against the existing JSON configuration:
 
@@ -115,7 +104,7 @@ Set `TRUST_PROXY_HEADERS=true` only behind a trusted reverse proxy; Vercel enabl
 handling automatically.
 `DATABASE_MAX_CONNECTIONS` defaults to five on the server and two per Vercel instance.
 Use `make dev-container` to build and run both the Rust application and PostgreSQL in Docker. The
-Rust image is built from `Dockerfile.rust`, runs as an unprivileged user, and includes a readiness
+Rust image is built from the canonical `Dockerfile`, runs as an unprivileged user, and includes a readiness
 health check.
 
 The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
@@ -159,8 +148,8 @@ Configuration files are immutable for a Vercel deployment. PostgreSQL is require
 For a filesystem-independent deployment, set `ROBINE_ID_CONFIG_JSON` to the complete root JSON
 document and `ROBINE_ID_APPLICATIONS_JSON` to a JSON array of complete application documents.
 The file-based variables remain supported for conventional servers and containers.
-Production cutover still requires validating the deployment pipeline and production observability
-against the Phoenix runtime.
+The release smoke gate exercises the canonical image and shared PostgreSQL topology; an external
+deployment still needs proxy, platform, and real relying-party validation.
 
 The checked-in development configuration contains one public client and one development identity:
 
@@ -185,7 +174,7 @@ Every document declares `schema_version: 1`. The root supports these sections:
 - `branding`: product name, assets, accessible theme tokens, locales, message overrides, and legal/support links;
 - `reconciliation`: explicit removal policy;
 - `authentication`: session and rate-limit policy;
-- `storage`: SQLite path, pool size, and encrypted signing-key store path;
+- `storage`: legacy Phoenix storage compatibility metadata (Rust persistence is configured through PostgreSQL environment variables);
 - `telemetry`: validated operational log level.
 
 Configuration precedence is deterministic:
@@ -254,17 +243,23 @@ For the configured issuer `https://id.base59.dev/default`:
 
 Authorization requests require `response_type=code`, `openid` scope, `state`, and `nonce`. PKCE using `S256` is mandatory by default and always required for public clients; a confidential integration that cannot send PKCE may opt out explicitly. Redirect URIs match registered values exactly. Authorization codes are short-lived, stored only by hash, bound to issuer/client/redirect/subject/nonce and the PKCE challenge when present, and consumed atomically once.
 
-ID tokens use RS256. JWKS publishes public material only. Private and retained signing keys are persisted through an atomically replaced AES-256-GCM envelope with filesystem mode `0600`, derived from the deployment `SECRET_KEY_BASE`. Key rotation takes a stable rotation identifier; repeating the same identifier is a no-op, while retained keys continue validating tokens issued before rotation and across restarts.
+ID tokens use RS256. JWKS publishes public material only. Private signing material is encrypted with
+AES-256-GCM using `KEY_ENCRYPTION_SECRET` (or `SECRET_KEY_BASE`) before it is persisted in PostgreSQL.
+Key rotation takes a stable rotation identifier; repeating the same identifier is a no-op, while
+retained keys continue validating tokens issued before rotation and across restarts.
 
 ## Operations
 
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` checks active configuration and database connectivity.
+- `GET /metrics` exports bounded Prometheus counters, request duration, readiness, and the active revision.
 - `x-request-id` is returned as the public correlation reference.
 - security and reconciliation events use structured, bounded metadata.
 - credentials, password hashes, authorization codes, bearer tokens, session identifiers, and client secrets are excluded from audit events.
 
-Production requires `DATABASE_PATH`, `SECRET_KEY_BASE`, and the usual Phoenix host/server variables described in [`config/runtime.exs`](config/runtime.exs). Production forces HTTPS and HSTS.
+Production requires PostgreSQL connectivity and `KEY_ENCRYPTION_SECRET` with at least 32 bytes of
+deployment-specific entropy. `DATABASE_URL` is accepted for managed databases; the release Compose
+stack uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `POSTGRES_PASSWORD`.
 
 ### Container release
 
@@ -272,13 +267,17 @@ The production image and Compose definition are ready for the Caddy deployment:
 
 ```sh
 cp .env.release.example .env.release
-# Fill SECRET_KEY_BASE and application secrets.
-docker compose -f compose.release.yml build
-docker compose -f compose.release.yml up -d
-docker compose -f compose.release.yml ps
+# Fill POSTGRES_PASSWORD, KEY_ENCRYPTION_SECRET, and application secrets.
+docker compose --env-file .env.release -f compose.release.yml build
+docker compose --env-file .env.release -f compose.release.yml up -d --wait
+docker compose --env-file .env.release -f compose.release.yml ps
 ```
 
-The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. SQLite and encrypted signing keys live in the persistent `robine_id_data` volume. Root and application configuration are mounted read-only and continue to reload automatically. See [`docs/operations/release.md`](docs/operations/release.md) for release, backup, rollback, and verification procedures.
+The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. PostgreSQL data,
+including encrypted signing keys and short-lived protocol state, lives in the persistent
+`robine_id_postgres` volume. Root and application configuration are mounted read-only and continue
+to reload automatically. See [`docs/operations/release.md`](docs/operations/release.md) for release,
+backup, rollback, and verification procedures.
 
 To publish the image to Docker Hub, authenticate once and use the Makefile. The default namespace is `laibulle`; override `DOCKERHUB_USER` or the complete `IMAGE` when needed:
 
@@ -293,10 +292,15 @@ make publish DOCKERHUB_USER=your-account VERSION=0.1.0
 ## Verification
 
 ```sh
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix test
-mix assets.deploy
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+make rust-integration
+make release-smoke
+mix precommit # legacy parity regression suite
 ```
 
-The test suite covers domain entities and use cases, adapter contracts, idempotent reconciliation, cryptographic verification, protocol failures, complete login/consent/code exchange, UserInfo, logout, session policy, health endpoints, localization, and responsive authentication markup.
+The test suite covers domain entities and use cases, adapter contracts, idempotent reconciliation,
+cryptographic verification, protocol failures, complete login/consent/code exchange, UserInfo,
+logout, session policy, health endpoints, localization, responsive authentication markup,
+cross-instance state sharing, one-time code replay protection, and PostgreSQL disaster recovery.

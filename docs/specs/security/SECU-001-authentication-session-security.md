@@ -18,19 +18,21 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - Failed-login responses MUST not disclose account existence by default.
 - Session idle timeout, absolute timeout, and maximum concurrent sessions MUST be configurable.
 - Logout MUST invalidate the local session and honor validated post-logout redirects when supported.
-- Browser session contents MUST be encrypted and signed with deployment secret material.
-- Authentication success MUST renew the cookie session before storing the subject and registered authenticated-session identifier.
+- Browser cookies MUST contain only an opaque, high-entropy session credential; subject and policy state MUST remain server-side.
+- Authentication success MUST issue a fresh session credential before storing the subject registration.
 - Idle and absolute age MUST be evaluated on each browser request. An invalid or unknown authenticated session MUST be cleared and replaced with a fresh anonymous session.
 - Concurrent-session enforcement MUST retain no more than the configured maximum most-recent session identifiers for a subject.
 - Rate limiting MUST combine remote network address and normalized submitted identifier, use a bounded time window, and return HTTP 429 with `Retry-After` when exhausted.
 - Password comparison and PKCE comparison MUST use appropriate cryptographic verification functions.
 - Production MUST force HTTPS, emit HSTS, and mark cookies Secure. Development MAY relax Secure cookies only for loopback HTTP.
-- Authorization requests and identity claims held in the browser session MUST be removed when authorization completes or the session becomes invalid.
+- Authorization requests, identity claims, and consent transactions MUST remain server-side and be consumed atomically.
 - Post-logout redirects MUST be protected by exact registration and a verified ID-token hint.
 
 ## Session State
 
-The encrypted cookie carries anonymous timestamps and, after authentication, subject and session-registration data. The server-side registry is authoritative for whether an authenticated session remains active. It is memory-backed and node-local in the MVP; restart signs the user out on the next request.
+The cookie carries only a random session credential. PostgreSQL is authoritative for the subject,
+creation time, last-seen time, absolute expiry, revocation, and concurrent-session policy. Restarting
+or routing to another instance preserves the session when both instances share the database and cookie policy.
 
 The absolute timeout is measured from `session_started_at`; idle timeout is measured from `session_last_seen_at`. Successful validation updates the last-seen timestamp without extending the absolute deadline.
 
@@ -40,8 +42,11 @@ The absolute timeout is measured from `session_started_at`; idle timeout is meas
 - Requests without valid CSRF evidence cannot mutate browser session state.
 - Security logs provide a correlation trail while redacting credentials and tokens.
 - Exceeding maximum concurrent sessions invalidates the oldest retained registration.
-- Restarting the process invalidates authenticated registrations without making signed cookie data sufficient to restore authentication.
+- Restarting the process preserves unexpired authenticated registrations through PostgreSQL.
 
 ## Threat Boundaries
 
-The MVP mitigates session fixation, cookie tampering, CSRF on browser mutations, authorization-code replay, PKCE interception, open post-logout redirects, online password guessing, and accidental credential logging. It does not claim protection against a compromised host, stolen unlocked browser profile, distributed password attacks across unshared node-local limiters, phishing, or denial of service.
+The runtime mitigates session fixation, credential guessing through shared PostgreSQL rate limits,
+CSRF on browser mutations, authorization-code replay, PKCE interception, open post-logout redirects,
+and accidental credential logging. It does not claim protection against a compromised host, stolen
+unlocked browser profile, phishing, or denial of service.

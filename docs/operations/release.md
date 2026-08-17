@@ -1,29 +1,36 @@
 # Robine ID Release Operations
 
-## Deployment Contract
+## Deployment contract
 
-The supported MVP topology is one Robine ID container behind Caddy. Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4001`. SQLite, authorization state, and signing-key coordination are single-instance concerns.
+The supported self-hosted topology is the non-root Actix container behind Caddy plus PostgreSQL 17.
+Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4001`. The canonical
+`Dockerfile` contains only the Rust runtime and its operational commands; Phoenix is not present in
+the production image.
 
-The image runs as an unprivileged user, exposes port 4001, includes an HTTP readiness healthcheck, and starts the Phoenix release through `/app/bin/server`. Database migrations run during release application startup. Configuration is mounted read-only; SQLite and encrypted signing keys use the `/data` volume.
+PostgreSQL holds authorization transactions, access grants, sessions, rate-limit counters, schema
+migrations, and AES-256-GCM encrypted signing keys. Root and application configuration are mounted
+read-only and reload atomically. An invalid candidate leaves the last valid revision active.
 
-## Required Inputs
+## Required inputs
 
 - `deploy/config/robine_id.json`: root production configuration.
-- `deploy/config/applications/*.json`: one file per production relying application. The directory is intentionally empty in the repository.
-- `.env.release`: deployment secrets and runtime settings, copied from `.env.release.example` and never committed.
-- `robine_id_data`: persistent Docker volume containing SQLite and `signing_keys.bin`.
+- `deploy/config/applications/*.json`: one document per production relying application.
+- `.env.release`: deployment secrets copied from `.env.release.example`; never commit it.
+- `robine_id_postgres`: persistent PostgreSQL data volume managed by Compose.
 
-Before the first deployment, replace the checked-in development identity and password hash in `deploy/config/robine_id.json`.
-
-Generate `SECRET_KEY_BASE` with:
+Replace the checked-in development identity, bcrypt hash, and issuer before the first deployment.
+Generate independent secrets:
 
 ```sh
-mix phx.gen.secret
+openssl rand -base64 48 # POSTGRES_PASSWORD
+openssl rand -base64 48 # KEY_ENCRYPTION_SECRET
 ```
 
-`SECRET_KEY_BASE` encrypts both browser sessions and the persistent signing-key envelope. Preserve it with the data-volume backup. Changing it without rotating or migrating stored material prevents signing-key recovery.
+`KEY_ENCRYPTION_SECRET` encrypts RSA private material before database persistence. A usable restore
+requires both the PostgreSQL backup and the matching encryption secret. Do not rotate this secret
+independently of stored signing keys.
 
-The container runs as an unprivileged user. Make its read-only bind mounts traversable and readable. These files contain references and password hashes, but no OIDC client secret:
+Ensure the unprivileged application container can traverse its bind mounts:
 
 ```sh
 chmod 755 deploy deploy/config deploy/config/applications
@@ -34,86 +41,124 @@ find deploy/config/applications -type f -name '*.json' -exec chmod 644 {} +
 ## Preflight
 
 ```sh
-mix precommit
-ROBINE_ID_APPLICATIONS_DIR="$PWD/deploy/config/applications" \
-  mix robine_id.config.validate deploy/config/robine_id.json
-docker compose -f compose.release.yml config --quiet
-docker compose -f compose.release.yml build
+make preflight
+docker compose --env-file .env.release -f compose.release.yml config --quiet
+make release-smoke
 ```
+
+`make release-smoke` creates an isolated Compose project on port 4011, builds the canonical image,
+checks migrations, readiness, documentation, discovery, CLI utilities, and the non-root user. It
+then completes login, consent, PKCE code exchange, UserInfo, replay rejection, and logout across two
+Actix containers sharing PostgreSQL. Finally, it takes a logical dump, recreates the database,
+restores the dump, and proves that the access grant and encrypted signing key remain usable. It
+deletes only its temporary containers, network, volume, and files.
 
 Confirm that:
 
 - `id.base59.dev` resolves to the deployment host;
 - Caddy proxies that hostname to `127.0.0.1:4001`;
-- `.env.release` contains every environment-backed secret referenced by the production application files;
+- `.env.release` contains every environment-backed client secret;
+- `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` are independent and stored outside Git;
 - no other process owns port 4001;
-- the persistent volume has been backed up before an upgrade.
+- a logical PostgreSQL backup exists before an upgrade.
 
 ## Deploy
 
 ```sh
-docker compose -f compose.release.yml up -d
-docker compose -f compose.release.yml ps
-docker compose -f compose.release.yml logs --tail=100 robine-id
+docker compose --env-file .env.release -f compose.release.yml up -d --build --wait
+docker compose --env-file .env.release -f compose.release.yml ps
+docker compose --env-file .env.release -f compose.release.yml logs --tail=100 robine-id
 ```
 
-Verify both the container-local healthcheck and the public proxy:
+Verify the local service and public proxy:
 
 ```sh
 curl --fail http://127.0.0.1:4001/health/ready
+curl --fail http://127.0.0.1:4001/metrics
 curl --fail https://id.base59.dev/default/.well-known/openid-configuration
 ```
 
-The discovery document must advertise `https://id.base59.dev/default` and public HTTPS endpoints. Complete a real login through each configured relying application before declaring the release successful.
+The discovery document must advertise `https://id.base59.dev/default` and HTTPS endpoints. Complete
+a login, code exchange, UserInfo request, and logout through every configured relying application.
 
-## Configuration Reload
+## Configuration reload
 
-Edits to `deploy/config/robine_id.json` and `deploy/config/applications/*.json` are detected automatically. The complete composed configuration is validated before activation. Invalid files retain the last valid revision. Container restart is required only for runtime environment changes, including secrets, database paths, host, port, and reload interval.
+Edits to `deploy/config/robine_id.json` and `deploy/config/applications/*.json` are detected by the
+Actix server. The complete candidate is validated before atomic activation. Invalid or partially
+written files are logged once while the previous revision continues serving traffic. Restart only
+for environment changes such as database credentials, key-encryption secret, proxy trust, or pool
+size.
 
-Use atomic file replacement when automation writes configuration: create the candidate outside the watched directory, validate it, then rename it into place.
-
-## Backup and Restore
-
-Stop the service before taking a filesystem-level volume backup so SQLite and the key envelope are mutually consistent:
+Validate a candidate before atomically renaming it into the watched directory:
 
 ```sh
-docker compose -f compose.release.yml stop robine-id
-docker run --rm \
-  -v robine-id_robine_id_data:/source:ro \
-  -v "$PWD/backups:/backup" \
-  debian:trixie-slim \
-  tar -C /source -czf /backup/robine-id-data.tar.gz .
-docker compose -f compose.release.yml start robine-id
+ROBINE_ID_CONFIG=/candidate/robine_id.json \
+ROBINE_ID_APPLICATIONS_DIR=/candidate/applications \
+cargo run --bin validate_config
 ```
 
-Back up `.env.release` through the deployment secret store, not Git. A usable restore requires both the volume archive and the exact matching `SECRET_KEY_BASE`.
+## Backup and restore
+
+Create a consistent logical backup without stopping the application:
+
+```sh
+mkdir -p backups
+docker compose --env-file .env.release -f compose.release.yml exec -T postgres \
+  pg_dump --username robine_id --dbname robine_id --format=custom \
+  > "backups/robine-id-$(date +%Y%m%d%H%M%S).dump"
+```
+
+Store `.env.release` in the deployment secret store, not beside the database dump. Test restores in
+an isolated PostgreSQL instance. To restore into an intentionally empty database:
+
+```sh
+docker compose --env-file .env.release -f compose.release.yml stop robine-id
+docker compose --env-file .env.release -f compose.release.yml exec -T postgres \
+  pg_restore --username robine_id --dbname robine_id --clean --if-exists < backups/robine-id.dump
+docker compose --env-file .env.release -f compose.release.yml start robine-id
+```
+
+Validate readiness, JWKS, and an ID token signed with the restored current key.
+The isolated equivalent of this recovery sequence runs automatically in `make release-smoke` and
+in both branch and tag CI workflows.
+
+## Key rotation
+
+Use a stable deployment identifier so retries are idempotent:
+
+```sh
+docker compose --env-file .env.release -f compose.release.yml exec -T robine-id \
+  rotate_keys default deployment-2026-08
+```
+
+The active key changes once; retained public keys remain in JWKS for existing token verification.
 
 ## Rollback
 
-Retag or rebuild the previous application revision, restore the previous validated configuration, and run:
+Retag the previous Rust image, restore the previous validated configuration, and run:
 
 ```sh
-docker compose -f compose.release.yml up -d --no-deps robine-id
+ROBINE_ID_IMAGE=registry.example/robine-id:previous \
+docker compose --env-file .env.release -f compose.release.yml up -d --no-deps robine-id
 ```
 
-Do not restore an older data volume unless the application rollback is incompatible with the current schema or stored keys. Validate readiness, discovery, JWKS, and a real login after rollback.
+Do not restore an older PostgreSQL backup merely to roll back application code. SQL migrations are
+forward-only; inspect compatibility before a rollback. Recheck readiness, discovery, JWKS, login,
+token exchange, UserInfo, and logout.
 
-## Release Checklist
+## Release checklist
 
-1. `mix precommit` passes.
-2. Production configuration validates with the application directory.
-3. The Docker image builds from a clean checkout.
-4. The development identity and password are replaced.
-5. Secrets are present only in `.env.release` or the deployment secret store.
-6. The data volume and `SECRET_KEY_BASE` are backed up.
-7. Readiness and discovery pass through Caddy.
-8. Every configured relying application completes login, token exchange, UserInfo, and callback.
+1. `make preflight` and `make release-smoke` pass.
+2. Production configuration contains no development identity or redirect URI.
+3. PostgreSQL and key-encryption secrets are present only in the secret store.
+4. A logical database backup and matching encryption secret are recoverable.
+5. Caddy readiness and discovery checks pass.
+6. Every relying application completes the full OIDC and logout flow.
+7. The deployed image user is `robine-id`, not root.
 
-## Automated Tag Releases
+## Automated tag releases
 
-Pushing a semantic version tag matching `v*` runs the Robine CI release
-workflow. It builds the production image through an isolated Docker daemon,
-exports it with `docker save`, generates a SHA-256 checksum, and publishes the
-retained payload to the matching GitHub Release through the GitHub App. The
-GitHub App installation requires `Contents: write`; no installation token is
-exposed to the build container.
+Pushing a semantic version tag matching `v*` runs the Robine CI release workflow. It first executes
+the full production smoke/recovery gate through an isolated Docker daemon, then builds the canonical
+Rust image, exports it with `docker save`, generates a SHA-256 checksum, and publishes the retained
+payload to the matching GitHub Release.

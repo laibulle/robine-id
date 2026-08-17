@@ -77,6 +77,7 @@ GET  /{{ issuer_id }}/logout</code></pre></div>
               <div class="endpoint-row endpoint-header" role="row"><span>Endpoint</span><span>Purpose</span></div>
               <div class="endpoint-row" role="row"><code>/health/live</code><span>Process liveness</span></div>
               <div class="endpoint-row" role="row"><code>/health/ready</code><span>Configuration and PostgreSQL readiness</span></div>
+              <div class="endpoint-row" role="row"><code>/metrics</code><span>Bounded Prometheus operational metrics</span></div>
               <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/jwks.json</code><span>Current and retained public verification keys</span></div>
             </div>
             <div class="docs-callout docs-callout-warning"><strong>Back up PostgreSQL and encryption material together.</strong><span>Encrypted signing keys cannot be recovered without their matching encryption secret.</span></div>

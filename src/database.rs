@@ -631,8 +631,7 @@ mod tests {
     #[test]
     fn rejects_an_invalid_postgres_port() {
         assert!(
-            database_url_from_components("postgres", "invalid", "db", "user", "password")
-                .is_none()
+            database_url_from_components("postgres", "invalid", "db", "user", "password").is_none()
         );
     }
 }

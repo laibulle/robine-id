@@ -2,59 +2,65 @@
 
 ## Status
 
-MVP target
+Rust production target
 
 ## Summary
 
-Robine ID runs as one Phoenix release behind a trusted HTTPS reverse proxy with explicit secrets, configuration, and persistent signing-key storage.
+Robine ID runs as an unprivileged Actix service behind a trusted HTTPS reverse proxy. PostgreSQL is
+the shared durable store for protocol state and encrypted signing keys.
 
 ## Requirements
 
-- Production MUST provide `SECRET_KEY_BASE` with deployment-specific high-entropy material.
-- `PHX_HOST` MUST match the public host used by configured issuer URLs.
-- `PHX_SERVER=true` MUST enable the HTTP server in a release; `PORT` and `POOL_SIZE` MAY tune runtime defaults.
-- `ROBINE_ID_CONFIG` SHOULD point to an operator-managed immutable configuration document.
-- `DATABASE_PATH` or the storage configuration MUST resolve to a writable SQLite path for readiness and future persistent adapters.
-- The signing-key path MUST be on a persistent, backed-up filesystem and writable only by the service account.
-- The deployment MUST preserve `SECRET_KEY_BASE` together with the encrypted signing-key file across restart and rollback.
-- TLS MUST terminate either in the endpoint or a trusted proxy. Forwarded HTTPS information MUST be accepted only from trusted infrastructure.
-- Production MUST force HTTPS and HSTS. Health-check routing MAY be exempted only when required inside a protected network.
-- Database migrations MUST complete before the release accepts production traffic.
-- Static assets MUST be built and digested with `mix assets.deploy` before assembling the release.
-- Startup MUST fail on missing required secrets, invalid configuration, unavailable key material, or unrecoverable migration failure.
-- The service MUST run as a non-root OS user with least filesystem privilege.
+- Production MUST provide PostgreSQL through `DATABASE_URL` or the documented `PG*` variables.
+- Production MUST provide `KEY_ENCRYPTION_SECRET` with at least 32 bytes of deployment-specific entropy.
+- `ROBINE_ID_CONFIG` and `ROBINE_ID_APPLICATIONS_DIR` MUST identify readable operator-managed configuration.
+- TLS MUST terminate at the service or a trusted proxy. Forwarded headers MUST be honored only when `TRUST_PROXY_HEADERS=true`.
+- HSTS, CSP, no-sniff, frame denial, referrer policy, and a correlation identifier MUST be returned.
+- Embedded SQL migrations MUST complete before readiness becomes true.
+- Startup MUST fail or readiness MUST remain false for missing database/secret inputs, invalid configuration, or migration failure.
+- The service MUST run as a non-root OS user.
+- PostgreSQL and `KEY_ENCRYPTION_SECRET` MUST be backed up through independent operator-controlled systems.
+- The canonical container image MUST contain the Rust runtime and MUST NOT require BEAM, Erlang, Elixir, Node.js, or Phoenix.
+- The same route implementation MUST compile for the conventional Actix server and Vercel Function entrypoint.
 
-## Release Procedure
+## Release procedure
 
-1. Validate the candidate configuration with `mix robine_id.config.validate`.
-2. Run `mix precommit` and `mix assets.deploy` from a clean checkout.
-3. Build the production release with the target runtime versions.
-4. Provision the configuration, database location, signing-key volume, and secrets.
-5. Start one instance and wait for `/health/ready` to report the intended revision.
-6. Complete the real relying-party smoke flow: discovery, login, consent, callback, code exchange, UserInfo, and logout.
-7. Record the accessibility and interoperability checks from the specification index.
-8. Back up newly initialized signing-key material before considering the deployment recoverable.
+1. Validate Rust and legacy parity gates with `make preflight`.
+2. Run the isolated canonical stack, two-instance OIDC journey, and recovery test with `make release-smoke`.
+3. Provision configuration, PostgreSQL, key-encryption secret, and client secrets.
+4. Start the stack and wait for `/health/ready` to report the intended semantic revision.
+5. Complete discovery, login, consent, callback, code exchange, UserInfo, and logout through a real relying party.
+6. Take and restore-test a logical PostgreSQL backup with the matching encryption secret.
 
-## Rollback and Recovery
+## Rollback and recovery
 
-- A rollback MUST preserve the same public issuer URL and compatible configuration schema.
-- Restoring signing keys requires both the encrypted file and the matching `SECRET_KEY_BASE`.
-- Losing access-token or session memory after restart is expected; clients and users reauthenticate.
-- A corrupt signing-key file MUST be restored from backup rather than silently replaced, because replacement breaks verification of outstanding ID tokens.
-- Configuration rollback SHOULD reapply a previously validated complete document, not edit active state manually.
+- A rollback MUST preserve the public issuer URL and compatible configuration/database schemas.
+- Restoring encrypted signing keys requires the matching `KEY_ENCRYPTION_SECRET`.
+- Configuration rollback SHOULD restore a previously validated complete document.
+- Application rollback MUST NOT automatically restore an older database backup.
+- A recovery drill MUST prove that the restored current and retained keys publish the same `kid` values.
 
-## Scaling Constraint
+## Scaling
 
-The MVP is single-instance. Codes, access tokens, sessions, rate-limit counters, configuration history, and audit history are not coordinated between nodes. DNS clustering does not make these stores distributed. Horizontal scaling requires shared adapters, cross-node atomic code consumption, shared session/rate-limit state, and a coordinated signing-key strategy before it is supported.
+Authorization codes, access tokens, sessions, rate limits, and signing keys use PostgreSQL with atomic
+consumption/update operations. Multiple Actix or Vercel instances MAY share one database and immutable
+configuration. Operators MUST size the connection pool per instance and coordinate migrations and key
+rotation. File-backed hot reload is a conventional-server feature; Vercel configuration is immutable per deployment.
 
-## Acceptance Criteria
+## Acceptance criteria
 
-- A production release starts from documented environment and filesystem inputs without source-tree mutation.
-- Restart preserves issuer signing identity but invalidates only documented node-local state.
-- Readiness remains false until configuration and database checks succeed.
-- A restore drill proves that backed-up signing keys remain decryptable and published with the same `kid` values.
-- A real client completes the full MVP journey through the production proxy.
+- The canonical Docker/Compose stack starts without source-tree mutation.
+- Restart preserves signing identity, sessions, access grants, and unexpired authorization state.
+- Readiness remains false until configuration, migrations, and database connectivity succeed.
+- The canonical image runs as `robine-id` and contains no Phoenix runtime.
+- The Vercel release binary compiles from the same Actix routes.
+- The automated release gate passes a pending authorization, session, authorization code, access
+  grant, and logout transaction between two instances sharing PostgreSQL.
+- The automated recovery gate restores the current signing key and a live access grant from a
+  logical PostgreSQL dump using the matching key-encryption secret.
+- A real client completes the full OIDC journey through the production proxy.
 
-## Non-Goals
+## Non-goals
 
-Kubernetes manifests, container images, zero-downtime multi-node upgrades, automated certificate issuance, secret-manager integrations, and disaster-recovery automation are platform-specific and outside the MVP specification.
+Kubernetes manifests, automated certificate issuance, provider-specific secret managers, and managed
+PostgreSQL provisioning are platform-specific and outside this specification.

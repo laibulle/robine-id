@@ -1,6 +1,6 @@
 # Robine ID Specifications
 
-Robine ID is a configurable, idempotent OpenID Connect provider built with Elixir and Phoenix. These specifications define externally observable behavior and product requirements independently of implementation details.
+Robine ID is a configurable, idempotent OpenID Connect provider whose production runtime is built with Rust, Actix Web, Askama, and PostgreSQL. The retained Elixir/Phoenix implementation is a compatibility oracle and regression suite. These specifications define externally observable behavior and product requirements independently of implementation details.
 
 ## Conventions
 
@@ -28,13 +28,13 @@ Robine ID is a configurable, idempotent OpenID Connect provider built with Elixi
 - [OPS-002 — Production Deployment](operations/OPS-002-production-deployment.md)
 - [OPS-003 — Embedded Provider](operations/OPS-003-embedded-provider.md)
 
-## MVP Scope
+## Production scope
 
-The MVP is a single-instance, file-configured OpenID Provider for trusted operators. It supports local password identities, Authorization Code Flow with mandatory PKCE S256, public and `client_secret_basic` confidential clients, signed ID tokens, opaque bearer access tokens, UserInfo, consent, and RP-initiated logout.
+The production runtime is a file-configured Rust OpenID Provider for trusted operators. It supports local password identities, Authorization Code Flow with mandatory PKCE S256 for public clients, public and `client_secret_basic`/`client_secret_post` confidential clients, signed ID tokens, opaque bearer access tokens, UserInfo, consent, and RP-initiated logout.
 
-The following are explicitly outside the MVP: dynamic client registration, refresh tokens, implicit and hybrid flows, device authorization, resource-owner password grants, federation, social login, MFA, account recovery, self-service enrollment, an administration UI, token introspection, token revocation, distributed runtime stores, and high availability.
+The following are explicitly outside the current scope: dynamic client registration, refresh tokens, implicit and hybrid flows, device authorization, resource-owner password grants, federation, social login, MFA, account recovery, self-service enrollment, an administration UI, token introspection, and token revocation.
 
-Authorization codes, access-token grants, rate-limit counters, and authenticated-session registrations are node-local and held in memory. Restarting the node invalidates those values. Signing keys are persisted when `storage.signing_key_path` is configured. This limitation MUST be understood before operating the MVP.
+Authorization codes, access-token grants, rate-limit counters, authenticated sessions, consent/logout transactions, and encrypted signing keys are persisted in PostgreSQL. Atomic consumption and shared storage allow conventional Actix and Vercel instances to coordinate through the same database.
 
 ## Domains
 
@@ -56,11 +56,11 @@ Authorization codes, access-token grants, rate-limit counters, and authenticated
 
 ## Acceptance Verification
 
-| Specification | Automated evidence |
+| Specification | Evidence |
 | --- | --- |
-| OIDC-001 | `discover_provider_test.exs`, `discovery_controller_test.exs` |
+| OIDC-001 | Rust web/protocol tests plus `discover_provider_test.exs`, `discovery_controller_test.exs` |
 | OIDC-002 | `validate_authorization_request_test.exs`, `authorization_code_flow_test.exs`, `authorization_controller_test.exs` |
-| OIDC-003 | `token_and_key_management_test.exs`, `jwks_controller_test.exs` |
+| OIDC-003 | Rust token/PostgreSQL integration tests plus `token_and_key_management_test.exs`, `jwks_controller_test.exs` |
 | OIDC-004 | `user_info_controller_test.exs`, `authorization_code_flow_test.exs` |
 | OIDC-005 | `logout_controller_test.exs`, `security_test.exs` |
 | APPL-001 | `clients_test.exs`, `configuration_test.exs` |
@@ -71,8 +71,8 @@ Authorization codes, access-token grants, rate-limit counters, and authenticated
 | IDEN-001 | `identity_test.exs`, authorization controller tests |
 | SECU-001 | `security_test.exs`, authorization and logout controller tests |
 | OPS-001 | `health_controller_test.exs` plus the real-server smoke gate |
-| OPS-002 | release build, readiness, restore drill, and real-client manual gates |
-| OPS-003 | `runtime_test.exs` plus the embedded-host controller integration tests |
+| OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), release build, readiness, and real-client manual gates |
+| OPS-003 | retained Phoenix compatibility only: `runtime_test.exs` and embedded-host tests |
 
 Before a release, perform these documented manual checks against the built production assets:
 
@@ -84,4 +84,8 @@ Before a release, perform these documented manual checks against the built produ
 
 ## Release Gate
 
-A release candidate is acceptable only when `mix precommit` and `mix assets.deploy` succeed, all automated acceptance evidence passes, the manual checks above are recorded, a real relying party completes the end-to-end flow, production secrets differ from development values, and the signing-key file is stored on a backed-up persistent volume.
+A release candidate is acceptable only when `make preflight`, `make rust-integration`, and
+`make release-smoke` succeed; the optimized Vercel binary compiles; the manual checks above are
+recorded; a real relying party completes the end-to-end flow; production secrets differ from
+development values; and the deployment's own PostgreSQL backup policy is restore-tested with the
+matching key-encryption secret.

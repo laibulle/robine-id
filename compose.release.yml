@@ -19,8 +19,8 @@ services:
     ports:
       - "127.0.0.1:${ROBINE_ID_BIND_PORT:-4001}:4001"
     volumes:
-      - ./deploy/config/robine_id.json:/config/robine_id.json:ro
-      - ./deploy/config/applications:/config/applications:ro
+      - ${ROBINE_ID_CONFIG_PATH:-./deploy/config/robine_id.json}:/config/robine_id.json:ro
+      - ${ROBINE_ID_APPLICATIONS_PATH:-./deploy/config/applications}:/config/applications:ro
     depends_on:
       postgres:
         condition: service_healthy

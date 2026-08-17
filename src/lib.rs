@@ -2,6 +2,7 @@
 
 pub mod configuration;
 pub mod database;
+pub mod metrics;
 pub mod protocol;
 pub mod tokens;
 pub mod web;
@@ -14,6 +15,7 @@ pub use configuration::{ConfigurationError, Snapshot};
 pub struct Application {
     snapshot: Arc<RwLock<Arc<Snapshot>>>,
     database: Option<database::Database>,
+    metrics: Arc<metrics::Metrics>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +33,7 @@ impl Application {
         Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             database: database::Database::from_env(),
+            metrics: Arc::new(metrics::Metrics::default()),
         }
     }
 
@@ -38,6 +41,7 @@ impl Application {
         Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             database: None,
+            metrics: Arc::new(metrics::Metrics::default()),
         }
     }
 
@@ -88,18 +92,22 @@ impl Application {
                         let revision = snapshot.revision.clone();
                         let outcome = application.activate_snapshot(snapshot);
                         if outcome == ReconciliationOutcome::Activated {
+                            application.metrics.configuration_activated();
                             tracing::info!(
                                 event = "configuration_reconciliation",
                                 outcome = "activated",
                                 %revision,
                                 "configuration activated"
                             );
+                        } else {
+                            application.metrics.configuration_unchanged();
                         }
                         last_error = None;
                     }
                     Ok(Err(error)) => {
                         let diagnostic = error.to_string();
                         if last_error.as_deref() != Some(diagnostic.as_str()) {
+                            application.metrics.configuration_failed();
                             tracing::error!(
                                 event = "configuration_reconciliation",
                                 outcome = "failed",
@@ -112,6 +120,7 @@ impl Application {
                     Err(error) => {
                         let diagnostic = error.to_string();
                         if last_error.as_deref() != Some(diagnostic.as_str()) {
+                            application.metrics.configuration_failed();
                             tracing::error!(
                                 event = "configuration_reconciliation",
                                 outcome = "failed",
@@ -128,6 +137,10 @@ impl Application {
 
     pub fn database(&self) -> Option<&database::Database> {
         self.database.as_ref()
+    }
+
+    pub fn metrics(&self) -> &metrics::Metrics {
+        &self.metrics
     }
 
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {

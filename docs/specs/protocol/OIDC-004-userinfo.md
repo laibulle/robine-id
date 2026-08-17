@@ -12,7 +12,7 @@ Robine ID exposes subject claims authorized by an opaque bearer access token.
 
 - UserInfo MUST be available at `GET /:issuer_id/userinfo`.
 - The request MUST carry exactly one bearer credential in the `Authorization` header.
-- The token MUST exist in the node-local access-token store and MUST not be expired.
+- The token digest MUST exist in PostgreSQL and MUST not be expired.
 - The token's issuer MUST match the requested issuer endpoint.
 - The subject MUST still resolve to a configured identity.
 - A successful response MUST contain `sub` and MAY contain only non-nil claims captured for scopes granted during authorization.
@@ -28,6 +28,7 @@ Robine ID exposes subject claims authorized by an opaque bearer access token.
 - Changing or expiring a token returns the same public `invalid_token` failure.
 - A token issued for one issuer cannot be used at another issuer's UserInfo endpoint.
 
-## Runtime Limitation
+## Runtime behavior
 
-Access-token grants are stored in memory. A node restart or request routed to another independent node invalidates the token. The MVP is therefore operated as a single instance unless a compatible shared adapter is introduced.
+Access-token grants are stored by digest in PostgreSQL. Process restart and routing between instances
+sharing the same database preserve an unexpired token; the bearer value itself is never stored.

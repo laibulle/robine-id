@@ -38,6 +38,34 @@ jobs:
           cargo test --test postgres -- --ignored --test-threads=1
           cargo build --locked --release --bin vercel
 
+  release-smoke:
+    image: docker:28-cli
+    shell: /bin/sh
+    timeout: 30m
+    env:
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
+    services:
+      docker:
+        image: docker:28-dind
+        privileged: true
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        command: ["--tls=false"]
+        readiness:
+          tcp: 2375
+          timeout: 60s
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: Install smoke-test dependencies
+        run: apk add --no-cache curl make openssl
+      - name: Verify production topology and OIDC flow
+        run: |
+          docker version
+          docker compose version
+          make release-smoke
+
   verify:
     image: hexpm/elixir@sha256:ae38be7cb19bffa78adedb04732d9e6ba83a507b4cfb06983cbe711edb49da54
     shell: /bin/bash

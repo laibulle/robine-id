@@ -28,7 +28,7 @@ help:
 	@echo "  make config-effective Print the redacted effective Rust configuration"
 	@echo "  make rust-preflight   Run Rust formatting, lint, tests, and configuration validation"
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
-	@echo "  make release-smoke    Build and smoke-test the production Rust Compose stack"
+	@echo "  make release-smoke    Test production OIDC, multi-instance state, and PostgreSQL restore"
 	@echo "  make keys-rotate ROTATION_ID=<id> [ISSUER=default]"
 	@echo "  make build      Build $(VERSION_TAG) and $(LATEST_TAG)"
 	@echo "  make login      Authenticate with Docker Hub"
@@ -103,11 +103,11 @@ preflight: check-variables rust-preflight
 		cargo run --bin validate_config
 
 build: check-variables
-	docker build \
-		--platform "$(PLATFORM)" \
-		--tag "$(VERSION_TAG)" \
-		--tag "$(LATEST_TAG)" \
-		.
+	@if docker info >/dev/null 2>&1; then \
+		docker build --platform "$(PLATFORM)" --tag "$(VERSION_TAG)" --tag "$(LATEST_TAG)" .; \
+	else \
+		sg docker -c 'docker build --platform "$(PLATFORM)" --tag "$(VERSION_TAG)" --tag "$(LATEST_TAG)" .'; \
+	fi
 
 login:
 	docker login --username "$(DOCKERHUB_USER)"
@@ -116,4 +116,4 @@ push: check-variables
 	docker push "$(VERSION_TAG)"
 	docker push "$(LATEST_TAG)"
 
-publish: preflight build push
+publish: preflight release-smoke build push

@@ -2,7 +2,7 @@
 
 ## Status
 
-MVP target
+Legacy Phoenix compatibility; not part of the Rust production image
 
 ## Summary
 

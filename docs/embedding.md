@@ -1,4 +1,7 @@
-# Embedding Robine ID
+# Legacy Phoenix embedding
+
+This document describes the retained Phoenix compatibility implementation. The production Rust
+runtime is a standalone Actix/Vercel service and does not expose OTP adapters.
 
 Robine ID supports two deployment modes from the same source tree:
 

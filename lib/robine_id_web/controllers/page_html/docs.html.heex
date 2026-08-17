@@ -167,7 +167,7 @@
           <article>
             <h3>Secret handling</h3><p>
               Literal strings work directly. Environment references keep deployment secrets outside Git.
-            </p><code>SECRET_KEY_BASE</code>
+            </p><code>KEY_ENCRYPTION_SECRET</code>
           </article>
           <article>
             <h3>Safe activation</h3><p>
@@ -202,7 +202,7 @@
         </div>
         <div class="docs-callout docs-callout-warning">
           <strong>Back up keys and encryption material together.</strong>
-          <span>The signing-key file cannot be recovered without its matching <code>SECRET_KEY_BASE</code>.</span>
+          <span>Encrypted signing keys cannot be recovered without the matching <code>KEY_ENCRYPTION_SECRET</code>.</span>
         </div>
       </section>
 
@@ -213,8 +213,8 @@
           </div>
         </div>
         <p>
-          The MVP is single-instance. Authorization codes, access-token grants, rate-limit counters,
-          and authenticated-session registrations are held in memory and are invalidated by a restart.
+          The Rust production runtime stores authorization codes, access grants, rate limits,
+          sessions, and encrypted signing keys in PostgreSQL so they survive process restart.
         </p>
         <p>
           Dynamic client registration, refresh tokens, MFA, federation, account recovery, token

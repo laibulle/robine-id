@@ -27,7 +27,9 @@ const APP_JS: &str = r#"document.addEventListener("click", event => {
   input.type = revealing ? "text" : "password";
   toggle.textContent = revealing ? "Hide" : "Show";
   toggle.setAttribute("aria-label", revealing ? "Hide password" : "Show password");
-});"#;
+});
+const errorSummary = document.querySelector("[data-error-summary]");
+if (errorSummary) errorSummary.focus();"#;
 
 #[derive(Template)]
 #[template(path = "home.html")]
@@ -61,6 +63,8 @@ struct LoginTemplate<'a> {
     client_name: &'a str,
     request: &'a AuthorizationRequest,
     csrf_token: &'a str,
+    identifier: &'a str,
+    has_error: bool,
     error: Option<&'a str>,
     messages: &'a crate::configuration::UiMessages,
     logo: Option<&'a str>,
@@ -77,6 +81,7 @@ struct ProtocolErrorTemplate<'a> {
     product_name: &'a str,
     primary_color: &'a str,
     message: &'a str,
+    request_id: &'a str,
     logo: Option<&'a str>,
     favicon: Option<&'a str>,
     font_family: Option<&'a str>,
@@ -130,6 +135,7 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
         .route("/docs", web::get().to(docs))
         .route("/health/live", web::get().to(live))
         .route("/health/ready", web::get().to(ready))
+        .route("/metrics", web::get().to(metrics))
         .route("/assets/app.css", web::get().to(css))
         .route("/assets/app.js", web::get().to(js))
         .route("/images/brand/robine-mark.png", web::get().to(brand_mark))
@@ -234,6 +240,37 @@ pub fn secure<B>(response: &mut HttpResponse<B>) {
     );
 }
 
+pub fn correlation_id(request: &HttpRequest) -> String {
+    correlation_id_value(
+        request
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+pub fn correlation_id_value(value: Option<&str>) -> String {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(random_token)
+}
+
+pub fn set_correlation_id<B>(response: &mut HttpResponse<B>, request_id: &str) {
+    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(request_id) {
+        response.headers_mut().insert(
+            actix_web::http::header::HeaderName::from_static("x-request-id"),
+            value,
+        );
+    }
+}
+
 async fn home(application: web::Data<Application>) -> impl Responder {
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.default_issuer() else {
@@ -298,6 +335,24 @@ async fn ready(application: web::Data<Application>) -> impl Responder {
     }
 }
 
+async fn metrics(application: web::Data<Application>) -> impl Responder {
+    let ready = match application.database() {
+        Some(database) => database.healthy().await,
+        None => false,
+    };
+    HttpResponse::Ok()
+        .insert_header((
+            actix_web::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        ))
+        .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .body(
+            application
+                .metrics()
+                .render(&application.snapshot().revision, ready),
+        )
+}
+
 async fn discovery(path: web::Path<String>, application: web::Data<Application>) -> impl Responder {
     let snapshot = application.snapshot();
     match DiscoveryDocument::build(&snapshot, &path.into_inner()) {
@@ -342,6 +397,8 @@ async fn authorize(
                         },
                         request: &authorization,
                         csrf_token: &csrf_token,
+                        identifier: "",
+                        has_error: false,
                         error: None,
                         messages: &messages,
                         logo: branding.logo.as_deref(),
@@ -412,6 +469,7 @@ async fn authenticate(
             json!({"error": "database_unavailable"}),
         );
     };
+    let identifier = form.identifier.trim().to_owned();
     let remote_address = forwarded_headers_trusted()
         .then(|| {
             request
@@ -429,7 +487,7 @@ async fn authenticate(
     let rate_limit_key = format!(
         "{}:{}",
         remote_address,
-        form.identifier.trim().to_lowercase()
+        identifier.to_lowercase()
     );
     let rate_limit = &snapshot.configuration.authentication.rate_limit;
     match database
@@ -442,6 +500,7 @@ async fn authenticate(
     {
         Ok(true) => {}
         Ok(false) => {
+            application.metrics().rate_limit_rejection();
             tracing::warn!(
                 event = "authentication_rate_limit",
                 outcome = "rejected",
@@ -461,6 +520,8 @@ async fn authenticate(
                     },
                     request: &authorization,
                     csrf_token: &form.csrf_token,
+                    identifier: &identifier,
+                    has_error: true,
                     error: Some("Too many attempts. Please wait before trying again."),
                     messages: &messages,
                     logo: branding.logo.as_deref(),
@@ -489,7 +550,7 @@ async fn authenticate(
             );
         }
     }
-    let user = snapshot.user_by_identifier(&form.identifier).cloned();
+    let user = snapshot.user_by_identifier(&identifier).cloned();
     let password = form.password;
     let hash = user
         .as_ref()
@@ -502,6 +563,7 @@ async fn authenticate(
         .unwrap_or(false);
 
     let Some(user) = user.filter(|_| valid_password) else {
+        application.metrics().authentication(false);
         tracing::warn!(
             event = "authentication",
             outcome = "failure",
@@ -522,6 +584,8 @@ async fn authenticate(
                 },
                 request: &authorization,
                 csrf_token: &form.csrf_token,
+                identifier: &identifier,
+                has_error: true,
                 error: Some("The email or password is incorrect."),
                 messages: &messages,
                 logo: branding.logo.as_deref(),
@@ -579,6 +643,7 @@ async fn authenticate(
         client_id = %grant.client_id,
         subject_id = %grant.subject
     );
+    application.metrics().authentication(true);
 
     if client.consent_required.unwrap_or(true) {
         let transaction = match database
@@ -1170,6 +1235,7 @@ async fn exchange_token(
         client_id,
         subject_id = %access_grant.subject
     );
+    application.metrics().token_exchange_success();
     response
 }
 
@@ -1213,7 +1279,12 @@ async fn jwks(path: web::Path<String>, application: web::Data<Application>) -> i
     }
 }
 
-async fn user_info(request: HttpRequest, application: web::Data<Application>) -> impl Responder {
+async fn user_info(
+    path: web::Path<String>,
+    request: HttpRequest,
+    application: web::Data<Application>,
+) -> impl Responder {
+    let issuer_id = path.into_inner();
     let snapshot = application.snapshot();
     let token = request
         .headers()
@@ -1224,7 +1295,7 @@ async fn user_info(request: HttpRequest, application: web::Data<Application>) ->
         return invalid_bearer_response();
     };
     match database.access_grant(token).await {
-        Ok(Some(grant)) if snapshot.user(&grant.subject).is_some() => {
+        Ok(Some(grant)) if valid_user_info_grant(&snapshot, &issuer_id, &grant) => {
             let mut claims = grant.claims.as_object().cloned().unwrap_or_default();
             claims.insert("sub".to_owned(), json!(grant.subject));
             let mut response = json_response(StatusCode::OK, Value::Object(claims));
@@ -1236,6 +1307,17 @@ async fn user_info(request: HttpRequest, application: web::Data<Application>) ->
         }
         _ => invalid_bearer_response(),
     }
+}
+
+fn valid_user_info_grant(
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    grant: &AccessGrant,
+) -> bool {
+    snapshot
+        .issuer(issuer_id)
+        .is_some_and(|issuer| grant.issuer == issuer.url.trim_end_matches('/'))
+        && snapshot.user(&grant.subject).is_some()
 }
 
 fn basic_credentials(request: &HttpRequest) -> (Option<String>, Option<String>) {
@@ -1640,6 +1722,50 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn exports_bounded_prometheus_metrics() {
+        let application = application();
+        application
+            .metrics()
+            .record_http_response(200, std::time::Duration::from_millis(10));
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application))
+                .configure(configure),
+        )
+        .await;
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let body = test::read_body(response).await;
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 metrics");
+        assert!(body.contains("robine_id_http_requests_total 1"));
+        assert!(body.contains("revision=\"abc123\""));
+        assert!(body.contains("robine_id_ready 0"));
+    }
+
+    #[actix_web::test]
+    async fn preserves_only_safe_bounded_incoming_correlation_ids() {
+        let safe = test::TestRequest::get()
+            .insert_header(("x-request-id", "request_123.safe"))
+            .to_http_request();
+        assert_eq!(correlation_id(&safe), "request_123.safe");
+
+        let unsafe_value = test::TestRequest::get()
+            .insert_header(("x-request-id", "contains spaces and user data"))
+            .to_http_request();
+        let generated = correlation_id(&unsafe_value);
+        assert_ne!(generated, "contains spaces and user data");
+        assert!(!generated.is_empty());
+    }
+
+    #[actix_web::test]
     async fn security_headers_include_a_correlation_identifier() {
         let mut response = HttpResponse::Ok().finish();
         secure(&mut response);
@@ -1686,5 +1812,35 @@ mod tests {
             None,
             None
         ));
+    }
+
+    #[actix_web::test]
+    async fn rejects_user_info_grants_issued_by_another_issuer() {
+        let base = application();
+        let mut snapshot = (*base.snapshot()).clone();
+        snapshot
+            .configuration
+            .users
+            .push(crate::configuration::User {
+                id: "subject".to_owned(),
+                identifier: "subject@example.test".to_owned(),
+                password_hash: "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa"
+                    .to_owned(),
+                name: None,
+                email: None,
+                claims: Default::default(),
+            });
+        let mut grant = AccessGrant {
+            issuer: "https://other.example/default".to_owned(),
+            subject: "subject".to_owned(),
+            client_id: "client".to_owned(),
+            scopes: vec!["openid".to_owned()],
+            claims: json!({}),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+
+        assert!(!valid_user_info_grant(&snapshot, "default", &grant));
+        grant.issuer = "https://id.example/default".to_owned();
+        assert!(valid_user_info_grant(&snapshot, "default", &grant));
     }
 }
