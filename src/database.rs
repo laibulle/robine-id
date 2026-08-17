@@ -447,10 +447,10 @@ pub struct TotpChallenge {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone)]
 pub struct SigningKey {
     pub kid: String,
-    pub private_key_pem: String,
+    pub private_key_pem: Zeroizing<String>,
     pub modulus: String,
     pub exponent: String,
 }
@@ -2106,12 +2106,19 @@ impl Database {
     }
 
     fn encrypt_private_key(&self, private_key: &str) -> Result<(Vec<u8>, Vec<u8>), sqlx::Error> {
+        self.encrypt_private_key_bytes(private_key.as_bytes())
+    }
+
+    fn encrypt_private_key_bytes(
+        &self,
+        private_key: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), sqlx::Error> {
         let cipher = Aes256Gcm::new_from_slice(&self.key_encryption_key)
             .map_err(|_| cryptographic_failure("invalid signing key encryption key"))?;
         let mut nonce = [0_u8; 12];
         fill_random(&mut nonce)?;
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), private_key.as_bytes())
+            .encrypt(Nonce::from_slice(&nonce), private_key)
             .map_err(|_| cryptographic_failure("signing key encryption failed"))?;
         Ok((ciphertext, nonce.to_vec()))
     }
@@ -2138,7 +2145,7 @@ impl Database {
         &self,
         ciphertext: &[u8],
         nonce: &[u8],
-    ) -> Result<String, sqlx::Error> {
+    ) -> Result<Zeroizing<String>, sqlx::Error> {
         if nonce.len() != 12 {
             return Err(sqlx::Error::Decode("invalid signing key nonce".into()));
         }
@@ -2155,8 +2162,14 @@ impl Database {
                     .and_then(decrypt)
             })
             .map_err(|_| sqlx::Error::Decode("signing key decryption failed".into()))?;
-        String::from_utf8(plaintext)
-            .map_err(|_| sqlx::Error::Decode("signing key is not UTF-8".into()))
+        match String::from_utf8(plaintext) {
+            Ok(private_key) => Ok(Zeroizing::new(private_key)),
+            Err(error) => {
+                let mut plaintext = error.into_bytes();
+                plaintext.zeroize();
+                Err(sqlx::Error::Decode("signing key is not UTF-8".into()))
+            }
+        }
     }
 }
 
@@ -2221,7 +2234,9 @@ fn fill_random(destination: &mut [u8]) -> Result<(), sqlx::Error> {
 fn random_token() -> Result<String, sqlx::Error> {
     let mut bytes = [0_u8; 32];
     fill_random(&mut bytes)?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+    bytes.zeroize();
+    Ok(token)
 }
 
 fn random_user_code() -> Result<String, sqlx::Error> {
@@ -2230,12 +2245,13 @@ fn random_user_code() -> Result<String, sqlx::Error> {
     while code.len() < 8 {
         let mut bytes = [0_u8; 16];
         fill_random(&mut bytes)?;
-        for byte in bytes.into_iter().filter(|byte| *byte < 240) {
+        for byte in bytes.iter().copied().filter(|byte| *byte < 240) {
             code.push(char::from(ALPHABET[usize::from(byte) % ALPHABET.len()]));
             if code.len() == 8 {
                 break;
             }
         }
+        bytes.zeroize();
     }
     Ok(code)
 }
@@ -2265,10 +2281,12 @@ fn generate_signing_key() -> Result<SigningKey, sqlx::Error> {
 
     Ok(SigningKey {
         kid: URL_SAFE_NO_PAD.encode(kid_bytes),
-        private_key_pem: private
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|_| cryptographic_failure("RSA signing key encoding failed"))?
-            .to_string(),
+        private_key_pem: Zeroizing::new(
+            private
+                .to_pkcs8_pem(LineEnding::LF)
+                .map_err(|_| cryptographic_failure("RSA signing key encoding failed"))?
+                .to_string(),
+        ),
         modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
         exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
     })
@@ -2488,12 +2506,10 @@ mod tests {
         let (old_ciphertext, old_nonce) = old
             .encrypt_private_key("old private key")
             .expect("old private key encryption");
-        assert_eq!(
-            staged
-                .decrypt_private_key_material(&old_ciphertext, &old_nonce)
-                .unwrap(),
-            "old private key"
-        );
+        let decrypted = staged
+            .decrypt_private_key_material(&old_ciphertext, &old_nonce)
+            .unwrap();
+        assert_eq!(decrypted.as_str(), "old private key");
         assert!(
             current_only
                 .decrypt_private_key_material(&old_ciphertext, &old_nonce)
@@ -2503,11 +2519,17 @@ mod tests {
         let (new_ciphertext, new_nonce) = staged
             .encrypt_private_key("new private key")
             .expect("new private key encryption");
-        assert_eq!(
-            current_only
-                .decrypt_private_key_material(&new_ciphertext, &new_nonce)
-                .unwrap(),
-            "new private key"
+        let decrypted = current_only
+            .decrypt_private_key_material(&new_ciphertext, &new_nonce)
+            .unwrap();
+        assert_eq!(decrypted.as_str(), "new private key");
+
+        let (invalid_ciphertext, invalid_nonce) = old
+            .encrypt_private_key_bytes(&[0xff, 0xfe, 0xfd])
+            .expect("invalid UTF-8 private material encryption");
+        assert!(
+            old.decrypt_private_key_material(&invalid_ciphertext, &invalid_nonce)
+                .is_err()
         );
     }
 }

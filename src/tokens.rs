@@ -981,7 +981,8 @@ mod tests {
             private_key_pem: private
                 .to_pkcs8_pem(LineEnding::LF)
                 .expect("PEM")
-                .to_string(),
+                .to_string()
+                .into(),
             modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
             exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
         };
@@ -1168,7 +1169,8 @@ mod tests {
             private_key_pem: private
                 .to_pkcs8_pem(LineEnding::LF)
                 .expect("PEM")
-                .to_string(),
+                .to_string()
+                .into(),
             modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
             exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
         };
@@ -1271,7 +1273,8 @@ mod tests {
             private_key_pem: private
                 .to_pkcs8_pem(LineEnding::LF)
                 .expect("PEM")
-                .to_string(),
+                .to_string()
+                .into(),
             modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
             exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
         };
@@ -1321,7 +1324,8 @@ mod tests {
             private_key_pem: private
                 .to_pkcs8_pem(LineEnding::LF)
                 .expect("PEM")
-                .to_string(),
+                .to_string()
+                .into(),
             modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
             exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
         };
@@ -1374,7 +1378,8 @@ mod tests {
             private_key_pem: private
                 .to_pkcs8_pem(LineEnding::LF)
                 .expect("PEM")
-                .to_string(),
+                .to_string()
+                .into(),
             modulus: URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
             exponent: URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
         };

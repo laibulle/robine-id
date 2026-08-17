@@ -104,7 +104,7 @@ the same database.
 | --- | --- |
 | OIDC-001 | Rust discovery/protocol, disabled-issuer routing/WebFinger tests, and `make release-smoke` |
 | OIDC-002 | Rust protocol/web tests, PostgreSQL atomic-consumption test, and the two-instance smoke journey |
-| OIDC-003 | Rust token/PostgreSQL tests plus rotation and restore checks in `make release-smoke` |
+| OIDC-003 | Rust token/PostgreSQL tests, zeroizing PEM lifecycle, plus rotation and restore checks in `make release-smoke` |
 | OIDC-004 | Rust bearer/DPoP JSON and signed-JWT UserInfo tests plus cross-instance UserInfo in `make release-smoke` |
 | OIDC-005 | Rust hint/client validation, GET/POST and Vercel transport tests, plus cross-instance client-only and hinted logout in `make release-smoke` |
 | OIDC-006 | Rust protocol/PostgreSQL tests plus cross-instance rotation, restore, and replay detection in `make release-smoke` |

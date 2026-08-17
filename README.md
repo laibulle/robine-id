@@ -123,7 +123,8 @@ make dev
 It listens on `127.0.0.1:4001` by default. `HOST`, `PORT` (1 through 65535), `ROBINE_ID_CONFIG`, and
 `ROBINE_ID_APPLICATIONS_DIR` can override those defaults. `DATABASE_URL` selects a PostgreSQL
 database and `KEY_ENCRYPTION_SECRET` encrypts persisted RSA private keys with AES-256-GCM. The
-server applies embedded SQL migrations at startup. `make dev` starts the PostgreSQL 17 development
+runtime keeps generated and decrypted private-key PEM only in zeroizing memory through encryption,
+rotation, and JWT signing. The server applies embedded SQL migrations at startup. `make dev` starts the PostgreSQL 17 development
 container automatically and publishes it only on `127.0.0.1:54329`; `make dev-down` stops it
 without deleting its named data volume. `make dev-container` keeps PostgreSQL private to the
 project-scoped Compose network because only the containerized application needs to reach it. It

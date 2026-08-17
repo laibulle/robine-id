@@ -26,6 +26,9 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - Current and staged signing-key encryption secrets MUST use zeroizing wrappers while they are
   validated and derived. Every in-memory derived wrapping-key copy MUST be cleared when its
   database handle is dropped.
+- Generated or decrypted signing-key PEM and raw opaque-token entropy buffers MUST be zeroized on
+  every success and error path. Signing-key structures MUST NOT derive a plaintext-revealing debug
+  representation.
 - `DATABASE_URL`, `PGPASSWORD`, `POSTGRES_PASSWORD`, and any component-built connection URL MUST
   use zeroizing wrappers during configuration parsing. Percent-encoding a component password MUST
   NOT place it in an ordinary owned string or a general-purpose URL object.

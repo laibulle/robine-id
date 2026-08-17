@@ -67,6 +67,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
   an access-control grant. Any other unsupported method MUST return a non-cacheable HTTP 405 with
   `Allow: GET, HEAD, OPTIONS`.
 - Private signing state MUST be encrypted with AES-256-GCM using key material derived from `KEY_ENCRYPTION_SECRET` (or the compatibility fallback `SECRET_KEY_BASE`) before PostgreSQL persistence.
+- Generated and decrypted private-key PEM values MUST remain in zeroizing wrappers through
+  encryption, rotation, and JWT signing. A decrypted buffer that fails UTF-8 validation MUST be
+  explicitly cleared before the error is returned.
 - Plaintext current/previous wrapping secrets MUST be zeroized after derivation, and each database
   handle MUST zeroize its derived AES key copies on drop.
 - A temporary `KEY_ENCRYPTION_SECRET_PREVIOUS` MAY decrypt existing rows during a staged secret
