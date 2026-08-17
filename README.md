@@ -127,8 +127,11 @@ runtime keeps generated and decrypted private-key PEM only in zeroizing memory t
 rotation, and JWT signing. The server applies embedded SQL migrations at startup. `make dev` starts the PostgreSQL 17 development
 container automatically and publishes it only on `127.0.0.1:54329`; `make dev-down` stops it
 without deleting its named data volume. `make dev-container` keeps PostgreSQL private to the
-project-scoped Compose network because only the containerized application needs to reach it. It
-publishes only the application on `127.0.0.1:4001`.
+project-scoped internal database network because only the containerized application needs to reach
+it. Robine ID is dual-homed onto a separate application network so outbound protocol callbacks
+remain available, and only the application is published on `127.0.0.1:4001`. The `make dev-db`
+host overlay deliberately makes the database network non-internal before publishing PostgreSQL on
+loopback for local Rust tooling.
 Set `TRUST_PROXY_HEADERS=true` (or `1`) only behind a trusted reverse proxy; `false`/`0` disables it,
 and Vercel enables forwarded-header handling automatically.
 Operational events are emitted as JSON with bounded fields; `RUST_LOG` overrides the validated
@@ -155,6 +158,8 @@ the application root filesystem is read-only, all Linux capabilities are dropped
 escalation is disabled, and only a bounded in-memory `/tmp` remains writable. The known development
 database password and host-published `make dev` database are development conveniences, not a
 production security boundary.
+The two-network topology requires Docker Compose 2.33.1 or newer so the non-internal application
+network remains the explicit default gateway.
 
 The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
 discovery endpoints and `/docs`; strict declarative application loading; bcrypt authentication with database-backed
@@ -820,9 +825,11 @@ the former key separately and is removed after `reencrypt_keys` succeeds.
 
 The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. PostgreSQL data,
 including encrypted signing keys and short-lived protocol state, lives in the persistent
-`robine_id_postgres` volume. Root and application configuration are mounted read-only and continue
-to reload automatically. See [`docs/operations/release.md`](docs/operations/release.md) for release,
-backup, rollback, and verification procedures.
+`robine_id_postgres` volume. PostgreSQL has no published port and joins only an internal database
+network. Robine ID also joins a distinct non-internal application network for outbound OIDC logout
+callbacks. Root and application configuration are mounted read-only and continue to reload
+automatically. See [`docs/operations/release.md`](docs/operations/release.md) for release, backup,
+rollback, and verification procedures.
 
 To publish the image to Docker Hub, authenticate once and use the Makefile. The default namespace is `laibulle`; override `DOCKERHUB_USER` or the complete `IMAGE` when needed:
 

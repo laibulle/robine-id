@@ -9,6 +9,10 @@ the production image. Compose additionally makes the application root filesystem
 all Linux capabilities, and enables `no-new-privileges`; only a small temporary in-memory filesystem
 is writable. Docker and Compose poll readiness through the bounded native
 `robine-id-healthcheck` binary, so the runtime image does not carry `curl` just to call itself.
+Compose 2.33.1 or newer is required for explicit gateway selection. Robine ID joins a normal
+application network for outbound logout callbacks and an `internal` database network for
+PostgreSQL. PostgreSQL joins only the internal network and publishes no host port. The application
+itself remains published solely on the configured loopback address.
 
 PostgreSQL holds pushed and interactive authorization transactions, access grants, rotating refresh-token families,
 sessions, rate-limit counters, schema migrations, and AES-256-GCM encrypted signing keys. Root and
@@ -106,7 +110,9 @@ make release-smoke
 
 `make release-smoke` creates an isolated Compose project on port 4011, builds the canonical image,
 checks migrations, readiness, documentation, discovery, CLI utilities, the non-root user, and
-strict non-leaking rejection of invalid database and Actix server environments. It
+strict non-leaking rejection of invalid database and Actix server environments. It verifies that
+PostgreSQL has no host binding and only one internal network, while both Actix instances have a
+separate non-internal callback network plus database access. It
 then pushes and consumes a single-use authorization request across instances, delivers and
 exchanges a form-posted code, rejects correctly credentialed disabled identities and applications,
 issues and revokes a machine token, and completes login, consented offline access, PKCE code exchange, refresh rotation, UserInfo,

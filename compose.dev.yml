@@ -29,6 +29,10 @@ services:
       retries: 20
     volumes:
       - ./config:/app/config:ro
+    networks:
+      application:
+        gw_priority: 1
+      database: {}
 
   postgres:
     image: postgres:17-alpine
@@ -45,7 +49,14 @@ services:
       retries: 20
     volumes:
       - postgres_dev:/var/lib/postgresql/data
+    networks:
+      - database
 
 volumes:
   postgres_dev:
     name: robine-id-postgres-dev
+
+networks:
+  application:
+  database:
+    internal: true

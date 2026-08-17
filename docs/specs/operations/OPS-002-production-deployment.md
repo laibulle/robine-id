@@ -47,6 +47,10 @@ the shared durable store for protocol state and encrypted signing keys.
 - The service MUST run as a non-root OS user.
 - The conventional application container MUST use a read-only root filesystem, drop Linux
   capabilities, and prevent privilege escalation.
+- Release Compose MUST attach PostgreSQL exclusively to an `internal` database network with no
+  published port. Robine ID MUST join that network plus a distinct application network whose
+  gateway remains available for standards-required outbound callbacks. No other release service
+  MAY join the database network.
 - PostgreSQL and `KEY_ENCRYPTION_SECRET` MUST be backed up through independent operator-controlled systems.
 - The canonical image MUST include idempotent signing-key rotation and elapsed-retained-key pruning
   commands plus transactional key re-encryption; startup and conventional maintenance MUST prune
@@ -113,6 +117,9 @@ rotation. File-backed hot reload is a conventional-server feature; Vercel config
   without reproducing the submitted value.
 - Compose proves the application container is non-root, read-only, capability-free, and protected
   by `no-new-privileges`.
+- The release gate MUST prove PostgreSQL has exactly one internal network and zero host port
+  bindings, while each Robine ID instance joins that database network and exactly one non-internal
+  application network.
 - The optional Compose secrets overlay MUST mount the PostgreSQL password and wrapping key as
   files shared only with the services that consume them, without placing either value in the
   container environment.

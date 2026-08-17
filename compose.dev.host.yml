@@ -2,3 +2,7 @@ services:
   postgres:
     ports:
       - "${ROBINE_ID_DEV_DATABASE_BIND_ADDRESS:-127.0.0.1}:${ROBINE_ID_DEV_DATABASE_BIND_PORT:-54329}:5432"
+
+networks:
+  database:
+    internal: false

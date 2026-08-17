@@ -1226,12 +1226,25 @@ compose exec --no-TTY postgres \
   "SELECT count(*) FROM _sqlx_migrations;" | grep -Eq '[1-9]'
 
 container_id=$(compose ps --quiet robine-id)
+postgres_container_id=$(compose ps --quiet postgres)
 test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = "robine-id"
 test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
 docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id" | grep -q '"ALL"'
 docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" \
   | grep -q 'no-new-privileges'
-network=$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$container_id")
+database_network=$(
+  docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+    "$postgres_container_id" | sed '/^$/d'
+)
+test "$(printf '%s\n' "$database_network" | wc -l | tr -d ' ')" = '1'
+application_network=$(
+  docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+    "$container_id" | sed '/^$/d' | grep -Fvx "$database_network"
+)
+test "$(printf '%s\n' "$application_network" | wc -l | tr -d ' ')" = '1'
+test "$(docker network inspect --format '{{.Internal}}' "$database_network")" = 'true'
+test "$(docker network inspect --format '{{.Internal}}' "$application_network")" = 'false'
+test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$postgres_container_id")" = '0'
 image=$(docker inspect --format '{{.Config.Image}}' "$container_id")
 docker run --detach --name "$backchannel_container" \
   --network "container:$container_id" \
@@ -1314,8 +1327,8 @@ if grep -q 'name="login_hint"' "$login_hint_page"; then
   exit 1
 fi
 
-docker run --detach --name "$peer_container" \
-  --network "$network" \
+docker create --name "$peer_container" \
+  --network "$application_network" \
   --publish "$bind_address::4001" \
   --read-only \
   --tmpfs /tmp:size=16m,mode=1777 \
@@ -1339,6 +1352,8 @@ docker run --detach --name "$peer_container" \
   --env "ROBINE_ID_CONFIG_JSON=$root_configuration_json" \
   --env "ROBINE_ID_APPLICATIONS_JSON=$applications_json" \
   "$image" >/dev/null
+docker network connect "$database_network" "$peer_container"
+docker start "$peer_container" >/dev/null
 wait_for_peer
 peer_port=$(docker port "$peer_container" 4001/tcp | tail -n 1 | sed 's/.*://')
 peer_url="http://$access_host:$peer_port"

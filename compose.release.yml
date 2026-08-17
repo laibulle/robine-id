@@ -28,6 +28,10 @@ services:
     volumes:
       - ${ROBINE_ID_CONFIG_PATH:-./deploy/config/robine_id.json}:/config/robine_id.json:ro
       - ${ROBINE_ID_APPLICATIONS_PATH:-./deploy/config/applications}:/config/applications:ro
+    networks:
+      application:
+        gw_priority: 1
+      database: {}
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +59,13 @@ services:
       retries: 12
     volumes:
       - robine_id_postgres:/var/lib/postgresql/data
+    networks:
+      - database
 
 volumes:
   robine_id_postgres:
+
+networks:
+  application:
+  database:
+    internal: true
