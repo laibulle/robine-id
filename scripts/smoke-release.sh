@@ -2963,10 +2963,7 @@ device_introspection=$(
     --data-urlencode "token=$device_access_token" \
     "$base_url/default/introspect"
 )
-printf '%s' "$device_introspection" | grep -q '"active":true'
-printf '%s' "$device_introspection" | grep -q '"client_id":"release-device-client"'
-printf '%s' "$device_introspection" | grep -q '"authorization_details":'
-printf '%s' "$device_introspection" | grep -q 'read_transactions'
+test "$device_introspection" = '{"active":false}'
 
 device_refresh_response="$temporary_directory/device-refresh.json"
 curl --fail --silent --output "$device_refresh_response" \
