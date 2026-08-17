@@ -2,7 +2,7 @@ SHELL := /bin/sh
 
 APP_NAME := robine-id
 DOCKERHUB_USER ?= laibulle
-VERSION ?= $(shell sed -n 's/.*version: "\([^"]*\)".*/\1/p' mix.exs | head -n 1)
+VERSION ?= $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
 IMAGE ?= $(DOCKERHUB_USER)/$(APP_NAME)
 PLATFORM ?= linux/amd64
 DATABASE_URL ?= postgres://robine_id:robine_id_dev@127.0.0.1:54329/robine_id
@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-apply config-effective rust-preflight rust-integration keys-rotate check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-apply config-effective rust-preflight rust-integration release-smoke keys-rotate check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -28,6 +28,7 @@ help:
 	@echo "  make config-effective Print the redacted effective Rust configuration"
 	@echo "  make rust-preflight   Run Rust formatting, lint, tests, and configuration validation"
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
+	@echo "  make release-smoke    Build and smoke-test the production Rust Compose stack"
 	@echo "  make keys-rotate ROTATION_ID=<id> [ISSUER=default]"
 	@echo "  make build      Build $(VERSION_TAG) and $(LATEST_TAG)"
 	@echo "  make login      Authenticate with Docker Hub"
@@ -82,6 +83,9 @@ rust-integration: dev-db
 	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
 		cargo test --test postgres -- --ignored --test-threads=1
 
+release-smoke:
+	sh scripts/smoke-release.sh
+
 ISSUER ?= default
 keys-rotate: dev-db
 	@test -n "$(ROTATION_ID)" || (echo "ROTATION_ID is required" >&2; exit 1)
@@ -90,12 +94,13 @@ keys-rotate: dev-db
 
 check-variables:
 	@test -n "$(DOCKERHUB_USER)" || (echo "DOCKERHUB_USER is required" >&2; exit 1)
-	@test -n "$(VERSION)" || (echo "VERSION could not be read from mix.exs" >&2; exit 1)
+	@test -n "$(VERSION)" || (echo "VERSION could not be read from Cargo.toml" >&2; exit 1)
 
-preflight: check-variables
+preflight: check-variables rust-preflight
 	mix precommit
-	ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/config/applications" \
-		mix robine_id.config.validate deploy/config/robine_id.json
+	ROBINE_ID_CONFIG="$(CURDIR)/deploy/config/robine_id.json" \
+		ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/config/applications" \
+		cargo run --bin validate_config
 
 build: check-variables
 	docker build \

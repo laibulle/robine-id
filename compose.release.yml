@@ -2,28 +2,51 @@ services:
   robine-id:
     build:
       context: .
-    image: robine-id:0.1.0
+    image: ${ROBINE_ID_IMAGE:-robine-id:0.1.0}
     restart: unless-stopped
     env_file:
-      - .env.release
+      - path: ${ROBINE_ID_ENV_FILE:-.env.release}
+        required: true
     environment:
-      PHX_SERVER: "true"
+      HOST: 0.0.0.0
       PORT: "4001"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: robine_id
+      PGUSER: robine_id
       ROBINE_ID_CONFIG: /config/robine_id.json
       ROBINE_ID_APPLICATIONS_DIR: /config/applications
-      DATABASE_PATH: /data/robine_id.db
     ports:
-      - "127.0.0.1:4001:4001"
+      - "127.0.0.1:${ROBINE_ID_BIND_PORT:-4001}:4001"
     volumes:
       - ./deploy/config/robine_id.json:/config/robine_id.json:ro
       - ./deploy/config/applications:/config/applications:ro
-      - robine_id_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4001/health/ready"]
-      interval: 30s
+      interval: 15s
       timeout: 5s
       start_period: 15s
-      retries: 3
+      retries: 5
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file:
+      - path: ${ROBINE_ID_ENV_FILE:-.env.release}
+        required: true
+    environment:
+      POSTGRES_DB: robine_id
+      POSTGRES_USER: robine_id
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U robine_id -d robine_id"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - robine_id_postgres:/var/lib/postgresql/data
 
 volumes:
-  robine_id_data:
+  robine_id_postgres:

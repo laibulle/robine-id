@@ -8,6 +8,36 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  rust-verify:
+    image: rust:1.88-bookworm
+    shell: /bin/bash
+    timeout: 25m
+    env:
+      DATABASE_URL: postgres://robine_id:robine_id_ci@postgres:5432/robine_id
+      KEY_ENCRYPTION_SECRET: ci-key-encryption-secret-at-least-32-bytes
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: robine_id
+          POSTGRES_USER: robine_id
+          POSTGRES_PASSWORD: robine_id_ci
+        readiness:
+          tcp: 5432
+          timeout: 60s
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: Install Rust quality components
+        run: rustup component add rustfmt clippy
+      - name: Verify Rust runtime
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets
+          cargo test --test postgres -- --ignored --test-threads=1
+          cargo build --locked --release --bin vercel
+
   verify:
     image: hexpm/elixir@sha256:ae38be7cb19bffa78adedb04732d9e6ba83a507b4cfb06983cbe711edb49da54
     shell: /bin/bash

@@ -53,10 +53,5 @@
     },
     "rate_limit": {"attempts": 5, "window_seconds": 60}
   },
-  "storage": {
-    "database_path": {"provider": "env", "key": "DATABASE_PATH"},
-    "pool_size": 5,
-    "signing_key_path": "/data/signing_keys.bin"
-  },
   "telemetry": {"log_level": "info"}
 }

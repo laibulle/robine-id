@@ -3,7 +3,6 @@ services:
     profiles: ["runtime"]
     build:
       context: .
-      dockerfile: Dockerfile.rust
     image: robine-id-rust:dev
     container_name: robine-id-rust-dev
     restart: unless-stopped

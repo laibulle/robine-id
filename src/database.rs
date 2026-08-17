@@ -72,7 +72,9 @@ struct StoredSigningKey {
 
 impl Database {
     pub fn from_env() -> Option<Self> {
-        let url = env::var("DATABASE_URL").ok()?;
+        let url = env::var("DATABASE_URL")
+            .ok()
+            .or_else(database_url_from_postgres_environment)?;
         let secret = env::var("KEY_ENCRYPTION_SECRET")
             .or_else(|_| env::var("SECRET_KEY_BASE"))
             .ok()?;
@@ -543,6 +545,34 @@ impl Database {
     }
 }
 
+fn database_url_from_postgres_environment() -> Option<String> {
+    let host = env::var("PGHOST").ok()?;
+    let port = env::var("PGPORT").unwrap_or_else(|_| "5432".to_owned());
+    let database = env::var("PGDATABASE").unwrap_or_else(|_| "robine_id".to_owned());
+    let user = env::var("PGUSER").unwrap_or_else(|_| "robine_id".to_owned());
+    let password = env::var("PGPASSWORD")
+        .or_else(|_| env::var("POSTGRES_PASSWORD"))
+        .ok()?;
+    database_url_from_components(&host, &port, &database, &user, &password)
+}
+
+fn database_url_from_components(
+    host: &str,
+    port: &str,
+    database: &str,
+    user: &str,
+    password: &str,
+) -> Option<String> {
+    let port = port.parse::<u16>().ok()?;
+    let mut url = url::Url::parse("postgres://localhost/postgres").ok()?;
+    url.set_host(Some(host)).ok()?;
+    url.set_port(Some(port)).ok()?;
+    url.set_username(user).ok()?;
+    url.set_password(Some(password)).ok()?;
+    url.set_path(&format!("/{database}"));
+    Some(url.into())
+}
+
 fn random_token() -> String {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
@@ -575,4 +605,34 @@ async fn generate_signing_key_async() -> Result<SigningKey, sqlx::Error> {
     tokio::task::spawn_blocking(generate_signing_key)
         .await
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::database_url_from_components;
+
+    #[test]
+    fn builds_a_postgres_url_and_percent_encodes_credentials() {
+        let url = database_url_from_components(
+            "postgres.internal",
+            "5433",
+            "robine_id",
+            "robine user",
+            "p@ss:/word",
+        )
+        .expect("database URL");
+
+        assert_eq!(
+            url,
+            "postgres://robine%20user:p%40ss%3A%2Fword@postgres.internal:5433/robine_id"
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_postgres_port() {
+        assert!(
+            database_url_from_components("postgres", "invalid", "db", "user", "password")
+                .is_none()
+        );
+    }
 }

@@ -1,118 +1,58 @@
-# This file is based on these images:
-#
-#   - https://hub.docker.com/r/hexpm/elixir/tags - for the builder image
-#     E.g.: docker.io/hexpm/elixir:1.20.3-erlang-29.0.5-debian-trixie-20260803-slim
-#   - https://hub.docker.com/_/debian/tags?name=trixie-20260803-slim - for the runner image
-#     E.g.: docker.io/debian:trixie-20260803-slim
-#
-# Find builder and runner images on Docker Hub or on Hex's Build Server (Bob).
-# We recommend using Bob's Web UI to find recent tags:
-#
-#   - https://bob.hex.pm/docker
-#
-# We suggest using the same Debian version for both the builder and runner images.
-#
-# We suggest Debian/Ubuntu instead of Alpine to avoid production compatibility issues
-# (such as DNS resolution failures, and dynamically linked NIFs/precompiled binaries).
-#
-# For finding packages in Debian, search on https://packages.debian.org/.
+# syntax=docker/dockerfile:1.7
 
-ARG ELIXIR_VERSION=1.20.3
-ARG OTP_VERSION=29.0.5
-ARG DEBIAN_VERSION=trixie-20260803-slim
+ARG RUST_VERSION=1.88
+FROM rust:${RUST_VERSION}-bookworm AS builder
 
-ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
-ARG RUNNER_IMAGE="docker.io/debian:${DEBIAN_VERSION}"
-
-FROM ${BUILDER_IMAGE} AS builder
-
-# install build dependencies
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends build-essential git \
-  && rm -rf /var/lib/apt/lists/*
-
-# prepare build dir
 WORKDIR /app
-
-# install hex + rebar
-RUN mix local.hex --force \
-  && mix local.rebar --force
-
-# set build ENV
-ENV MIX_ENV="prod"
-
-# install mix dependencies
-COPY mix.exs mix.lock ./
-RUN mix deps.get --only $MIX_ENV
-RUN mkdir config
-
-# copy compile-time config files before we compile dependencies
-# to ensure any relevant config change will trigger the dependencies
-# to be re-compiled.
-COPY config/config.exs config/${MIX_ENV}.exs config/
-RUN mix deps.compile
-
-RUN mix assets.setup
-
-COPY priv priv
-
-COPY lib lib
-
-# Compile the release
-RUN mix compile
-
+COPY Cargo.toml Cargo.lock ./
+COPY api api
 COPY assets assets
+COPY config config
+COPY migrations migrations
+COPY priv priv
+COPY src src
+COPY templates templates
+RUN --mount=type=cache,id=robine-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=robine-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=robine-target,target=/app/target \
+    cargo build --locked --release \
+      --bin robine-id \
+      --bin rotate_keys \
+      --bin validate_config \
+      --bin config_preview \
+      --bin config_apply \
+      --bin config_effective \
+    && mkdir -p /out \
+    && cp \
+      target/release/robine-id \
+      target/release/rotate_keys \
+      target/release/validate_config \
+      target/release/config_preview \
+      target/release/config_apply \
+      target/release/config_effective \
+      /out/
 
-# compile assets
-RUN mix assets.deploy
-
-# Changes to config/runtime.exs don't require recompiling the code
-COPY config/runtime.exs config/
-
-COPY rel rel
-RUN mix release
-
-# start a new build stage so that the final image will only contain
-# the compiled release and other runtime necessities
-FROM ${RUNNER_IMAGE} AS final
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --uid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin robine-id
 
-# Set the locale
-RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
-  && locale-gen
+WORKDIR /app
+COPY --from=builder /out/ /usr/local/bin/
+COPY --from=builder /app/config /app/config
 
-ENV LANG=en_US.UTF-8
-ENV LANGUAGE=en_US:en
-ENV LC_ALL=en_US.UTF-8
+USER robine-id
 
-WORKDIR "/app"
-RUN mkdir -p /app/config /data \
-  && chown -R nobody:root /app /data
-
-# set runner ENV
-ENV MIX_ENV="prod"
-ENV PHX_SERVER="true"
-ENV PORT="4001"
-ENV ROBINE_ID_CONFIG="/config/robine_id.json"
-ENV ROBINE_ID_APPLICATIONS_DIR="/config/applications"
-
-# Only copy the final release from the build stage
-COPY --from=builder --chown=nobody:root /app/_build/${MIX_ENV}/rel/robine_id ./
-
-USER nobody
+ENV HOST=0.0.0.0 \
+    PORT=4001 \
+    ROBINE_ID_CONFIG=/app/config/robine_id.json \
+    ROBINE_ID_APPLICATIONS_DIR=/app/config/applications
 
 EXPOSE 4001
-VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl --fail --silent --show-error http://127.0.0.1:4001/health/ready >/dev/null || exit 1
 
-# If using an environment that doesn't automatically reap zombie processes, it is
-# advised to add an init process such as tini via `apt-get install`
-# above and adding an entrypoint. See https://github.com/krallin/tini for details
-# ENTRYPOINT ["/tini", "--"]
-
-CMD ["/app/bin/server"]
+ENTRYPOINT ["/usr/local/bin/robine-id"]
