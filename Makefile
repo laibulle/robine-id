@@ -44,7 +44,7 @@ help:
 	@echo "  make push       Push the already-built version and latest tags"
 	@echo "  make publish    Run preflight, build, and push"
 	@echo ""
-	@echo "Overrides: HOST, PORT, DOCKERHUB_USER, IMAGE, VERSION, PLATFORM"
+	@echo "Overrides: HOST, PORT, SECRET_DIRECTORY, DOCKERHUB_USER, IMAGE, VERSION, PLATFORM"
 
 dev: dev-db
 	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
