@@ -25,8 +25,8 @@ async fn main() -> io::Result<()> {
 
     let application = Application::load().map_err(io::Error::other)?;
     application.migrate().await.map_err(io::Error::other)?;
-    let issuer = application
-        .snapshot()
+    let snapshot = application.snapshot();
+    let issuer = snapshot
         .issuer(&issuer_id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown issuer"))?;
     let database = application

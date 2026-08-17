@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Documentation · {{ product_name }}</title>
+    {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <main class="docs-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
+      <header class="docs-topbar">
+        <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
+          {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo nav-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="brand-logo">{% endif %}
+          <span>{{ product_name }}</span>
+        </a>
+        <nav class="docs-topnav" aria-label="Documentation navigation">
+          <a href="/">Home</a>
+          <a href="/{{ issuer_id }}/.well-known/openid-configuration">Discovery</a>
+          <a href="/health/ready">Status</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout">
+        <aside class="docs-sidebar" aria-label="On this page">
+          <p class="docs-sidebar-title">Documentation</p>
+          <a href="#overview">Overview</a>
+          <a href="#quick-start">Quick start</a>
+          <a href="#authorization">Authorization</a>
+          <a href="#configuration">Configuration</a>
+          <a href="#operations">Operations</a>
+        </aside>
+
+        <article class="docs-content">
+          <section id="overview" class="docs-hero">
+            <p class="eyebrow">{{ product_name }} documentation</p>
+            <h1>Integrate OpenID Connect with confidence.</h1>
+            <p>An Actix OpenID Provider with server-rendered authentication, PKCE, RS256, persistent sessions, key rotation, and declarative configuration.</p>
+            <div class="docs-badges" aria-label="Supported capabilities"><span>OpenID Connect</span><span>OAuth 2.0</span><span>PKCE S256</span><span>RS256</span></div>
+          </section>
+
+          <section id="quick-start" class="docs-section">
+            <div class="docs-heading"><span>01</span><div><p>Start here</p><h2>Quick start</h2></div></div>
+            <p>Read discovery first. It is the canonical source for endpoints, supported scopes, signing algorithms, and client authentication methods.</p>
+            <div class="code-panel"><div class="code-panel-label">Provider discovery</div><pre><code>GET /{{ issuer_id }}/.well-known/openid-configuration</code></pre></div>
+            <div class="docs-callout"><strong>Issuer matching is exact.</strong><span>Keep the issuer path returned by discovery.</span></div>
+          </section>
+
+          <section id="authorization" class="docs-section">
+            <div class="docs-heading"><span>02</span><div><p>Protocol</p><h2>Authorization Code with PKCE</h2></div></div>
+            <ol class="flow-list">
+              <li><span>1</span><div><strong>Create a verifier</strong><p>Generate a high-entropy verifier and its S256 challenge.</p></div></li>
+              <li><span>2</span><div><strong>Authorize</strong><p>Send the browser with an exact redirect URI, state, scopes, nonce when required, and the challenge.</p></div></li>
+              <li><span>3</span><div><strong>Exchange once</strong><p>POST the short-lived code and original verifier to the token endpoint.</p></div></li>
+              <li><span>4</span><div><strong>Validate</strong><p>Verify the ID token signature, issuer, audience, expiry, and nonce.</p></div></li>
+            </ol>
+            <div class="code-panel"><div class="code-panel-label">Endpoints</div><pre><code>GET  /{{ issuer_id }}/authorize
+POST /{{ issuer_id }}/token
+GET  /{{ issuer_id }}/userinfo
+GET  /{{ issuer_id }}/jwks.json
+GET  /{{ issuer_id }}/logout</code></pre></div>
+          </section>
+
+          <section id="configuration" class="docs-section">
+            <div class="docs-heading"><span>03</span><div><p>Desired state</p><h2>Configuration</h2></div></div>
+            <div class="docs-card-grid">
+              <article><h3>Root</h3><p>Issuers, users, claims, authentication policy, branding, storage metadata, and telemetry.</p><code>ROBINE_ID_CONFIG</code></article>
+              <article><h3>Applications</h3><p>One validated JSON document per relying party.</p><code>ROBINE_ID_APPLICATIONS_DIR</code></article>
+              <article><h3>Serverless</h3><p>Inject immutable JSON directly for Vercel deployments.</p><code>ROBINE_ID_CONFIG_JSON</code></article>
+              <article><h3>Safe activation</h3><p>A complete valid candidate activates atomically; invalid edits leave the prior revision active.</p><code>make config-preview</code></article>
+            </div>
+          </section>
+
+          <section id="operations" class="docs-section docs-section-last">
+            <div class="docs-heading"><span>04</span><div><p>Production</p><h2>Operations</h2></div></div>
+            <div class="endpoint-table" role="table" aria-label="Operational endpoints">
+              <div class="endpoint-row endpoint-header" role="row"><span>Endpoint</span><span>Purpose</span></div>
+              <div class="endpoint-row" role="row"><code>/health/live</code><span>Process liveness</span></div>
+              <div class="endpoint-row" role="row"><code>/health/ready</code><span>Configuration and PostgreSQL readiness</span></div>
+              <div class="endpoint-row" role="row"><code>/{{ issuer_id }}/jwks.json</code><span>Current and retained public verification keys</span></div>
+            </div>
+            <div class="docs-callout docs-callout-warning"><strong>Back up PostgreSQL and encryption material together.</strong><span>Encrypted signing keys cannot be recovered without their matching encryption secret.</span></div>
+          </section>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>

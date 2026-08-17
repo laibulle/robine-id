@@ -119,11 +119,14 @@ Rust image is built from `Dockerfile.rust`, runs as an unprivileged user, and in
 health check.
 
 The Rust runtime implements the home, sign-in, consent, logout, and error pages; health and OIDC
-discovery endpoints; declarative application loading; bcrypt authentication with database-backed
+discovery endpoints and `/docs`; strict declarative application loading; bcrypt authentication with database-backed
 rate limiting and persistent session policy; single-use authorization codes; PKCE exchange;
 RS256 ID tokens; retained-key JWKS; opaque access tokens; and UserInfo. Browser transactions,
 sessions, tokens, rate limits, and encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
+Conventional servers reload file-backed configuration atomically every second by default. Invalid
+or partially written candidates are rejected while the last valid revision remains active;
+`ROBINE_ID_RELOAD_INTERVAL=0` disables watching. Inline/Vercel configuration is immutable.
 
 Rotate an issuer signing key with a stable deployment identifier:
 
@@ -141,14 +144,22 @@ make rust-preflight
 make rust-integration
 ```
 
+Inspect configuration changes and the redacted effective configuration with:
+
+```sh
+make config-preview
+make config-preview CONFIG=path/to/robine_id.json
+make config-effective
+```
+
 The `api/index.rs` binary and `vercel.json` expose the same Actix routes as one Vercel Function.
 Configuration files are immutable for a Vercel deployment. PostgreSQL is required and
 `KEY_ENCRYPTION_SECRET` (or `SECRET_KEY_BASE`) must be supplied as deployment secret material.
 For a filesystem-independent deployment, set `ROBINE_ID_CONFIG_JSON` to the complete root JSON
 document and `ROBINE_ID_APPLICATIONS_JSON` to a JSON array of complete application documents.
 The file-based variables remain supported for conventional servers and containers.
-Production cutover still requires validating the complete legacy configuration/branding surface,
-the deployment pipeline, and production observability against the Phoenix runtime.
+Production cutover still requires validating the deployment pipeline and production observability
+against the Phoenix runtime.
 
 The checked-in development configuration contains one public client and one development identity:
 
@@ -207,6 +218,13 @@ Every application document declares `schema_version: 1` and `kind: "oidc_applica
 ### Configuration commands
 
 ```sh
+# Rust runtime
+make config-validate
+make config-preview CONFIG=path/to/robine_id.json
+make config-effective
+make keys-rotate ISSUER=default ROTATION_ID=deployment-2026-08
+
+# Phoenix runtime
 mix robine_id.config.validate path/to/robine_id.json
 mix robine_id.config.preview path/to/robine_id.json
 mix robine_id.config.apply path/to/robine_id.json
@@ -214,7 +232,10 @@ mix robine_id.config.effective
 mix robine_id.keys.rotate default deployment-2026-08
 ```
 
-`preview` does not mutate state. `apply` validates the complete revision before atomically activating it. Applying an equivalent revision is a no-op. The effective command redacts passwords, hashes, secret references, tokens, and private material.
+`preview` does not mutate state. File-backed Rust servers activate valid changes automatically;
+Phoenix `apply` validates the complete revision before atomically activating it. Applying an
+equivalent semantic revision is a no-op. Both effective commands redact passwords, hashes, secret
+references, tokens, and private material.
 
 ## OpenID Connect endpoints
 

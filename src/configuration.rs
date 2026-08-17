@@ -6,6 +6,7 @@ use thiserror::Error;
 const EMBEDDED_ROOT: &str = include_str!("../config/robine_id.json");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RootConfiguration {
     pub schema_version: u8,
     pub issuers: Vec<Issuer>,
@@ -19,9 +20,16 @@ pub struct RootConfiguration {
     pub claims: std::collections::HashMap<String, ClaimMapping>,
     #[serde(default)]
     pub authentication: AuthenticationPolicy,
+    #[serde(default)]
+    pub reconciliation: ReconciliationPolicy,
+    #[serde(default)]
+    pub storage: Option<StorageConfiguration>,
+    #[serde(default)]
+    pub telemetry: TelemetryConfiguration,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Issuer {
     pub id: String,
     pub url: String,
@@ -34,6 +42,7 @@ pub struct Issuer {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Client {
     pub id: String,
     #[serde(default)]
@@ -60,6 +69,7 @@ pub struct Client {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct User {
     pub id: String,
     pub identifier: String,
@@ -71,12 +81,14 @@ pub struct User {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimMapping {
     pub source: String,
     pub scope: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TokenPolicy {
     #[serde(default = "default_authorization_code_lifetime")]
     pub authorization_code_lifetime: i64,
@@ -99,15 +111,29 @@ impl Default for TokenPolicy {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthenticationPolicy {
+    #[serde(default = "default_authentication_methods")]
+    pub methods: Vec<String>,
     #[serde(default)]
     pub session: SessionPolicy,
     #[serde(default)]
     pub rate_limit: RateLimitPolicy,
 }
 
+impl Default for AuthenticationPolicy {
+    fn default() -> Self {
+        Self {
+            methods: default_authentication_methods(),
+            session: SessionPolicy::default(),
+            rate_limit: RateLimitPolicy::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionPolicy {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout: i64,
@@ -128,6 +154,7 @@ impl Default for SessionPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitPolicy {
     #[serde(default = "default_rate_limit_attempts")]
     pub attempts: i32,
@@ -145,14 +172,36 @@ impl Default for RateLimitPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ApplicationDocument {
-    pub schema_version: u8,
-    pub kind: String,
-    #[serde(flatten)]
-    pub client: Client,
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationPolicy {
+    #[serde(default = "default_deletion_policy")]
+    pub deletion_policy: String,
+}
+
+impl Default for ReconciliationPolicy {
+    fn default() -> Self {
+        Self {
+            deletion_policy: default_deletion_policy(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageConfiguration {
+    pub database_path: serde_json::Value,
+    pub pool_size: i64,
+    pub signing_key_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfiguration {
+    pub log_level: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Branding {
     #[serde(default = "default_product_name")]
     pub product_name: String,
@@ -191,6 +240,7 @@ impl Default for Branding {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrandingOverride {
     pub product_name: Option<String>,
     pub primary_color: Option<String>,
@@ -332,6 +382,19 @@ impl Snapshot {
         Self::from_application_sources(root_path, root_contents, applications)
     }
 
+    pub fn load_path(root_path: &std::path::Path) -> Result<Self, ConfigurationError> {
+        let root_contents =
+            fs::read_to_string(root_path).map_err(|source| ConfigurationError::Read {
+                path: root_path.to_owned(),
+                source,
+            })?;
+        let applications_path = root_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("applications");
+        Self::from_sources(root_path, &root_contents, &applications_path)
+    }
+
     fn from_application_sources(
         root_path: &std::path::Path,
         root_contents: &str,
@@ -349,33 +412,50 @@ impl Snapshot {
             ));
         }
 
-        let mut fingerprint = Sha256::new();
-        fingerprint.update(root_contents.as_bytes());
-
         for (path, contents) in applications {
-            let document: ApplicationDocument =
+            let mut document: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&contents).map_err(|source| ConfigurationError::Json {
                     path: path.clone(),
                     source,
                 })?;
-
-            if document.schema_version != 1 || document.kind != "oidc_application" {
+            let schema_version = document.remove("schema_version");
+            let kind = document.remove("kind");
+            if schema_version != Some(serde_json::Value::from(1))
+                || kind.as_ref().and_then(serde_json::Value::as_str) != Some("oidc_application")
+            {
                 return Err(ConfigurationError::Invalid(format!(
                     "{} must be an oidc_application with schema_version 1",
                     path.display()
                 )));
             }
-
-            fingerprint.update(contents.as_bytes());
-            configuration.clients.push(document.client);
+            let client = serde_json::from_value::<Client>(serde_json::Value::Object(document))
+                .map_err(|source| ConfigurationError::Json {
+                    path: path.clone(),
+                    source,
+                })?;
+            configuration.clients.push(client);
         }
 
         validate(&configuration)?;
+
+        let canonical = canonicalize(
+            serde_json::to_value(&configuration).expect("configuration always serializes"),
+        );
+        let mut fingerprint = Sha256::new();
+        fingerprint.update(
+            serde_json::to_vec(&canonical).expect("canonical configuration always serializes"),
+        );
 
         Ok(Self {
             configuration,
             revision: hex::encode(fingerprint.finalize()),
         })
+    }
+
+    pub fn redacted(&self) -> serde_json::Value {
+        redact_value(
+            serde_json::to_value(&self.configuration).expect("configuration always serializes"),
+        )
     }
 
     pub fn issuer(&self, id: &str) -> Option<&Issuer> {
@@ -507,6 +587,7 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         &configuration.branding.primary_color,
         &configuration.branding.default_locale,
         &configuration.branding.locales,
+        configuration.branding.font_family.as_deref(),
     )?;
     validate_branding_urls(
         configuration.branding.logo.as_deref(),
@@ -542,7 +623,7 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         if !(1..=86_400).contains(&policy.authorization_code_lifetime)
             || !(1..=86_400).contains(&policy.id_token_lifetime)
             || !(1..=86_400).contains(&policy.access_token_lifetime)
-            || policy.clock_skew < 0
+            || !(1..=86_400).contains(&policy.clock_skew)
         {
             return Err(ConfigurationError::Invalid(
                 "token lifetimes must be between 1 and 86400 seconds and clock_skew cannot be negative"
@@ -599,7 +680,7 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         if client.client_type == "confidential"
             && (!matches!(
                 client.authentication_method.as_deref(),
-                Some("client_secret_basic" | "client_secret_post")
+                None | Some("client_secret_basic" | "client_secret_post")
             ) || !client
                 .secret_reference
                 .as_ref()
@@ -619,6 +700,14 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
                 client.id
             )));
         }
+        if client.client_type == "public"
+            && (client.pkce_required == Some(false) || client.nonce_required == Some(false))
+        {
+            return Err(ConfigurationError::Invalid(format!(
+                "public client {} must require PKCE and nonce",
+                client.id
+            )));
+        }
     }
 
     for issuer in &configuration.issuers {
@@ -630,6 +719,7 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
             &issuer_branding.primary_color,
             &issuer_branding.default_locale,
             &issuer_branding.locales,
+            issuer_branding.font_family.as_deref(),
         )?;
         for client in &configuration.clients {
             let mut resolved = issuer_branding.clone();
@@ -640,6 +730,7 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
                 &resolved.primary_color,
                 &resolved.default_locale,
                 &resolved.locales,
+                resolved.font_family.as_deref(),
             )?;
         }
     }
@@ -650,17 +741,25 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         let identifier = user.identifier.trim().to_lowercase();
         if user.id.is_empty()
             || identifier.is_empty()
-            || user.password_hash.is_empty()
+            || !valid_bcrypt_hash(&user.password_hash)
             || !user_ids.insert(&user.id)
             || !identifiers.insert(identifier)
         {
             return Err(ConfigurationError::Invalid(
-                "users require unique non-empty ids and identifiers plus a password hash"
+                "users require unique non-empty ids and identifiers plus a bcrypt hash with cost 10 through 16"
                     .to_owned(),
             ));
         }
     }
     for (claim, mapping) in &configuration.claims {
+        if matches!(
+            claim.as_str(),
+            "iss" | "sub" | "aud" | "iat" | "exp" | "nonce"
+        ) {
+            return Err(ConfigurationError::Invalid(format!(
+                "claim {claim} is reserved by OpenID Connect"
+            )));
+        }
         if claim.is_empty() || mapping.source.is_empty() || mapping.scope.is_empty() {
             return Err(ConfigurationError::Invalid(
                 "claim mappings require non-empty claim, source, and scope values".to_owned(),
@@ -669,6 +768,17 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
     }
 
     let session = &configuration.authentication.session;
+    if configuration.authentication.methods.is_empty()
+        || configuration
+            .authentication
+            .methods
+            .iter()
+            .any(|method| method != "password")
+    {
+        return Err(ConfigurationError::Invalid(
+            "authentication methods must contain only password".to_owned(),
+        ));
+    }
     if session.idle_timeout <= 0 || session.absolute_timeout <= 0 || session.max_concurrent <= 0 {
         return Err(ConfigurationError::Invalid(
             "authentication session values must be positive".to_owned(),
@@ -678,6 +788,59 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
     if rate_limit.attempts <= 0 || rate_limit.window_seconds <= 0 {
         return Err(ConfigurationError::Invalid(
             "authentication rate-limit values must be positive".to_owned(),
+        ));
+    }
+
+    if !matches!(
+        configuration.reconciliation.deletion_policy.as_str(),
+        "disable" | "retain" | "delete"
+    ) {
+        return Err(ConfigurationError::Invalid(
+            "reconciliation deletion_policy must be disable, retain, or delete".to_owned(),
+        ));
+    }
+
+    if let Some(storage) = &configuration.storage {
+        let valid_database_path = match &storage.database_path {
+            serde_json::Value::String(path) => !path.is_empty(),
+            serde_json::Value::Object(reference) => {
+                reference.len() == 2
+                    && reference
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("env")
+                    && reference
+                        .get("key")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|key| !key.is_empty())
+            }
+            _ => false,
+        };
+        if !valid_database_path || storage.pool_size <= 0 {
+            return Err(ConfigurationError::Invalid(
+                "storage requires a database path or typed env reference and a positive pool_size"
+                    .to_owned(),
+            ));
+        }
+        if storage
+            .signing_key_path
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            return Err(ConfigurationError::Invalid(
+                "storage signing_key_path cannot be empty".to_owned(),
+            ));
+        }
+    }
+
+    if configuration
+        .telemetry
+        .log_level
+        .as_deref()
+        .is_some_and(|level| !matches!(level, "debug" | "info" | "warning" | "error"))
+    {
+        return Err(ConfigurationError::Invalid(
+            "telemetry log_level must be debug, info, warning, or error".to_owned(),
         ));
     }
 
@@ -693,6 +856,7 @@ fn validate_branding_override(branding: &BrandingOverride) -> Result<(), Configu
             "branding locales cannot be empty".to_owned(),
         ));
     }
+    validate_font_family(branding.font_family.as_deref())?;
     validate_branding_urls(
         branding.logo.as_deref(),
         branding.favicon.as_deref(),
@@ -738,14 +902,33 @@ fn validate_branding(
     color: &str,
     default_locale: &str,
     locales: &[String],
+    font_family: Option<&str>,
 ) -> Result<(), ConfigurationError> {
     validate_primary_color(color)?;
+    validate_font_family(font_family)?;
     if default_locale.is_empty()
         || locales.is_empty()
         || !locales.iter().any(|locale| locale == default_locale)
     {
         return Err(ConfigurationError::Invalid(
             "branding default_locale must be present in locales".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_font_family(font_family: Option<&str>) -> Result<(), ConfigurationError> {
+    if font_family.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 128
+            || value.chars().any(|character| {
+                !(character.is_alphanumeric()
+                    || character.is_whitespace()
+                    || matches!(character, ',' | '-' | '_' | '\'' | '"'))
+            })
+    }) {
+        return Err(ConfigurationError::Invalid(
+            "branding font_family contains unsupported CSS characters".to_owned(),
         ));
     }
     Ok(())
@@ -785,16 +968,85 @@ fn valid_secret_reference(reference: &serde_json::Value) -> bool {
     match reference {
         serde_json::Value::String(secret) => !secret.is_empty(),
         serde_json::Value::Object(reference) => {
-            reference
-                .get("provider")
-                .and_then(serde_json::Value::as_str)
-                == Some("env")
+            reference.len() == 2
+                && reference
+                    .get("provider")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("env")
                 && reference
                     .get("key")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|key| !key.is_empty())
         }
         _ => false,
+    }
+}
+
+fn valid_bcrypt_hash(hash: &str) -> bool {
+    let bytes = hash.as_bytes();
+    if bytes.len() != 60 || !matches!(&bytes[..4], b"$2a$" | b"$2b$" | b"$2y$") || bytes[6] != b'$'
+    {
+        return false;
+    }
+    let Ok(cost) = hash[4..6].parse::<u8>() else {
+        return false;
+    };
+    (10..=16).contains(&cost)
+        && bytes[7..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/'))
+}
+
+fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(values) => {
+            let sorted = values
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize(value)))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(values) => {
+            let mut values = values.into_iter().map(canonicalize).collect::<Vec<_>>();
+            values.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+            serde_json::Value::Array(values)
+        }
+        value => value,
+    }
+}
+
+fn redact_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    let normalized = key.to_ascii_lowercase();
+                    let sensitive = [
+                        "password",
+                        "password_hash",
+                        "secret",
+                        "secret_reference",
+                        "private_key",
+                        "token",
+                    ]
+                    .iter()
+                    .any(|fragment| normalized.contains(fragment));
+                    (
+                        key,
+                        if sensitive {
+                            serde_json::Value::String("[REDACTED]".to_owned())
+                        } else {
+                            redact_value(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(redact_value).collect())
+        }
+        value => value,
     }
 }
 
@@ -883,9 +1135,18 @@ fn default_rate_limit_window() -> i32 {
     60
 }
 
+fn default_authentication_methods() -> Vec<String> {
+    vec!["password".to_owned()]
+}
+
+fn default_deletion_policy() -> String {
+    "disable".to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn loads_the_existing_configuration_shape() {
@@ -977,5 +1238,108 @@ mod tests {
         .expect("inline configuration");
 
         assert!(snapshot.client("inline-client").is_some());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_at_every_configuration_boundary() {
+        let mut root: serde_json::Value =
+            serde_json::from_str(EMBEDDED_ROOT).expect("embedded configuration");
+        root.as_object_mut()
+            .expect("root object")
+            .insert("surprise".to_owned(), serde_json::Value::Bool(true));
+        let error = Snapshot::from_application_sources(
+            std::path::Path::new("unknown-root.json"),
+            &root.to_string(),
+            vec![],
+        )
+        .expect_err("unknown root field should fail");
+        assert!(error.to_string().contains("unknown field `surprise`"));
+
+        let application = serde_json::json!({
+            "schema_version": 1,
+            "kind": "oidc_application",
+            "id": "unknown-client",
+            "type": "public",
+            "redirect_uris": ["https://app.example/callback"],
+            "scopes": ["openid"],
+            "surprise": true
+        });
+        let error = Snapshot::from_application_sources(
+            std::path::Path::new("root.json"),
+            EMBEDDED_ROOT,
+            vec![(
+                PathBuf::from("unknown-client.json"),
+                application.to_string(),
+            )],
+        )
+        .expect_err("unknown client field should fail");
+        assert!(error.to_string().contains("unknown field `surprise`"));
+    }
+
+    #[test]
+    fn fingerprints_semantic_configuration_instead_of_json_formatting() {
+        let compact: serde_json::Value =
+            serde_json::from_str(EMBEDDED_ROOT).expect("embedded configuration");
+        let compact = serde_json::to_string(&compact).expect("compact JSON");
+        let pretty = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(EMBEDDED_ROOT)
+                .expect("embedded configuration"),
+        )
+        .expect("pretty JSON");
+        let applications = std::env::temp_dir().join("robine-id-no-applications");
+        let first = Snapshot::from_sources(Path::new("first.json"), &compact, &applications)
+            .expect("compact configuration");
+        let second = Snapshot::from_sources(Path::new("second.json"), &pretty, &applications)
+            .expect("pretty configuration");
+        assert_eq!(first.revision, second.revision);
+    }
+
+    #[test]
+    fn effective_configuration_redacts_secret_material() {
+        let snapshot = Snapshot::from_sources(
+            Path::new("config/robine_id.json"),
+            EMBEDDED_ROOT,
+            &std::env::temp_dir().join("robine-id-no-applications"),
+        )
+        .expect("configuration");
+        let effective = snapshot.redacted();
+        assert_eq!(
+            effective["users"][0]["password_hash"],
+            serde_json::Value::String("[REDACTED]".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_weak_password_hashes_and_unsafe_public_client_policy() {
+        let mut configuration: RootConfiguration =
+            serde_json::from_str(EMBEDDED_ROOT).expect("embedded configuration");
+        configuration.users[0].password_hash =
+            "$2b$04$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa".to_owned();
+        assert!(matches!(
+            validate(&configuration),
+            Err(ConfigurationError::Invalid(message)) if message.contains("bcrypt")
+        ));
+
+        let mut configuration: RootConfiguration =
+            serde_json::from_str(EMBEDDED_ROOT).expect("embedded configuration");
+        configuration.clients.push(Client {
+            id: "unsafe-public".to_owned(),
+            name: "Unsafe public".to_owned(),
+            client_type: "public".to_owned(),
+            redirect_uris: vec!["https://app.example/callback".to_owned()],
+            post_logout_redirect_uris: vec![],
+            scopes: vec!["openid".to_owned()],
+            grant_types: vec!["authorization_code".to_owned()],
+            pkce_required: Some(false),
+            nonce_required: None,
+            consent_required: None,
+            authentication_method: None,
+            secret_reference: None,
+            branding: None,
+        });
+        assert!(matches!(
+            validate(&configuration),
+            Err(ConfigurationError::Invalid(message)) if message.contains("must require PKCE")
+        ));
     }
 }

@@ -237,6 +237,9 @@ mod tests {
                 users: vec![],
                 claims: Default::default(),
                 authentication: Default::default(),
+                reconciliation: Default::default(),
+                storage: None,
+                telemetry: Default::default(),
             },
             revision: "revision".to_owned(),
         }

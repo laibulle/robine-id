@@ -26,31 +26,39 @@ async fn persists_and_atomically_consumes_security_state() {
         .issue_authorization_code(&grant)
         .await
         .expect("authorization code");
-    assert!(database
-        .consume_authorization_code(&code)
-        .await
-        .expect("consume code")
-        .is_some());
-    assert!(database
-        .consume_authorization_code(&code)
-        .await
-        .expect("replay code")
-        .is_none());
+    assert!(
+        database
+            .consume_authorization_code(&code)
+            .await
+            .expect("consume code")
+            .is_some()
+    );
+    assert!(
+        database
+            .consume_authorization_code(&code)
+            .await
+            .expect("replay code")
+            .is_none()
+    );
 
     let pending = database
         .issue_pending_authorization(&grant, "state")
         .await
         .expect("pending authorization");
-    assert!(database
-        .consume_pending_authorization(&pending)
-        .await
-        .expect("consume pending")
-        .is_some());
-    assert!(database
-        .consume_pending_authorization(&pending)
-        .await
-        .expect("replay pending")
-        .is_none());
+    assert!(
+        database
+            .consume_pending_authorization(&pending)
+            .await
+            .expect("consume pending")
+            .is_some()
+    );
+    assert!(
+        database
+            .consume_pending_authorization(&pending)
+            .await
+            .expect("replay pending")
+            .is_none()
+    );
 
     let first = database
         .start_session(&subject, 2, 300)
@@ -64,34 +72,46 @@ async fn persists_and_atomically_consumes_security_state() {
         .start_session(&subject, 2, 300)
         .await
         .expect("third session");
-    assert!(database
-        .validate_session(&first, 300)
-        .await
-        .expect("validate oldest")
-        .is_none());
-    assert!(database
-        .validate_session(&second, 300)
-        .await
-        .expect("validate second")
-        .is_some());
-    assert!(database
-        .validate_session(&third, 300)
-        .await
-        .expect("validate newest")
-        .is_some());
+    assert!(
+        database
+            .validate_session(&first, 300)
+            .await
+            .expect("validate oldest")
+            .is_none()
+    );
+    assert!(
+        database
+            .validate_session(&second, 300)
+            .await
+            .expect("validate second")
+            .is_some()
+    );
+    assert!(
+        database
+            .validate_session(&third, 300)
+            .await
+            .expect("validate newest")
+            .is_some()
+    );
 
-    assert!(database
-        .allow_authentication_attempt(&unique, 2, 60)
-        .await
-        .expect("rate attempt one"));
-    assert!(database
-        .allow_authentication_attempt(&unique, 2, 60)
-        .await
-        .expect("rate attempt two"));
-    assert!(!database
-        .allow_authentication_attempt(&unique, 2, 60)
-        .await
-        .expect("rate attempt three"));
+    assert!(
+        database
+            .allow_authentication_attempt(&unique, 2, 60)
+            .await
+            .expect("rate attempt one")
+    );
+    assert!(
+        database
+            .allow_authentication_attempt(&unique, 2, 60)
+            .await
+            .expect("rate attempt two")
+    );
+    assert!(
+        !database
+            .allow_authentication_attempt(&unique, 2, 60)
+            .await
+            .expect("rate attempt three")
+    );
 
     let initial = database.signing_key(&issuer).await.expect("initial key");
     let (rotated, changed) = database

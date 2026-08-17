@@ -4,16 +4,18 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ product_name }}</title>
+    {% if let Some(favicon) = favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
     <link rel="stylesheet" href="/assets/app.css">
   </head>
   <body>
-    <main class="landing-shell" style="--auth-primary: {{ primary_color }}">
+    <main class="landing-shell" style="--auth-primary: {{ primary_color }}{% if let Some(font_family) = font_family %}; --auth-font: {{ font_family }}{% endif %}">
       <nav class="landing-nav" aria-label="Primary navigation">
         <a href="/" class="landing-brand" aria-label="{{ product_name }} home">
           {% if let Some(logo) = logo %}<img src="{{ logo }}" alt="" class="configured-logo nav-logo">{% else %}<img src="/images/brand/robine-mark.png" alt="" class="brand-logo">{% endif %}
           <span>Robine <span class="product-suffix">ID</span></span>
         </a>
         <div class="landing-nav-actions">
+          <a class="nav-text-link" href="/docs">Documentation</a>
           <span class="status-pill is-ready"><span aria-hidden="true"></span>Rust runtime ready</span>
         </div>
       </nav>

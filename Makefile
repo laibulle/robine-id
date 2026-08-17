@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down config-validate rust-preflight rust-integration keys-rotate check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down config-validate config-preview config-effective rust-preflight rust-integration keys-rotate check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -23,6 +23,8 @@ help:
 	@echo "  make dev-db     Start the development PostgreSQL container"
 	@echo "  make dev-down   Stop the development PostgreSQL container"
 	@echo "  make config-validate  Validate the effective Rust configuration"
+	@echo "  make config-preview [CONFIG=path]  Preview Rust configuration reconciliation"
+	@echo "  make config-effective Print the redacted effective Rust configuration"
 	@echo "  make rust-preflight   Run Rust formatting, lint, tests, and configuration validation"
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
 	@echo "  make keys-rotate ROTATION_ID=<id> [ISSUER=default]"
@@ -60,6 +62,12 @@ dev-down:
 
 config-validate:
 	cargo run --bin validate_config
+
+config-preview:
+	cargo run --bin config_preview -- $(CONFIG)
+
+config-effective:
+	cargo run --bin config_effective
 
 rust-preflight: config-validate
 	cargo fmt --all -- --check

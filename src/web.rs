@@ -37,6 +37,19 @@ struct HomeTemplate<'a> {
     issuer_id: &'a str,
     revision: &'a str,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
+}
+
+#[derive(Template)]
+#[template(path = "docs.html")]
+struct DocsTemplate<'a> {
+    product_name: &'a str,
+    primary_color: &'a str,
+    issuer_id: &'a str,
+    logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -51,6 +64,8 @@ struct LoginTemplate<'a> {
     error: Option<&'a str>,
     messages: &'a crate::configuration::UiMessages,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
     support_url: Option<&'a str>,
     privacy_url: Option<&'a str>,
     terms_url: Option<&'a str>,
@@ -63,6 +78,8 @@ struct ProtocolErrorTemplate<'a> {
     primary_color: &'a str,
     message: &'a str,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -77,6 +94,8 @@ struct ConsentTemplate<'a> {
     csrf_token: &'a str,
     messages: &'a crate::configuration::UiMessages,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
     support_url: Option<&'a str>,
     privacy_url: Option<&'a str>,
     terms_url: Option<&'a str>,
@@ -91,6 +110,8 @@ struct LogoutTemplate<'a> {
     transaction: &'a str,
     csrf_token: &'a str,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -99,11 +120,14 @@ struct LogoutDoneTemplate<'a> {
     product_name: &'a str,
     primary_color: &'a str,
     logo: Option<&'a str>,
+    favicon: Option<&'a str>,
+    font_family: Option<&'a str>,
 }
 
 pub fn configure(configuration: &mut web::ServiceConfig) {
     configuration
         .route("/", web::get().to(home))
+        .route("/docs", web::get().to(docs))
         .route("/health/live", web::get().to(live))
         .route("/health/ready", web::get().to(ready))
         .route("/assets/app.css", web::get().to(css))
@@ -227,6 +251,31 @@ async fn home(application: web::Data<Application>) -> impl Responder {
             issuer_id: &issuer.id,
             revision: &snapshot.revision,
             logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
+        }
+        .render(),
+    )
+}
+
+async fn docs(application: web::Data<Application>) -> impl Responder {
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.default_issuer() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "not_ready"}),
+        );
+    };
+    let branding = snapshot.branding(Some(&issuer.id), None);
+    html_response(
+        StatusCode::OK,
+        DocsTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id: &issuer.id,
+            logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
         }
         .render(),
     )
@@ -250,7 +299,8 @@ async fn ready(application: web::Data<Application>) -> impl Responder {
 }
 
 async fn discovery(path: web::Path<String>, application: web::Data<Application>) -> impl Responder {
-    match DiscoveryDocument::build(application.snapshot(), &path.into_inner()) {
+    let snapshot = application.snapshot();
+    match DiscoveryDocument::build(&snapshot, &path.into_inner()) {
         Some(document) => {
             let mut response = json_response(StatusCode::OK, json!(document));
             response.headers_mut().insert(
@@ -269,15 +319,14 @@ async fn authorize(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
-    let default_branding = &application.snapshot().configuration.branding;
+    let snapshot = application.snapshot();
+    let default_branding = &snapshot.configuration.branding;
     let authorization = serde_urlencoded::from_str::<AuthorizationRequest>(request.query_string());
 
     match authorization {
-        Ok(authorization) => match authorization.validate(application.snapshot(), &issuer_id) {
+        Ok(authorization) => match authorization.validate(&snapshot, &issuer_id) {
             Ok(client) => {
-                let branding = application
-                    .snapshot()
-                    .branding(Some(&issuer_id), Some(&client.id));
+                let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
                 let messages = branding.messages(authorization.ui_locales.as_deref());
                 let csrf_token = random_token();
                 let mut response = html_response(
@@ -296,6 +345,8 @@ async fn authorize(
                         error: None,
                         messages: &messages,
                         logo: branding.logo.as_deref(),
+                        favicon: branding.favicon.as_deref(),
+                        font_family: branding.font_family.as_deref(),
                         support_url: branding.support_url.as_deref(),
                         privacy_url: branding.privacy_url.as_deref(),
                         terms_url: branding.terms_url.as_deref(),
@@ -306,7 +357,7 @@ async fn authorize(
                 response
             }
             Err(error) => authorization_request_error(
-                application.snapshot(),
+                &snapshot,
                 default_branding,
                 &issuer_id,
                 &authorization,
@@ -327,6 +378,7 @@ async fn authenticate(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
     let form = form.into_inner();
     let authorization = AuthorizationRequest {
         response_type: form.response_type,
@@ -339,7 +391,7 @@ async fn authenticate(
         code_challenge_method: form.code_challenge_method,
         ui_locales: form.ui_locales,
     };
-    let default_branding = &application.snapshot().configuration.branding;
+    let default_branding = &snapshot.configuration.branding;
 
     if !valid_csrf(&request, &form.csrf_token) {
         return protocol_error(
@@ -348,13 +400,11 @@ async fn authenticate(
         );
     }
 
-    let client = match authorization.validate(application.snapshot(), &issuer_id) {
+    let client = match authorization.validate(&snapshot, &issuer_id) {
         Ok(client) => client,
         Err(error) => return protocol_error(default_branding, error.description),
     };
-    let branding = application
-        .snapshot()
-        .branding(Some(&issuer_id), Some(&client.id));
+    let branding = snapshot.branding(Some(&issuer_id), Some(&client.id));
     let messages = branding.messages(authorization.ui_locales.as_deref());
     let Some(database) = application.database() else {
         return json_response(
@@ -381,11 +431,7 @@ async fn authenticate(
         remote_address,
         form.identifier.trim().to_lowercase()
     );
-    let rate_limit = &application
-        .snapshot()
-        .configuration
-        .authentication
-        .rate_limit;
+    let rate_limit = &snapshot.configuration.authentication.rate_limit;
     match database
         .allow_authentication_attempt(
             &rate_limit_key,
@@ -418,6 +464,8 @@ async fn authenticate(
                     error: Some("Too many attempts. Please wait before trying again."),
                     messages: &messages,
                     logo: branding.logo.as_deref(),
+                    favicon: branding.favicon.as_deref(),
+                    font_family: branding.font_family.as_deref(),
                     support_url: branding.support_url.as_deref(),
                     privacy_url: branding.privacy_url.as_deref(),
                     terms_url: branding.terms_url.as_deref(),
@@ -441,10 +489,7 @@ async fn authenticate(
             );
         }
     }
-    let user = application
-        .snapshot()
-        .user_by_identifier(&form.identifier)
-        .cloned();
+    let user = snapshot.user_by_identifier(&form.identifier).cloned();
     let password = form.password;
     let hash = user
         .as_ref()
@@ -480,6 +525,8 @@ async fn authenticate(
                 error: Some("The email or password is incorrect."),
                 messages: &messages,
                 logo: branding.logo.as_deref(),
+                favicon: branding.favicon.as_deref(),
+                font_family: branding.font_family.as_deref(),
                 support_url: branding.support_url.as_deref(),
                 privacy_url: branding.privacy_url.as_deref(),
                 terms_url: branding.terms_url.as_deref(),
@@ -487,16 +534,13 @@ async fn authenticate(
             .render(),
         );
     };
-    let issuer = application
-        .snapshot()
-        .issuer(&issuer_id)
-        .expect("validated issuer");
+    let issuer = snapshot.issuer(&issuer_id).expect("validated issuer");
     let scopes = authorization
         .scope
         .split_ascii_whitespace()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let claims = tokens::mapped_claims(application.snapshot(), &user, &scopes);
+    let claims = tokens::mapped_claims(&snapshot, &user, &scopes);
     let grant = AuthorizationGrant {
         issuer: issuer.url.trim_end_matches('/').to_owned(),
         subject: user.id,
@@ -509,7 +553,7 @@ async fn authenticate(
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.authorization_code_lifetime),
     };
 
-    let session_policy = &application.snapshot().configuration.authentication.session;
+    let session_policy = &snapshot.configuration.authentication.session;
     let session = match database
         .start_session(
             &grant.subject,
@@ -568,6 +612,8 @@ async fn authenticate(
                 csrf_token: &form.csrf_token,
                 messages: &messages,
                 logo: branding.logo.as_deref(),
+                favicon: branding.favicon.as_deref(),
+                font_family: branding.font_family.as_deref(),
                 support_url: branding.support_url.as_deref(),
                 privacy_url: branding.privacy_url.as_deref(),
                 terms_url: branding.terms_url.as_deref(),
@@ -610,8 +656,9 @@ async fn consent(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
+    let snapshot = application.snapshot();
     let form = form.into_inner();
-    let branding = &application.snapshot().configuration.branding;
+    let branding = &snapshot.configuration.branding;
     if !valid_csrf(&request, &form.csrf_token) {
         return protocol_error(branding, "The consent form has expired; please start again");
     }
@@ -628,7 +675,7 @@ async fn consent(
             "Your sign-in session has expired; please start again",
         );
     };
-    let session_policy = &application.snapshot().configuration.authentication.session;
+    let session_policy = &snapshot.configuration.authentication.session;
     let subject = match database
         .validate_session(&session, session_policy.idle_timeout.max(1))
         .await
@@ -664,7 +711,7 @@ async fn consent(
             );
         }
     };
-    let Some(issuer) = application.snapshot().issuer(&issuer_id) else {
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
         return protocol_error(branding, "The authorization issuer is unknown");
     };
     if pending.issuer != issuer.url.trim_end_matches('/') || pending.subject != subject {
@@ -808,6 +855,8 @@ async fn logout_confirmation(
             transaction: &transaction,
             csrf_token: &csrf_token,
             logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
         }
         .render(),
     );
@@ -868,6 +917,8 @@ async fn logout(
                 product_name: &branding.product_name,
                 primary_color: &branding.primary_color,
                 logo: branding.logo.as_deref(),
+                favicon: branding.favicon.as_deref(),
+                font_family: branding.font_family.as_deref(),
             }
             .render(),
         ),
@@ -965,7 +1016,8 @@ async fn exchange_token(
     application: web::Data<Application>,
 ) -> impl Responder {
     let issuer_id = path.into_inner();
-    let Some(issuer) = application.snapshot().issuer(&issuer_id) else {
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown issuer");
     };
     let form = form.into_inner();
@@ -987,7 +1039,7 @@ async fn exchange_token(
         .clone()
         .or(form.client_id.clone())
         .unwrap_or_default();
-    let Some(client) = application.snapshot().client(&client_id) else {
+    let Some(client) = snapshot.client(&client_id) else {
         return invalid_client_response();
     };
     if !authenticate_client(
@@ -1123,7 +1175,8 @@ async fn exchange_token(
 
 async fn jwks(path: web::Path<String>, application: web::Data<Application>) -> impl Responder {
     let issuer_id = path.into_inner();
-    let Some(issuer) = application.snapshot().issuer(&issuer_id) else {
+    let snapshot = application.snapshot();
+    let Some(issuer) = snapshot.issuer(&issuer_id) else {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
     };
     let Some(database) = application.database() else {
@@ -1161,6 +1214,7 @@ async fn jwks(path: web::Path<String>, application: web::Data<Application>) -> i
 }
 
 async fn user_info(request: HttpRequest, application: web::Data<Application>) -> impl Responder {
+    let snapshot = application.snapshot();
     let token = request
         .headers()
         .get(actix_web::http::header::AUTHORIZATION)
@@ -1170,7 +1224,7 @@ async fn user_info(request: HttpRequest, application: web::Data<Application>) ->
         return invalid_bearer_response();
     };
     match database.access_grant(token).await {
-        Ok(Some(grant)) if application.snapshot().user(&grant.subject).is_some() => {
+        Ok(Some(grant)) if snapshot.user(&grant.subject).is_some() => {
             let mut claims = grant.claims.as_object().cloned().unwrap_or_default();
             claims.insert("sub".to_owned(), json!(grant.subject));
             let mut response = json_response(StatusCode::OK, Value::Object(claims));
@@ -1473,6 +1527,8 @@ fn protocol_error(branding: &crate::configuration::Branding, message: &str) -> H
             primary_color: &branding.primary_color,
             message,
             logo: branding.logo.as_deref(),
+            favicon: branding.favicon.as_deref(),
+            font_family: branding.font_family.as_deref(),
         }
         .render(),
     )
@@ -1519,6 +1575,9 @@ mod tests {
                 users: vec![],
                 claims: Default::default(),
                 authentication: Default::default(),
+                reconciliation: Default::default(),
+                storage: None,
+                telemetry: Default::default(),
             },
             revision: "abc123".to_owned(),
         })
@@ -1540,6 +1599,44 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["issuer"], "https://id.example/default");
+    }
+
+    #[actix_web::test]
+    async fn serves_the_rust_documentation_page() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/docs").to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 documentation");
+        assert!(body.contains("Authorization Code with PKCE"));
+        assert!(body.contains("/default/.well-known/openid-configuration"));
+    }
+
+    #[actix_web::test]
+    async fn renders_configured_favicon_and_font_family() {
+        let base = application();
+        let mut snapshot = (*base.snapshot()).clone();
+        snapshot.configuration.branding.favicon = Some("/favicon.svg".to_owned());
+        snapshot.configuration.branding.font_family =
+            Some("Atkinson Hyperlegible, sans-serif".to_owned());
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Application::without_database(snapshot)))
+                .configure(configure),
+        )
+        .await;
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/").to_request()).await;
+        let body = test::read_body(response).await;
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 home page");
+        assert!(body.contains("rel=\"icon\" href=\"/favicon.svg?rev=abc123\""));
+        assert!(body.contains("--auth-font: Atkinson Hyperlegible, sans-serif"));
     }
 
     #[actix_web::test]

@@ -10,6 +10,7 @@ services:
     environment:
       DATABASE_URL: postgres://robine_id:robine_id_dev@postgres:5432/robine_id
       KEY_ENCRYPTION_SECRET: development-only-key-encryption-secret-change-me
+      ROBINE_ID_RELOAD_INTERVAL: "1000"
     ports:
       - "127.0.0.1:4001:4001"
     depends_on:
@@ -20,6 +21,8 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+    volumes:
+      - ./config:/app/config:ro
 
   postgres:
     image: postgres:17-alpine
