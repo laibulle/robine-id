@@ -57,7 +57,8 @@ so an incomplete translation never exposes an internal key.
 ## Supported Message Keys
 
 The built-in catalog exposes stable keys for sign-in, TOTP, consent, device verification, scopes,
-logout, signed-out, protocol-error, form-post handoff, navigation, and legal content. New
+logout (including cancellation), signed-out, protocol-error, form-post handoff, localized form
+progress, navigation, and legal content. New
 user-visible strings SHOULD receive stable keys before becoming configurable.
 
 ## Acceptance Criteria

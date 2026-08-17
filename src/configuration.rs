@@ -493,6 +493,8 @@ pub struct UiMessages {
     pub form_post_title: String,
     pub form_post_intro: String,
     pub form_post_submit: String,
+    pub form_submitting: String,
+    pub logout_cancel: String,
     pub legal_navigation: String,
     pub support: String,
     pub privacy: String,
@@ -1029,6 +1031,8 @@ impl Branding {
                 "Your authorization response is ready. You will be redirected automatically.",
             ),
             form_post_submit: value("form_post.submit", "Continue securely"),
+            form_submitting: value("form.submitting", "Request in progress"),
+            logout_cancel: value("logout.cancel", "Keep me signed in"),
             legal_navigation: value("legal.navigation", "Legal and support"),
             support: value("legal.support", "Support"),
             privacy: value("legal.privacy", "Privacy"),
@@ -1140,6 +1144,8 @@ fn built_in_message(locale: &str, key: &str) -> Option<&'static str> {
             "Votre réponse d’autorisation est prête. Vous allez être redirigé automatiquement."
         }
         "form_post.submit" => "Continuer en toute sécurité",
+        "form.submitting" => "Requête en cours",
+        "logout.cancel" => "Rester connecté",
         "legal.navigation" => "Liens légaux et assistance",
         "legal.support" => "Assistance",
         "legal.privacy" => "Confidentialité",
@@ -2838,6 +2844,8 @@ mod tests {
         assert_eq!(messages.consent_approve, "Autoriser");
         assert_eq!(messages.device_approved_title, "Appareil connecté");
         assert_eq!(messages.form_post_submit, "Continuer en toute sécurité");
+        assert_eq!(messages.form_submitting, "Requête en cours");
+        assert_eq!(messages.logout_cancel, "Rester connecté");
         assert_eq!(
             messages.scope_offline_access,
             "Rester connecté lorsque vous êtes absent"
@@ -2899,6 +2907,8 @@ mod tests {
             "form_post.title",
             "form_post.intro",
             "form_post.submit",
+            "form.submitting",
+            "logout.cancel",
             "legal.navigation",
             "legal.support",
             "legal.privacy",

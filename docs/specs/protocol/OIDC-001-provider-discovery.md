@@ -24,6 +24,9 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
   `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy: cross-origin`. `GET` and
   bodyless `HEAD` MUST be supported, and `OPTIONS` MUST advertise only `GET, HEAD, OPTIONS` plus
   the `If-None-Match` request header with a bounded preflight lifetime.
+- A preflight requesting another method or header MUST return a non-cacheable HTTP 403 without an
+  access-control grant. Any other unsupported method MUST return a non-cacheable HTTP 405 with
+  `Allow: GET, HEAD, OPTIONS`.
 - Secrets and internal-only configuration MUST never appear in discovery metadata.
 - Discovery MUST be available at `GET /:issuer_id/.well-known/openid-configuration`.
 - The RFC 8414-shaped compatibility route
@@ -37,6 +40,9 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
   so the response cannot reveal whether a user exists.
 - WebFinger MUST filter unrelated `rel` values, support browser CORS, bound reflected inputs, and
   return the OpenID issuer relationship with the exact configured issuer URL.
+- A structurally malformed WebFinger query MUST return a non-cacheable `400` JRD with an empty
+  subject and link set, preserve credential-free public CORS, and MUST NOT fall through to a
+  localized browser HTML error or reflect the malformed input.
 - WebFinger JRD responses MUST expose a weak content ETag and bounded browser/shared-cache policy.
   `GET`, bodyless `HEAD`, matching `If-None-Match`, and the same credential-free public `OPTIONS`
   policy as provider metadata MUST work on conventional Actix and Vercel runtimes.
@@ -112,6 +118,8 @@ essential-claim behavior.
 - A conforming client can discover and use a configured issuer without endpoint overrides.
 - Disabling an optional capability removes it from discovery metadata after configuration is applied.
 - Requests for an unknown issuer return a non-success response without leaking configured issuer names.
+- `HEAD` errors on public metadata and unknown routes retain status, media type, cache policy and
+  representation length while carrying no body on Actix or Vercel.
 - Every URL in discovery corresponds to a routed endpoint and uses the exact configured issuer origin and path.
 - WebFinger returns the same issuer link for existing-looking and unknown account local parts on a
   configured authority, and no issuer for an unrelated authority.

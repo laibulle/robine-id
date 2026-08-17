@@ -33,6 +33,9 @@ algorithm, and DPoP proof algorithms before calling UserInfo.
 - Successful metadata responses MUST use JSON, allow public cross-origin reads, support ETag
   revalidation, and use bounded shared-cache freshness. Unknown issuer identifiers MUST return 404
   without enumerating configured resources.
+- The public route MUST support only `GET`, bodyless `HEAD`, and `OPTIONS`; excessive preflight
+  methods or headers MUST return a non-cacheable 403 without a CORS grant, while any other method
+  MUST return a non-cacheable 405 with `Allow: GET, HEAD, OPTIONS`.
 
 ## Acceptance Criteria
 

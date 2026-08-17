@@ -28,6 +28,8 @@ aimed at another registered resource.
 - The subject token MUST be active, issued by the selected issuer, and owned by the authenticated
   client. Its issuer, client, subject, grant permission, scopes, resource, and expiry MUST remain
   valid under the active configuration.
+- For a user subject, mapped claims in the exchanged grant MUST be rebuilt from the active user and
+  target scopes; a captured value from the subject token MUST NOT outlive an attribute change.
 - An actor token MUST be a distinct, active Client Credentials token issued to the authenticated
   actor client. Cross-client exchange MUST require it. It identifies the acting party without
   contributing scopes or target authority. Invalid or policy-unacceptable subject and actor tokens
@@ -47,6 +49,11 @@ aimed at another registered resource.
   introspection. Re-exchange with another actor MUST nest the prior chain. Only `sub` and nested
   `act` are retained, and the chain MUST be limited to eight actors. Its `client_id` MUST identify
   the authenticated actor client while `sub` remains the subject-token principal.
+- A delegated service token MUST remain introspectable even though its service `sub` differs from
+  the broker `client_id`. Its machine subject MUST remain public and MUST NOT be mistaken for a
+  same-named configured user. Active-policy validation MUST recheck that the source service still
+  enables Client Credentials, still grants every effective service scope and authorization detail,
+  and still authorizes the broker; removing that delegation makes the exchanged grant inactive.
 - Success MUST return an `access_token` in the issuer-configured format, `issued_token_type`, `token_type`, `expires_in`, and
   `scope`, plus `resource` when selected. It MUST NOT return an ID token or refresh token.
 - The exchanged grant MUST be stored by token digest in PostgreSQL and remain introspectable and
@@ -65,6 +72,8 @@ aimed at another registered resource.
   later exchange fail even when the subject row has not yet expired.
 - DPoP binding cannot be removed or changed during exchange.
 - Actor identity survives opaque storage, JWT issuance, introspection, and bounded nested exchange.
+- A cross-client service exchange remains active and introspectable with the source service as
+  `sub`; removing the source-to-broker allowlist invalidates the stored exchanged grant.
 
 ## Non-Goals
 

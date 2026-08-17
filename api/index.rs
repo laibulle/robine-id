@@ -90,14 +90,22 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
     async move {
         let (parts, body) = request.into_parts();
         let snapshot = application.snapshot();
-        let oversized_cors_origin = parts
-            .headers
-            .get("origin")
-            .and_then(|value| value.to_str().ok())
-            .filter(|origin| {
-                robine_web::public_client_cors_origin_allowed(&snapshot, parts.uri.path(), origin)
-            })
-            .map(str::to_owned);
+        let oversized_cors_origin = if method == "POST" {
+            let mut origins = parts.headers.get_all("origin").iter();
+            let origin = origins.next().and_then(|value| value.to_str().ok());
+            origin
+                .filter(|_| origins.next().is_none())
+                .filter(|origin| {
+                    robine_web::public_client_cors_origin_allowed(
+                        &snapshot,
+                        parts.uri.path(),
+                        origin,
+                    )
+                })
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let body = match http_body_util::BodyExt::collect(http_body_util::Limited::new(
             body,
             MAX_REQUEST_BODY,
@@ -124,6 +132,7 @@ async fn dispatch(request: Request) -> Result<Response<ResponseBody>, Error> {
                     return payload_too_large_response(
                         &request_id,
                         oversized_cors_origin.as_deref(),
+                        method == "HEAD",
                     );
                 }
                 return Err(error);
@@ -290,6 +299,7 @@ impl ActixWorker {
         let request_id = input.request_id.clone();
         let started_at = input.started_at;
         let method = HttpMethodClass::from_method(&input.method);
+        let head = input.method == "HEAD";
         let (response, receiver) = oneshot::channel();
         if let Err(error) = self.sender.try_send(WorkerJob { input, response }) {
             let reason = match error {
@@ -305,7 +315,7 @@ impl ActixWorker {
                 reason,
                 "Vercel request rejected before Actix dispatch"
             );
-            return service_unavailable_response(&request_id);
+            return service_unavailable_response(&request_id, head);
         }
         match receiver.await {
             Ok(Ok(response)) => function_response_to_vercel(response),
@@ -319,7 +329,7 @@ impl ActixWorker {
                     diagnostic = %error,
                     "Actix worker could not produce a response"
                 );
-                service_unavailable_response(&request_id)
+                service_unavailable_response(&request_id, head)
             }
             Err(_) => {
                 self.application
@@ -331,7 +341,7 @@ impl ActixWorker {
                     reason = "worker_stopped",
                     "Actix worker stopped before completing a request"
                 );
-                service_unavailable_response(&request_id)
+                service_unavailable_response(&request_id, head)
             }
         }
     }
@@ -375,10 +385,13 @@ fn function_response_to_vercel(
 fn payload_too_large_response(
     request_id: &str,
     cors_origin: Option<&str>,
+    head: bool,
 ) -> Result<Response<ResponseBody>, Error> {
+    let body = serde_json::json!({"error": "payload_too_large"}).to_string();
     let mut builder = Response::builder()
         .status(413)
         .header("content-type", "application/json")
+        .header("content-length", body.len())
         .header("cache-control", "no-store")
         .header("pragma", "no-cache")
         .header("x-request-id", request_id)
@@ -398,15 +411,18 @@ fn payload_too_large_response(
     for &(name, value) in robine_web::SECURITY_HEADERS {
         builder = builder.header(name, value);
     }
-    Ok(builder.body(ResponseBody::from(
-        serde_json::json!({"error": "payload_too_large"}).to_string(),
-    ))?)
+    Ok(builder.body(ResponseBody::from(if head { String::new() } else { body }))?)
 }
 
-fn service_unavailable_response(request_id: &str) -> Result<Response<ResponseBody>, Error> {
+fn service_unavailable_response(
+    request_id: &str,
+    head: bool,
+) -> Result<Response<ResponseBody>, Error> {
+    let body = serde_json::json!({"error": "temporarily_unavailable"}).to_string();
     let mut builder = Response::builder()
         .status(503)
         .header("content-type", "application/json")
+        .header("content-length", body.len())
         .header("cache-control", "no-store")
         .header("pragma", "no-cache")
         .header("retry-after", "1")
@@ -415,9 +431,7 @@ fn service_unavailable_response(request_id: &str) -> Result<Response<ResponseBod
     for &(name, value) in robine_web::SECURITY_HEADERS {
         builder = builder.header(name, value);
     }
-    Ok(builder.body(ResponseBody::from(
-        serde_json::json!({"error": "temporarily_unavailable"}).to_string(),
-    ))?)
+    Ok(builder.body(ResponseBody::from(if head { String::new() } else { body }))?)
 }
 
 #[cfg(test)]
@@ -563,6 +577,165 @@ mod tests {
                 .get("x-request-id")
                 .and_then(|value| value.to_str().ok()),
             Some("vercel_method_not_allowed.123")
+        );
+
+        let head = worker
+            .dispatch(FunctionRequest {
+                method: "HEAD".to_owned(),
+                uri: "/default/token".to_owned(),
+                headers: vec![],
+                body: vec![],
+                request_id: "vercel_method_not_allowed.head".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel HEAD method negotiation response");
+        assert_eq!(head.status(), 405);
+        assert_eq!(
+            head.headers()
+                .get("allow")
+                .and_then(|value| value.to_str().ok()),
+            Some("POST, OPTIONS")
+        );
+        assert!(
+            head.headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0))
+        );
+        assert!(
+            http_body_util::BodyExt::collect(head.into_body())
+                .await
+                .expect("HEAD method negotiation body")
+                .to_bytes()
+                .is_empty()
+        );
+
+        let public_metadata = worker
+            .dispatch(FunctionRequest {
+                method: "PUT".to_owned(),
+                uri: "/default/.well-known/openid-configuration".to_owned(),
+                headers: vec![],
+                body: vec![],
+                request_id: "vercel_public_metadata_method_not_allowed.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel public metadata method negotiation response");
+        assert_eq!(public_metadata.status(), 405);
+        assert_eq!(
+            public_metadata
+                .headers()
+                .get("allow")
+                .and_then(|value| value.to_str().ok()),
+            Some("GET, HEAD, OPTIONS")
+        );
+        assert_eq!(
+            public_metadata
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let rejected_public_preflight = worker
+            .dispatch(FunctionRequest {
+                method: "OPTIONS".to_owned(),
+                uri: "/default/.well-known/openid-configuration".to_owned(),
+                headers: vec![
+                    ("origin".to_owned(), b"https://browser.example".to_vec()),
+                    ("access-control-request-method".to_owned(), b"POST".to_vec()),
+                    (
+                        "access-control-request-headers".to_owned(),
+                        b"Authorization".to_vec(),
+                    ),
+                ],
+                body: vec![],
+                request_id: "vercel_public_metadata_preflight_rejected.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel rejected public metadata preflight");
+        assert_eq!(rejected_public_preflight.status(), 403);
+        assert_eq!(
+            rejected_public_preflight
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        assert!(
+            !rejected_public_preflight
+                .headers()
+                .contains_key("access-control-allow-origin")
+        );
+        assert!(
+            http_body_util::BodyExt::collect(rejected_public_preflight.into_body())
+                .await
+                .expect("rejected public metadata preflight body")
+                .to_bytes()
+                .is_empty()
+        );
+
+        let webfinger = worker
+            .dispatch(FunctionRequest {
+                method: "GET".to_owned(),
+                uri: "/.well-known/webfinger?rel=missing-resource".to_owned(),
+                headers: vec![],
+                body: vec![],
+                request_id: "vercel_webfinger_rejection.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel malformed WebFinger response");
+        assert_eq!(webfinger.status(), 400);
+        assert_eq!(
+            webfinger
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/jrd+json")
+        );
+        assert_eq!(
+            webfinger
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("*")
+        );
+        assert_eq!(
+            webfinger
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let session_origin = worker
+            .dispatch(FunctionRequest {
+                method: "GET".to_owned(),
+                uri: "/default/check-session/origin?client_id=missing-origin".to_owned(),
+                headers: vec![],
+                body: vec![],
+                request_id: "vercel_session_origin_rejection.123".to_owned(),
+                started_at: Instant::now(),
+            })
+            .await
+            .expect("Vercel malformed session-origin response");
+        assert_eq!(session_origin.status(), 400);
+        assert_eq!(
+            session_origin
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        assert!(
+            http_body_util::BodyExt::collect(session_origin.into_body())
+                .await
+                .expect("session-origin rejection body")
+                .to_bytes()
+                .is_empty()
         );
     }
 
@@ -876,7 +1049,7 @@ mod tests {
 
     #[actix_web::test]
     async fn converts_bounded_adapter_rejections_to_secure_responses() {
-        let response = payload_too_large_response("vercel_limit.123", None)
+        let response = payload_too_large_response("vercel_limit.123", None, false)
             .expect("Vercel rejection response");
         assert_eq!(response.status(), 413);
         assert_eq!(
@@ -901,10 +1074,28 @@ mod tests {
             Some("no-cache")
         );
         assert!(response.headers().contains_key("content-security-policy"));
+        assert!(
+            response
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0))
+        );
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("adapter rejection body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("adapter rejection JSON"),
+            serde_json::json!({"error": "payload_too_large"})
+        );
 
-        let response =
-            payload_too_large_response("vercel_cors_limit.123", Some("http://localhost:4002"))
-                .expect("CORS-aware Vercel rejection response");
+        let response = payload_too_large_response(
+            "vercel_cors_limit.123",
+            Some("http://localhost:4002"),
+            false,
+        )
+        .expect("CORS-aware Vercel rejection response");
         assert_eq!(
             response
                 .headers()
@@ -925,6 +1116,23 @@ mod tests {
                 .get("cross-origin-resource-policy")
                 .and_then(|value| value.to_str().ok()),
             Some("cross-origin")
+        );
+
+        let head = payload_too_large_response("vercel_limit.head", None, true)
+            .expect("Vercel HEAD rejection response");
+        assert_eq!(head.status(), 413);
+        assert!(
+            head.headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0))
+        );
+        assert!(
+            http_body_util::BodyExt::collect(head.into_body())
+                .await
+                .expect("HEAD adapter rejection body")
+                .to_bytes()
+                .is_empty()
         );
     }
 
@@ -958,7 +1166,7 @@ mod tests {
 
         let response = worker
             .dispatch(FunctionRequest {
-                method: "GET".to_owned(),
+                method: "HEAD".to_owned(),
                 uri: "/health/live".to_owned(),
                 headers: vec![],
                 body: vec![],
@@ -999,11 +1207,25 @@ mod tests {
         );
         assert!(response.headers().contains_key("content-security-policy"));
         assert!(
+            response
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0))
+        );
+        assert!(
+            http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .expect("HEAD overload body")
+                .to_bytes()
+                .is_empty()
+        );
+        assert!(
             worker
                 .application
                 .metrics()
                 .render("overload-test", false)
-                .contains("robine_id_http_method_requests_total{method=\"GET\"} 1")
+                .contains("robine_id_http_method_requests_total{method=\"HEAD\"} 1")
         );
     }
 

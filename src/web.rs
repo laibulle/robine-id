@@ -65,11 +65,16 @@ const APP_JS: &str = r#"document.addEventListener("click", event => {
   const toggle = event.target.closest("[data-password-toggle]");
   if (!toggle) return;
   const input = toggle.parentElement.querySelector("input");
+  if (!input) return;
   const revealing = input.type === "password";
   input.type = revealing ? "text" : "password";
   const label = revealing ? toggle.dataset.hideLabel : toggle.dataset.showLabel;
   toggle.textContent = label;
   toggle.setAttribute("aria-label", label);
+  toggle.setAttribute("aria-pressed", revealing ? "true" : "false");
+});
+document.querySelectorAll("[data-password-toggle]").forEach(toggle => {
+  toggle.hidden = false;
 });
 document.addEventListener("submit", event => {
   const form = event.target;
@@ -82,6 +87,10 @@ document.addEventListener("submit", event => {
   form.setAttribute("aria-busy", "true");
   const submitter = event.submitter || form.querySelector('button[type="submit"], input[type="submit"]');
   if (submitter) submitter.classList.add("is-submitting");
+  const status = form.dataset.submitStatusId
+    ? document.getElementById(form.dataset.submitStatusId)
+    : null;
+  if (status) status.textContent = form.dataset.submittingLabel || "";
   form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach(control => {
     control.setAttribute("aria-disabled", "true");
   });
@@ -396,6 +405,7 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
             web::resource($path)
                 .wrap(middleware::Compress::default())
                 .route(web::get().to($handler))
+                .default_service(web::to(get_method_not_allowed))
         };
     }
     macro_rules! compressed_get_head {
@@ -404,6 +414,7 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
                 .wrap(middleware::Compress::default())
                 .route(web::get().to($handler))
                 .route(web::head().to($handler))
+                .default_service(web::to(get_head_method_not_allowed))
         };
     }
     macro_rules! compressed_metadata {
@@ -413,6 +424,7 @@ pub fn configure(configuration: &mut web::ServiceConfig) {
                 .route(web::get().to($handler))
                 .route(web::head().to($handler))
                 .route(web::method(actix_web::http::Method::OPTIONS).to(public_metadata_options))
+                .default_service(web::to(get_head_options_method_not_allowed))
         };
     }
 
@@ -603,7 +615,13 @@ fn query_rejection(
         reason = "malformed_query",
         "request query rejected"
     );
-    let response = browser_request_rejection(request, "The request is incomplete or malformed");
+    let response = if request.path() == "/.well-known/webfinger" {
+        webfinger_query_error_response(request)
+    } else if request.path().ends_with("/check-session/origin") {
+        no_store_empty_response(StatusCode::BAD_REQUEST)
+    } else {
+        browser_request_rejection(request, "The request is incomplete or malformed")
+    };
     actix_web::error::InternalError::from_response(error, response).into()
 }
 
@@ -1197,7 +1215,63 @@ async fn metrics(application: web::Data<Application>) -> impl Responder {
     response
 }
 
-async fn public_metadata_options() -> impl Responder {
+fn single_request_header<'a>(
+    request: &'a HttpRequest,
+    name: &actix_web::http::header::HeaderName,
+) -> Result<Option<&'a str>, ()> {
+    let mut values = request.headers().get_all(name);
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    value.to_str().map(Some).map_err(|_| ())
+}
+
+fn cors_requested_method_allowed(request: &HttpRequest, allowed: &[&str]) -> bool {
+    single_request_header(
+        request,
+        &actix_web::http::header::ACCESS_CONTROL_REQUEST_METHOD,
+    )
+    .is_ok_and(|method| method.is_some_and(|method| allowed.contains(&method)))
+}
+
+fn cors_requested_headers_allowed(request: &HttpRequest, allowed: &[&str]) -> bool {
+    match single_request_header(
+        request,
+        &actix_web::http::header::ACCESS_CONTROL_REQUEST_HEADERS,
+    ) {
+        Ok(None) => true,
+        Ok(Some(headers)) => headers.split(',').all(|header| {
+            let header = header.trim();
+            allowed
+                .iter()
+                .any(|allowed| header.eq_ignore_ascii_case(allowed))
+        }),
+        Err(()) => false,
+    }
+}
+
+fn request_origin(request: &HttpRequest) -> Option<&str> {
+    single_request_header(request, &actix_web::http::header::ORIGIN)
+        .ok()
+        .flatten()
+}
+
+async fn public_metadata_options(request: HttpRequest) -> impl Responder {
+    let requested_method_supported = match single_request_header(
+        &request,
+        &actix_web::http::header::ACCESS_CONTROL_REQUEST_METHOD,
+    ) {
+        Ok(None) => true,
+        Ok(Some(method)) => matches!(method, "GET" | "HEAD"),
+        Err(()) => false,
+    };
+    let requested_headers_supported = cors_requested_headers_allowed(&request, &["if-none-match"]);
+    if !requested_method_supported || !requested_headers_supported {
+        return no_store_empty_response(StatusCode::FORBIDDEN);
+    }
     HttpResponse::NoContent()
         .insert_header((actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"))
         .insert_header((
@@ -1225,7 +1299,12 @@ async fn discovery(
     let snapshot = application.snapshot();
     match DiscoveryDocument::build(&snapshot, &path.into_inner()) {
         Some(document) => cacheable_json_response(&request, json!(document)),
-        None => oauth_error(StatusCode::NOT_FOUND, "invalid_request", "unknown issuer"),
+        None => oauth_error_for_request(
+            &request,
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "unknown issuer",
+        ),
     }
 }
 
@@ -1239,7 +1318,12 @@ async fn oauth_authorization_server_metadata(
         // RFC 8414 allows extension metadata. OIDC discovery remains the canonical superset so
         // the two public metadata endpoints cannot drift.
         Some(document) => cacheable_json_response(&request, json!(document)),
-        None => oauth_error(StatusCode::NOT_FOUND, "invalid_request", "unknown issuer"),
+        None => oauth_error_for_request(
+            &request,
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "unknown issuer",
+        ),
     }
 }
 
@@ -1341,7 +1425,12 @@ async fn protected_resource_metadata(
 ) -> HttpResponse {
     let snapshot = application.snapshot();
     let Some(document) = ProtectedResourceMetadata::build(&snapshot, &path.into_inner()) else {
-        return oauth_error(StatusCode::NOT_FOUND, "invalid_request", "unknown resource");
+        return oauth_error_for_request(
+            &request,
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "unknown resource",
+        );
     };
     cacheable_json_response(&request, json!(document))
 }
@@ -1473,6 +1562,30 @@ fn webfinger_response(request: &HttpRequest, status: StatusCode, body: Value) ->
             .headers_mut()
             .insert(actix_web::http::header::ETAG, etag);
     }
+    response.headers_mut().insert(
+        actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        actix_web::http::header::HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        actix_web::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+        actix_web::http::header::HeaderValue::from_static("cross-origin"),
+    );
+    response
+}
+
+fn webfinger_query_error_response(request: &HttpRequest) -> HttpResponse {
+    let body = json!({"subject": "", "links": []}).to_string();
+    let mut response = if request.method() == actix_web::http::Method::HEAD {
+        HttpResponse::BadRequest()
+            .content_type("application/jrd+json")
+            .insert_header((actix_web::http::header::CONTENT_LENGTH, body.len()))
+            .finish()
+    } else {
+        HttpResponse::BadRequest()
+            .content_type("application/jrd+json")
+            .body(body)
+    };
+    prevent_caching(&mut response);
     response.headers_mut().insert(
         actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
         actix_web::http::header::HeaderValue::from_static("*"),
@@ -5397,6 +5510,21 @@ fn authentication_context_satisfies(
     !client_requires_mfa(client) || mfa_verified
 }
 
+fn initial_user_grant_context_active(
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    client: &crate::configuration::Client,
+    subject: &str,
+    auth_time: Option<i64>,
+    mfa_verified: bool,
+) -> bool {
+    auth_time.is_some_and(|auth_time| auth_time >= 0)
+        && snapshot
+            .user_for_issuer(issuer_id, subject)
+            .is_some_and(|user| user.totp_secret_reference.is_none() || mfa_verified)
+        && authentication_context_satisfies(client, mfa_verified)
+}
+
 fn authorization_authentication_context_satisfies(
     client: &crate::configuration::Client,
     authorization: &AuthorizationRequest,
@@ -6333,29 +6461,10 @@ async fn token_options(
     if snapshot.issuer(&issuer_id).is_none() {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
     }
-    let requested_method = request
-        .headers()
-        .get("access-control-request-method")
-        .and_then(|value| value.to_str().ok());
-    let requested_headers_supported = request
-        .headers()
-        .get("access-control-request-headers")
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|headers| {
-            headers.split(',').all(|header| {
-                matches!(
-                    header.trim().to_ascii_lowercase().as_str(),
-                    "content-type" | "dpop"
-                )
-            })
-        });
-    let origin = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok());
-    if !requested_method.is_some_and(|method| method.eq_ignore_ascii_case("POST"))
-        || !requested_headers_supported
-        || !origin.is_some_and(|origin| token_origin_allowed(&snapshot, &issuer_id, origin, None))
+    if !cors_requested_method_allowed(&request, &["POST"])
+        || !cors_requested_headers_allowed(&request, &["content-type", "dpop"])
+        || !request_origin(&request)
+            .is_some_and(|origin| token_origin_allowed(&snapshot, &issuer_id, origin, None))
     {
         return no_store_empty_response(StatusCode::FORBIDDEN);
     }
@@ -6387,26 +6496,9 @@ async fn revocation_options(
     if snapshot.issuer(&issuer_id).is_none() {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
     }
-    let requested_method = request
-        .headers()
-        .get("access-control-request-method")
-        .and_then(|value| value.to_str().ok());
-    let requested_headers_supported = request
-        .headers()
-        .get("access-control-request-headers")
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|headers| {
-            headers
-                .split(',')
-                .all(|header| header.trim().eq_ignore_ascii_case("content-type"))
-        });
-    let origin = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok());
-    if !requested_method.is_some_and(|method| method.eq_ignore_ascii_case("POST"))
-        || !requested_headers_supported
-        || !origin
+    if !cors_requested_method_allowed(&request, &["POST"])
+        || !cors_requested_headers_allowed(&request, &["content-type"])
+        || !request_origin(&request)
             .is_some_and(|origin| revocation_origin_allowed(&snapshot, &issuer_id, origin, None))
     {
         return no_store_empty_response(StatusCode::FORBIDDEN);
@@ -6690,9 +6782,14 @@ async fn exchange_device_code_grant(
     let currently_valid = grant.issuer == issuer.url.trim_end_matches('/')
         && grant.client_id == client.id
         && grant.expires_at > Utc::now()
-        && snapshot
-            .user_for_issuer(&issuer.id, &grant.subject)
-            .is_some()
+        && initial_user_grant_context_active(
+            snapshot,
+            &issuer.id,
+            client,
+            &grant.subject,
+            grant.auth_time,
+            grant.mfa_verified,
+        )
         && grant.scopes.iter().any(|scope| scope == "openid")
         && grant
             .scopes
@@ -6727,7 +6824,15 @@ async fn exchange_device_code_grant(
     };
 
     let dpop_jkt = dpop.map(|proof| proof.jkt.clone());
-    let claims = refresh_claims(snapshot, &grant.scopes, grant.claims);
+    let claims = refreshed_grant_claims(
+        snapshot,
+        &issuer.id,
+        &grant.subject,
+        DEVICE_CODE_GRANT,
+        grant.auth_time,
+        &grant.scopes,
+        grant.claims,
+    );
     let refresh_token = if grant.scopes.iter().any(|scope| scope == "offline_access") {
         if !client
             .grant_types
@@ -6881,6 +6986,19 @@ async fn exchange_authorization_code_grant(
         || grant.issuer != issuer.url.trim_end_matches('/')
         || grant.client_id != client.id
         || grant.redirect_uri != redirect_uri
+        || !initial_user_grant_context_active(
+            snapshot,
+            &issuer.id,
+            client,
+            &grant.subject,
+            grant.auth_time,
+            grant.mfa_verified,
+        )
+        || !grant.scopes.iter().any(|scope| scope == "openid")
+        || grant
+            .scopes
+            .iter()
+            .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
         || grant
             .resource
             .as_ref()
@@ -6926,6 +7044,15 @@ async fn exchange_authorization_code_grant(
             "the DPoP proof does not match the authorization grant",
         );
     }
+    let claims = refreshed_grant_claims(
+        snapshot,
+        &issuer.id,
+        &grant.subject,
+        "authorization_code",
+        grant.auth_time,
+        &grant.scopes,
+        grant.claims.clone(),
+    );
     let access_dpop_jkt = dpop.map(|proof| proof.jkt.clone());
     let refresh_token = if grant.scopes.iter().any(|scope| scope == "offline_access") {
         if !client
@@ -6951,7 +7078,7 @@ async fn exchange_authorization_code_grant(
             session_id: grant.session_id.clone(),
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
-            claims: grant.claims.clone(),
+            claims: claims.clone(),
             authorization_details: authorization_details.clone(),
             expires_at: Utc::now() + Duration::seconds(issuer.token_policy.refresh_token_lifetime),
         };
@@ -6985,7 +7112,7 @@ async fn exchange_authorization_code_grant(
             nonce: grant.nonce,
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
-            claims: grant.claims,
+            claims,
             authorization_details,
         },
         refresh_token,
@@ -7131,6 +7258,8 @@ async fn exchange_refresh_token_grant(
     let currently_valid = snapshot
         .user_for_issuer(&issuer.id, &grant.subject)
         .is_some()
+        && grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
+        && grant.scopes.iter().any(|scope| scope == "openid")
         && grant
             .resource
             .as_ref()
@@ -7150,7 +7279,15 @@ async fn exchange_refresh_token_grant(
             "refresh token grant is no longer active",
         );
     }
-    grant.claims = refresh_claims(snapshot, &grant.scopes, grant.claims);
+    grant.claims = refreshed_grant_claims(
+        snapshot,
+        &issuer.id,
+        &grant.subject,
+        "refresh_token",
+        grant.auth_time,
+        &grant.scopes,
+        grant.claims,
+    );
     issue_token_response(
         issuer_id,
         snapshot,
@@ -7606,6 +7743,15 @@ async fn exchange_access_token_grant(
         },
         None => subject.actor.clone(),
     };
+    let claims = refreshed_grant_claims(
+        snapshot,
+        &issuer.id,
+        &subject.subject,
+        &subject.grant_type,
+        subject.auth_time,
+        &scopes,
+        subject.claims.clone(),
+    );
     let exchanged_grant = AccessGrant {
         issuer: subject.issuer,
         subject: subject.subject,
@@ -7616,7 +7762,7 @@ async fn exchange_access_token_grant(
         dpop_jkt: dpop_jkt.clone(),
         auth_time: subject.auth_time,
         mfa_verified: subject.mfa_verified,
-        claims: subject.claims,
+        claims,
         authorization_details: authorization_details.clone(),
         actor: actor_claim,
         expires_at: now + Duration::seconds(expires_in),
@@ -7659,11 +7805,20 @@ async fn exchange_access_token_grant(
     }
 }
 
-fn refresh_claims(
+fn refreshed_grant_claims(
     snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    subject: &str,
+    grant_type: &str,
+    auth_time: Option<i64>,
     scopes: &[String],
     claims: Value,
 ) -> Value {
+    if grant_uses_user_subject(grant_type, auth_time)
+        && let Some(user) = snapshot.user_for_issuer(issuer_id, subject)
+    {
+        return Value::Object(tokens::mapped_claims(snapshot, user, scopes));
+    }
     let Value::Object(mut claims) = claims else {
         return json!({});
     };
@@ -7675,6 +7830,28 @@ fn refresh_claims(
             .is_some_and(|mapping| scopes.contains(&mapping.scope))
     });
     Value::Object(claims)
+}
+
+fn grant_uses_user_subject(grant_type: &str, auth_time: Option<i64>) -> bool {
+    matches!(
+        grant_type,
+        "authorization_code" | "refresh_token" | DEVICE_CODE_GRANT
+    ) || (grant_type == TOKEN_EXCHANGE_GRANT && auth_time.is_some())
+}
+
+fn external_access_grant_subject(
+    snapshot: &crate::configuration::Snapshot,
+    issuer: &str,
+    client: &crate::configuration::Client,
+    grant_type: &str,
+    auth_time: Option<i64>,
+    subject: &str,
+) -> Result<String, crate::pairwise::PairwiseSubjectError> {
+    if grant_uses_user_subject(grant_type, auth_time) {
+        crate::pairwise::external_subject(snapshot, issuer, client, subject)
+    } else {
+        Ok(subject.to_owned())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -7734,8 +7911,14 @@ async fn issue_access_credential(
     let client = snapshot
         .client_for_issuer(&issuer.id, &grant.client_id)
         .expect("token grant references a configured client");
-    let external_subject =
-        crate::pairwise::external_subject(snapshot, &grant.issuer, client, &grant.subject)?;
+    let external_subject = external_access_grant_subject(
+        snapshot,
+        &grant.issuer,
+        client,
+        &grant.grant_type,
+        grant.auth_time,
+        &grant.subject,
+    )?;
     let token = tokens::issue_access_token(
         &key,
         &tokens::AccessTokenInput {
@@ -7992,10 +8175,12 @@ async fn introspect_token(
             let token_client = snapshot
                 .client_for_issuer(&issuer.id, &grant.client_id)
                 .expect("active introspection grant references a configured client");
-            match crate::pairwise::external_subject(
+            match external_access_grant_subject(
                 &snapshot,
                 &grant.issuer,
                 token_client,
+                &grant.grant_type,
+                grant.auth_time,
                 &grant.subject,
             ) {
                 Ok(subject) => Some(subject),
@@ -8244,10 +8429,15 @@ async fn jwks(
     let issuer_id = path.into_inner();
     let snapshot = application.snapshot();
     let Some(issuer) = snapshot.issuer(&issuer_id) else {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+        return json_response_for_request(
+            &request,
+            StatusCode::NOT_FOUND,
+            json!({"error": "not_found"}),
+        );
     };
     let Some(database) = application.database() else {
-        return json_response(
+        return json_response_for_request(
+            &request,
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error": "database_unavailable"}),
         );
@@ -8265,7 +8455,8 @@ async fn jwks(
         ),
         Err(error) => {
             tracing::error!(%error, "failed to load JWKS");
-            json_response(
+            json_response_for_request(
+                &request,
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({"error": "temporarily_unavailable"}),
             )
@@ -8461,7 +8652,18 @@ async fn user_info_inner(
                 return response;
             }
         };
-    let mut claims = grant.claims.as_object().cloned().unwrap_or_default();
+    let mut claims = refreshed_grant_claims(
+        &snapshot,
+        &issuer_id,
+        &grant.subject,
+        &grant.grant_type,
+        grant.auth_time,
+        &grant.scopes,
+        grant.claims.clone(),
+    )
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
     claims.insert("sub".to_owned(), json!(external_subject));
     let mut response = if client.userinfo_signed_response_alg.as_deref() == Some("RS256") {
         let issuer = snapshot
@@ -8581,29 +8783,9 @@ async fn user_info_options(
     if snapshot.issuer(&issuer_id).is_none() {
         return json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
     }
-    let requested_method = request
-        .headers()
-        .get("access-control-request-method")
-        .and_then(|value| value.to_str().ok());
-    let requested_headers_supported = request
-        .headers()
-        .get("access-control-request-headers")
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|headers| {
-            headers.split(',').all(|header| {
-                matches!(
-                    header.trim().to_ascii_lowercase().as_str(),
-                    "authorization" | "content-type" | "dpop"
-                )
-            })
-        });
-    let origin = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok());
-    if !matches!(requested_method, Some("GET" | "POST"))
-        || !requested_headers_supported
-        || !origin
+    if !cors_requested_method_allowed(&request, &["GET", "POST"])
+        || !cors_requested_headers_allowed(&request, &["authorization", "content-type", "dpop"])
+        || !request_origin(&request)
             .is_some_and(|origin| user_info_origin_allowed(&snapshot, &issuer_id, origin, None))
     {
         return no_store_empty_response(StatusCode::FORBIDDEN);
@@ -8633,14 +8815,9 @@ fn add_user_info_cors(
     issuer_id: &str,
     client_id: Option<&str>,
 ) {
-    let Some(origin) = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .filter(|origin| {
-            registered_redirect_origin_allowed(snapshot, issuer_id, origin, client_id, false)
-        })
-    else {
+    let Some(origin) = request_origin(request).filter(|origin| {
+        registered_redirect_origin_allowed(snapshot, issuer_id, origin, client_id, false)
+    }) else {
         return;
     };
     let Ok(origin) = actix_web::http::header::HeaderValue::from_str(origin) else {
@@ -8679,10 +8856,7 @@ fn add_token_cors(
     issuer_id: &str,
     client_id: Option<&str>,
 ) {
-    let Some(origin) = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
+    let Some(origin) = request_origin(request)
         .filter(|origin| token_origin_allowed(snapshot, issuer_id, origin, client_id))
     else {
         return;
@@ -8723,10 +8897,7 @@ fn add_revocation_cors(
     issuer_id: &str,
     client_id: Option<&str>,
 ) {
-    let Some(origin) = request
-        .headers()
-        .get(actix_web::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
+    let Some(origin) = request_origin(request)
         .filter(|origin| revocation_origin_allowed(snapshot, issuer_id, origin, client_id))
     else {
         return;
@@ -8820,6 +8991,7 @@ fn valid_user_info_grant(
     };
     grant.issuer == issuer.url.trim_end_matches('/')
         && grant.resource.is_none()
+        && grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
         && snapshot
             .user_for_issuer(issuer_id, &grant.subject)
             .is_some()
@@ -8882,13 +9054,18 @@ fn user_info_step_up_requirement(
     now: i64,
 ) -> Option<UserInfoStepUpRequirement> {
     let client = snapshot.client_for_issuer(issuer_id, &grant.client_id)?;
-    let acr_values = client.required_acr.as_ref().and_then(|required_acr| {
-        let satisfied = match required_acr.as_str() {
+    let required_acr = snapshot
+        .user_for_issuer(issuer_id, &grant.subject)
+        .filter(|user| user.totp_secret_reference.is_some())
+        .map(|_| crate::configuration::MFA_ACR)
+        .or(client.required_acr.as_deref());
+    let acr_values = required_acr.and_then(|required_acr| {
+        let satisfied = match required_acr {
             crate::configuration::PASSWORD_ACR => grant.auth_time.is_some(),
             crate::configuration::MFA_ACR => grant.auth_time.is_some() && grant.mfa_verified,
             _ => true,
         };
-        (!satisfied).then(|| required_acr.clone())
+        (!satisfied).then(|| required_acr.to_owned())
     });
     let max_age = client.max_authentication_age.filter(|max_age| {
         grant
@@ -8958,6 +9135,38 @@ fn active_token_exchange_actor(
         && active_token_exchange_subject(snapshot, issuer, client, grant)
 }
 
+fn active_exchanged_service_subject(
+    snapshot: &crate::configuration::Snapshot,
+    issuer_id: &str,
+    token_client: &crate::configuration::Client,
+    subject: &str,
+    scopes: &[String],
+    authorization_details: &Value,
+) -> bool {
+    snapshot
+        .client_for_issuer(issuer_id, subject)
+        .is_some_and(|subject_client| {
+            subject_client.client_type == "confidential"
+                && subject_client
+                    .grant_types
+                    .iter()
+                    .any(|grant| grant == "client_credentials")
+                && (subject_client.id == token_client.id
+                    || subject_client
+                        .authorized_actor_clients
+                        .iter()
+                        .any(|actor| actor == &token_client.id))
+                && scopes.iter().all(|scope| {
+                    subject_client.scopes.contains(scope) && service_scope_allowed(snapshot, scope)
+                })
+                && authorization_details_currently_allowed(
+                    snapshot,
+                    subject_client,
+                    authorization_details,
+                )
+        })
+}
+
 fn active_token_exchange_subject(
     snapshot: &crate::configuration::Snapshot,
     issuer: &crate::configuration::Issuer,
@@ -8995,8 +9204,11 @@ fn active_token_exchange_subject(
     }
     match grant.grant_type.as_str() {
         "client_credentials" => {
-            grant.actor.is_none()
+            source_client.client_type == "confidential"
+                && grant.actor.is_none()
                 && grant.subject == source_client.id
+                && grant.auth_time.is_none()
+                && !grant.mfa_verified
                 && source_client
                     .grant_types
                     .iter()
@@ -9008,6 +9220,7 @@ fn active_token_exchange_subject(
         }
         "authorization_code" | "refresh_token" | DEVICE_CODE_GRANT => {
             grant.actor.is_none()
+                && grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
                 && snapshot
                     .user_for_issuer(&issuer.id, &grant.subject)
                     .is_some()
@@ -9025,14 +9238,22 @@ fn active_token_exchange_subject(
                     .actor
                     .as_ref()
                     .is_none_or(|_| source_client.actor_token_exchange_allowed)
-                && (snapshot
-                    .user_for_issuer(&issuer.id, &grant.subject)
-                    .is_some()
-                    || (grant.subject == source_client.id
-                        && grant
-                            .scopes
-                            .iter()
-                            .all(|scope| service_scope_allowed(snapshot, scope))))
+                && if grant_uses_user_subject(&grant.grant_type, grant.auth_time) {
+                    grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
+                        && snapshot
+                            .user_for_issuer(&issuer.id, &grant.subject)
+                            .is_some()
+                } else {
+                    !grant.mfa_verified
+                        && active_exchanged_service_subject(
+                            snapshot,
+                            &issuer.id,
+                            source_client,
+                            &grant.subject,
+                            &grant.scopes,
+                            &grant.authorization_details,
+                        )
+                }
         }
         _ => false,
     }
@@ -9068,6 +9289,8 @@ fn active_introspection_grant(
             client.client_type == "confidential"
                 && grant.actor.is_none()
                 && grant.subject == client.id
+                && grant.auth_time.is_none()
+                && !grant.mfa_verified
                 && client
                     .grant_types
                     .iter()
@@ -9079,6 +9302,7 @@ fn active_introspection_grant(
         }
         "authorization_code" | "refresh_token" | DEVICE_CODE_GRANT => {
             grant.actor.is_none()
+                && grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
                 && snapshot
                     .user_for_issuer(&issuer.id, &grant.subject)
                     .is_some()
@@ -9096,14 +9320,22 @@ fn active_introspection_grant(
                     .actor
                     .as_ref()
                     .is_none_or(|_| client.actor_token_exchange_allowed)
-                && (snapshot
-                    .user_for_issuer(&issuer.id, &grant.subject)
-                    .is_some()
-                    || (grant.subject == client.id
-                        && grant
-                            .scopes
-                            .iter()
-                            .all(|scope| service_scope_allowed(snapshot, scope))))
+                && if grant_uses_user_subject(&grant.grant_type, grant.auth_time) {
+                    grant.auth_time.is_some_and(|auth_time| auth_time >= 0)
+                        && snapshot
+                            .user_for_issuer(&issuer.id, &grant.subject)
+                            .is_some()
+                } else {
+                    !grant.mfa_verified
+                        && active_exchanged_service_subject(
+                            snapshot,
+                            &issuer.id,
+                            client,
+                            &grant.subject,
+                            &grant.scopes,
+                            &grant.authorization_details,
+                        )
+                }
         }
         _ => false,
     }
@@ -10036,6 +10268,19 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> HttpRespon
     )
 }
 
+fn oauth_error_for_request(
+    request: &HttpRequest,
+    status: StatusCode,
+    error: &str,
+    description: &str,
+) -> HttpResponse {
+    json_response_for_request(
+        request,
+        status,
+        json!({"error": error, "error_description": description}),
+    )
+}
+
 fn no_store_json_response(status: StatusCode, body: serde_json::Value) -> HttpResponse {
     json_response(status, body)
 }
@@ -10179,12 +10424,17 @@ async fn robots(request: HttpRequest) -> impl Responder {
     cacheable_static_response(&request, "text/plain; charset=utf-8", ROBOTS_TXT, 3600)
 }
 
-async fn not_found() -> impl Responder {
-    json_response(StatusCode::NOT_FOUND, json!({"error": "not_found"}))
+async fn not_found(request: HttpRequest) -> impl Responder {
+    json_response_for_request(
+        &request,
+        StatusCode::NOT_FOUND,
+        json!({"error": "not_found"}),
+    )
 }
 
-fn method_not_allowed(allow: &'static str) -> HttpResponse {
-    let mut response = json_response(
+fn method_not_allowed(request: &HttpRequest, allow: &'static str) -> HttpResponse {
+    let mut response = json_response_for_request(
+        request,
         StatusCode::METHOD_NOT_ALLOWED,
         json!({"error": "method_not_allowed"}),
     );
@@ -10195,20 +10445,32 @@ fn method_not_allowed(allow: &'static str) -> HttpResponse {
     response
 }
 
-async fn post_method_not_allowed() -> HttpResponse {
-    method_not_allowed("POST")
+async fn post_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "POST")
 }
 
-async fn get_post_method_not_allowed() -> HttpResponse {
-    method_not_allowed("GET, POST")
+async fn get_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "GET")
 }
 
-async fn post_options_method_not_allowed() -> HttpResponse {
-    method_not_allowed("POST, OPTIONS")
+async fn get_head_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "GET, HEAD")
 }
 
-async fn get_post_options_method_not_allowed() -> HttpResponse {
-    method_not_allowed("GET, POST, OPTIONS")
+async fn get_head_options_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "GET, HEAD, OPTIONS")
+}
+
+async fn get_post_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "GET, POST")
+}
+
+async fn post_options_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "POST, OPTIONS")
+}
+
+async fn get_post_options_method_not_allowed(request: HttpRequest) -> HttpResponse {
+    method_not_allowed(&request, "GET, POST, OPTIONS")
 }
 
 fn protocol_error_with_ui_locales(
@@ -10272,6 +10534,23 @@ fn html_document_language(document: &str) -> Option<&str> {
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> HttpResponse {
     let mut response = HttpResponse::build(status).json(body);
+    prevent_caching(&mut response);
+    response
+}
+
+fn json_response_for_request(
+    request: &HttpRequest,
+    status: StatusCode,
+    body: serde_json::Value,
+) -> HttpResponse {
+    if request.method() != actix_web::http::Method::HEAD {
+        return json_response(status, body);
+    }
+    let body = body.to_string();
+    let mut response = HttpResponse::build(status)
+        .content_type("application/json")
+        .insert_header((actix_web::http::header::CONTENT_LENGTH, body.len()))
+        .finish();
     prevent_caching(&mut response);
     response
 }
@@ -10800,6 +11079,104 @@ mod tests {
         assert!(
             active_pending_authorization(&snapshot, "default", &pending, "development-user", now,)
                 .is_none()
+        );
+    }
+
+    #[actix_web::test]
+    async fn rebuilds_user_claims_from_active_grant_policy() {
+        let snapshot = Snapshot::load().expect("development configuration should load");
+        let scopes = vec!["openid".to_owned(), "email".to_owned()];
+        let stored = json!({"email": "stale@example.com"});
+
+        assert_eq!(
+            refreshed_grant_claims(
+                &snapshot,
+                "default",
+                "development-user",
+                "authorization_code",
+                Some(Utc::now().timestamp()),
+                &scopes,
+                stored.clone(),
+            )["email"],
+            "admin@example.com"
+        );
+        assert_eq!(
+            refreshed_grant_claims(
+                &snapshot,
+                "default",
+                "development-user",
+                "client_credentials",
+                None,
+                &scopes,
+                stored.clone(),
+            )["email"],
+            "stale@example.com"
+        );
+        assert_eq!(
+            refreshed_grant_claims(
+                &snapshot,
+                "default",
+                "development-user",
+                TOKEN_EXCHANGE_GRANT,
+                None,
+                &scopes,
+                stored.clone(),
+            )["email"],
+            "stale@example.com"
+        );
+
+        let mut pairwise_client = snapshot
+            .client("rust-development-client")
+            .expect("development client")
+            .clone();
+        pairwise_client.subject_type = "pairwise".to_owned();
+        pairwise_client.sector_identifier = Some("client.example".to_owned());
+        assert_eq!(
+            external_access_grant_subject(
+                &snapshot,
+                "https://id.example/default",
+                &pairwise_client,
+                "client_credentials",
+                None,
+                "development-user",
+            )
+            .expect("service subject does not need pairwise configuration"),
+            "development-user"
+        );
+
+        let mut changed_user = snapshot.clone();
+        changed_user
+            .configuration
+            .users
+            .iter_mut()
+            .find(|user| user.id == "development-user")
+            .expect("development user")
+            .email = Some("current@example.com".to_owned());
+        assert_eq!(
+            refreshed_grant_claims(
+                &changed_user,
+                "default",
+                "development-user",
+                "authorization_code",
+                Some(Utc::now().timestamp()),
+                &scopes,
+                stored.clone(),
+            )["email"],
+            "current@example.com"
+        );
+
+        changed_user.configuration.claims.remove("email");
+        assert_eq!(
+            refreshed_grant_claims(
+                &changed_user,
+                "default",
+                "development-user",
+                "authorization_code",
+                Some(Utc::now().timestamp()),
+                &scopes,
+                stored,
+            ),
+            json!({})
         );
     }
 
@@ -11644,6 +12021,70 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn normalizes_malformed_public_and_session_management_queries() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/.well-known/webfinger?rel=missing-resource")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/jrd+json")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("*")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("cross-origin")
+        );
+        assert_not_cacheable(&response);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::CONTENT_LANGUAGE)
+        );
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body, json!({"subject": "", "links": []}));
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/default/check-session/origin?client_id=missing-origin")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_not_cacheable(&response);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::CONTENT_LANGUAGE)
+        );
+        assert!(test::read_body(response).await.is_empty());
+    }
+
+    #[actix_web::test]
     async fn keeps_unready_health_responses_non_sensitive() {
         let app = test::init_service(
             App::new()
@@ -11860,6 +12301,9 @@ mod tests {
         assert!(javascript.contains("event.preventDefault()"));
         assert!(javascript.contains("aria-busy"));
         assert!(javascript.contains("aria-disabled"));
+        assert!(javascript.contains("aria-pressed"));
+        assert!(javascript.contains("toggle.hidden = false"));
+        assert!(javascript.contains("document.getElementById(form.dataset.submitStatusId)"));
         assert!(javascript.contains("autoSubmitForm.requestSubmit()"));
         assert!(!javascript.contains(".disabled = true"));
 
@@ -11873,7 +12317,10 @@ mod tests {
             .expect("stylesheet asset is UTF-8");
         assert!(stylesheet.contains("form[aria-busy=\"true\"]"));
         assert!(stylesheet.contains("button.is-submitting::after"));
+        assert!(stylesheet.contains(".visually-hidden"));
+        assert!(stylesheet.contains("@media (max-width: 20rem)"));
         assert!(stylesheet.contains("@media (prefers-reduced-motion: reduce)"));
+        assert!(!stylesheet.contains("min-width: 320px"));
     }
 
     #[actix_web::test]
@@ -12086,6 +12533,11 @@ mod tests {
         assert!(body.contains("Heureux de vous revoir"));
         assert!(body.contains("Connectez-vous pour continuer avec"));
         assert!(body.contains("data-show-label=\"Afficher\""));
+        assert!(body.contains("aria-controls=\"login_password\" aria-pressed=\"false\" hidden"));
+        assert!(body.contains("data-submit-status-id=\"login-submit-status\""));
+        assert!(
+            body.contains("id=\"login-submit-status\" class=\"visually-hidden\" role=\"status\"")
+        );
         assert!(!body.contains("name=\"login_hint\""));
         assert!(body.contains("name=\"identifier\" type=\"text\" value=\"admin@example.com\""));
         assert!(!body.contains("<nav class=\"legal-links\""));
@@ -12120,10 +12572,61 @@ mod tests {
         assert!(body.contains("autocomplete=\"one-time-code\""));
         assert!(body.contains("inputmode=\"numeric\""));
         assert!(body.contains("pattern=\"[0-9]{6}\""));
+        assert!(body.contains("required autofocus"));
+        assert!(body.contains("data-submitting-label=\"Request in progress\""));
+        assert!(body.contains("data-submit-status-id=\"totp-submit-status\""));
         assert!(body.contains("name=\"mfa_transaction\" value=\"opaque-mfa-transaction\""));
         assert!(!body.contains("Client <unsafe>"));
         assert!(body.contains("Client &#60;unsafe&#62;"));
         assert!(!body.to_ascii_lowercase().contains("secret"));
+    }
+
+    #[actix_web::test]
+    async fn prioritizes_error_focus_and_offers_a_logout_escape_action() {
+        let branding = Branding::default();
+        let messages = branding.messages(None);
+        let totp = TotpTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            client_name: "Client",
+            transaction: "opaque-mfa-transaction",
+            form_action: "/default/authorize",
+            transaction_field: "mfa_transaction",
+            action_value: None,
+            csrf_token: "csrf",
+            has_error: true,
+            error: Some("Invalid code"),
+            messages: &messages,
+            logo: None,
+            favicon: None,
+            font_family: None,
+            support_url: None,
+            privacy_url: None,
+            terms_url: None,
+        }
+        .render()
+        .expect("TOTP error template");
+        assert!(totp.contains("id=\"totp-error\""));
+        assert!(totp.contains("aria-invalid=\"true\" aria-describedby=\"totp-error\""));
+        assert!(!totp.contains("autofocus"));
+
+        let logout = LogoutTemplate {
+            product_name: &branding.product_name,
+            primary_color: &branding.primary_color,
+            issuer_id: "default",
+            transaction: "opaque-logout-transaction",
+            csrf_token: "csrf",
+            messages: &messages,
+            logo: None,
+            favicon: None,
+            font_family: None,
+        }
+        .render()
+        .expect("logout template");
+        assert!(logout.contains("id=\"logout-confirm\""));
+        assert!(logout.contains("id=\"logout-cancel\""));
+        assert!(logout.contains(">Keep me signed in</a>"));
+        assert!(logout.contains("data-submit-status-id=\"logout-submit-status\""));
     }
 
     #[actix_web::test]
@@ -12645,6 +13148,123 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn rejects_ambiguous_non_utf8_and_noncanonical_cors_inputs() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        for (uri, requested_method, requested_headers) in [
+            ("/default/token", "POST", "content-type"),
+            ("/default/par", "POST", "content-type"),
+            ("/default/revoke", "POST", "content-type"),
+            ("/default/userinfo", "GET", "authorization"),
+            ("/default/jwks.json", "GET", "if-none-match"),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri(uri)
+                    .insert_header(("origin", "http://localhost:4002"))
+                    .insert_header(("access-control-request-method", requested_method))
+                    .insert_header((
+                        "access-control-request-headers",
+                        actix_web::http::header::HeaderValue::from_bytes(&[0xff])
+                            .expect("opaque invalid UTF-8 header value"),
+                    ))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_not_cacheable(&response);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            );
+
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri(uri)
+                    .insert_header(("origin", "http://localhost:4002"))
+                    .insert_header((
+                        "access-control-request-method",
+                        requested_method.to_ascii_lowercase(),
+                    ))
+                    .insert_header(("access-control-request-headers", requested_headers))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_not_cacheable(&response);
+
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri(uri)
+                    .insert_header(("origin", "http://localhost:4002"))
+                    .append_header(("access-control-request-method", requested_method))
+                    .append_header(("access-control-request-method", requested_method))
+                    .insert_header(("access-control-request-headers", requested_headers))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_not_cacheable(&response);
+        }
+
+        for (uri, requested_method, requested_headers) in [
+            ("/default/token", "POST", "content-type"),
+            ("/default/par", "POST", "content-type"),
+            ("/default/revoke", "POST", "content-type"),
+            ("/default/userinfo", "GET", "authorization"),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri(uri)
+                    .append_header(("origin", "http://localhost:4002"))
+                    .append_header(("origin", "http://localhost:4002"))
+                    .insert_header(("access-control-request-method", requested_method))
+                    .insert_header(("access-control-request-headers", requested_headers))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_not_cacheable(&response);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            );
+        }
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/default/token")
+                .append_header(("origin", "http://localhost:4002"))
+                .append_header(("origin", "http://localhost:4002"))
+                .set_form([("grant_type", "unsupported")])
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+    }
+
+    #[actix_web::test]
     async fn keeps_default_and_unknown_issuer_errors_non_cacheable() {
         let app = test::init_service(
             App::new()
@@ -12663,6 +13283,33 @@ mod tests {
                     .headers()
                     .contains_key(actix_web::http::header::CONTENT_LANGUAGE)
             );
+        }
+
+        for uri in [
+            "/not-routed",
+            "/missing/jwks.json",
+            "/missing/.well-known/openid-configuration",
+            "/.well-known/oauth-protected-resource/missing/userinfo",
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::HEAD)
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_not_cacheable(&response);
+            assert!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0)),
+                "{uri}"
+            );
+            assert!(test::read_body(response).await.is_empty(), "{uri}");
         }
     }
 
@@ -12735,6 +13382,121 @@ mod tests {
             assert_not_cacheable(&response);
             let body: Value = test::read_body_json(response).await;
             assert_eq!(body, json!({"error": "method_not_allowed"}), "{uri}");
+        }
+
+        for (uri, allow) in [
+            ("/default/authorize", "GET, POST"),
+            ("/default/token", "POST, OPTIONS"),
+            ("/default/introspect", "POST"),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::HEAD)
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::ALLOW)
+                    .and_then(|value| value.to_str().ok()),
+                Some(allow),
+                "{uri}"
+            );
+            assert_not_cacheable(&response);
+            assert!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.parse::<usize>().is_ok_and(|length| length > 0)),
+                "{uri}"
+            );
+            assert!(test::read_body(response).await.is_empty(), "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn negotiates_public_route_methods_and_rejects_excessive_metadata_preflights() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(application()))
+                .configure(configure),
+        )
+        .await;
+
+        for (uri, allow) in [
+            ("/", "GET"),
+            ("/docs", "GET"),
+            ("/metrics", "GET"),
+            ("/default/check-session", "GET"),
+            ("/default/check-session/origin", "GET"),
+            ("/health/live", "GET, HEAD"),
+            ("/health/ready", "GET, HEAD"),
+            ("/assets/app.css", "GET, HEAD"),
+            ("/robots.txt", "GET, HEAD"),
+            ("/.well-known/webfinger", "GET, HEAD, OPTIONS"),
+            (
+                "/default/.well-known/openid-configuration",
+                "GET, HEAD, OPTIONS",
+            ),
+            (
+                "/.well-known/oauth-protected-resource/default/userinfo",
+                "GET, HEAD, OPTIONS",
+            ),
+            (
+                "/.well-known/oauth-authorization-server/default",
+                "GET, HEAD, OPTIONS",
+            ),
+            ("/default/jwks.json", "GET, HEAD, OPTIONS"),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::PUT)
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::ALLOW)
+                    .and_then(|value| value.to_str().ok()),
+                Some(allow),
+                "{uri}"
+            );
+            assert_not_cacheable(&response);
+            let body: Value = test::read_body_json(response).await;
+            assert_eq!(body, json!({"error": "method_not_allowed"}), "{uri}");
+        }
+
+        for (requested_method, requested_headers) in
+            [("POST", "If-None-Match"), ("GET", "Authorization")]
+        {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(actix_web::http::Method::OPTIONS)
+                    .uri("/default/jwks.json")
+                    .insert_header(("origin", "https://browser.example"))
+                    .insert_header(("access-control-request-method", requested_method))
+                    .insert_header(("access-control-request-headers", requested_headers))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_not_cacheable(&response);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            );
+            assert!(test::read_body(response).await.is_empty());
         }
     }
 
@@ -13368,6 +14130,11 @@ mod tests {
         assert!(body.contains("<html lang=\"fr\">"));
         assert!(body.contains("Continuer vers votre application"));
         assert!(body.contains("Continuer en toute sécurité"));
+        assert!(body.contains("data-submitting-label=\"Requête en cours\""));
+        assert!(body.contains("data-submit-status-id=\"authorization-response-submit-status\""));
+        assert!(body.contains(
+            "id=\"authorization-response-submit-status\" class=\"visually-hidden\" role=\"status\""
+        ));
     }
 
     #[actix_web::test]
@@ -13495,6 +14262,83 @@ mod tests {
         ));
         assert!(authorization_authentication_context_satisfies(
             &client, &request, true
+        ));
+    }
+
+    #[actix_web::test]
+    async fn initial_token_issuance_adopts_active_user_and_client_mfa_policy() {
+        let mut snapshot = Snapshot::load().expect("development configuration should load");
+        let client = snapshot
+            .client("rust-development-client")
+            .expect("development client")
+            .clone();
+        let now = Utc::now().timestamp();
+
+        assert!(initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &client,
+            "development-user",
+            Some(now),
+            false,
+        ));
+        assert!(!initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &client,
+            "development-user",
+            None,
+            false,
+        ));
+
+        snapshot
+            .configuration
+            .users
+            .iter_mut()
+            .find(|user| user.id == "development-user")
+            .expect("development user")
+            .totp_secret_reference = Some(json!({"provider": "env", "key": "TEST_TOTP"}));
+        assert!(!initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &client,
+            "development-user",
+            Some(now),
+            false,
+        ));
+        assert!(initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &client,
+            "development-user",
+            Some(now),
+            true,
+        ));
+
+        let mut mfa_client = client;
+        mfa_client.required_acr = Some(crate::configuration::MFA_ACR.to_owned());
+        assert!(!initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &mfa_client,
+            "development-user",
+            Some(now),
+            false,
+        ));
+        snapshot
+            .configuration
+            .users
+            .iter_mut()
+            .find(|user| user.id == "development-user")
+            .expect("development user")
+            .enabled = false;
+        assert!(!initial_user_grant_context_active(
+            &snapshot,
+            "default",
+            &mfa_client,
+            "development-user",
+            Some(now),
+            true,
         ));
     }
 
@@ -14157,6 +15001,7 @@ mod tests {
 
         assert!(body.contains("/assets/app.js"));
         assert!(body.contains("Fine-grained access"));
+        assert!(body.contains("data-submit-status-id=\"consent-submit-status\""));
         assert!(body.contains("Accounts &"));
         assert!(body.contains("identifier"));
         assert!(!body.contains("<script>alert(1)</script>"));
@@ -14457,6 +15302,34 @@ mod tests {
 
         snapshot
             .configuration
+            .clients
+            .iter_mut()
+            .find(|client| client.id == "client")
+            .expect("client")
+            .required_acr = None;
+        snapshot
+            .configuration
+            .users
+            .iter_mut()
+            .find(|user| user.id == "subject")
+            .expect("subject")
+            .totp_secret_reference = Some(json!({"provider": "env", "key": "TEST_TOTP"}));
+        grant.mfa_verified = false;
+        assert_eq!(
+            user_info_step_up_requirement(&snapshot, "default", &grant, now),
+            Some(UserInfoStepUpRequirement {
+                acr_values: Some(crate::configuration::MFA_ACR.to_owned()),
+                max_age: None,
+            })
+        );
+        grant.mfa_verified = true;
+        assert_eq!(
+            user_info_step_up_requirement(&snapshot, "default", &grant, now),
+            None
+        );
+
+        snapshot
+            .configuration
             .users
             .iter_mut()
             .find(|user| user.id == "subject")
@@ -14571,6 +15444,20 @@ mod tests {
             snapshot.issuer("default").expect("issuer"),
             &grant
         ));
+        grant.auth_time = Some(Utc::now().timestamp());
+        assert!(!active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &grant
+        ));
+        grant.auth_time = None;
+        grant.mfa_verified = true;
+        assert!(!active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &grant
+        ));
+        grant.mfa_verified = false;
         grant.authorization_details =
             json!([{"type": "account_information", "actions": ["read_balances"]}]);
         assert!(!active_introspection_grant(
@@ -14875,6 +15762,99 @@ mod tests {
             snapshot.issuer("default").expect("issuer"),
             snapshot.client("broker").expect("client"),
             &subject
+        ));
+    }
+
+    #[actix_web::test]
+    async fn keeps_delegated_service_exchange_grants_active_and_policy_bound() {
+        let mut snapshot = Snapshot::load().expect("development configuration should load");
+        snapshot.configuration.issuers[0]
+            .scopes
+            .push("service.read".to_owned());
+
+        let mut broker = snapshot.configuration.clients[0].clone();
+        broker.id = "service-broker".to_owned();
+        broker.name = "Service broker".to_owned();
+        broker.client_type = "confidential".to_owned();
+        broker.scopes = vec!["service.read".to_owned()];
+        broker.resources = vec!["https://api.example/resource".to_owned()];
+        broker.grant_types = vec![
+            "client_credentials".to_owned(),
+            TOKEN_EXCHANGE_GRANT.to_owned(),
+        ];
+        broker.actor_token_exchange_allowed = true;
+        broker.authorized_actor_clients.clear();
+
+        let mut service = broker.clone();
+        service.id = "source-service".to_owned();
+        service.name = "Source service".to_owned();
+        service.grant_types = vec!["client_credentials".to_owned()];
+        service.actor_token_exchange_allowed = false;
+        service.authorized_actor_clients = vec![broker.id.clone()];
+        snapshot.configuration.clients.push(broker);
+        snapshot.configuration.clients.push(service);
+
+        let grant = AccessGrant {
+            issuer: snapshot.issuer("default").expect("issuer").url.clone(),
+            subject: "source-service".to_owned(),
+            client_id: "service-broker".to_owned(),
+            scopes: vec!["service.read".to_owned()],
+            grant_type: TOKEN_EXCHANGE_GRANT.to_owned(),
+            resource: Some("https://api.example/resource".to_owned()),
+            dpop_jkt: None,
+            auth_time: None,
+            mfa_verified: false,
+            claims: json!({}),
+            authorization_details: Value::Array(vec![]),
+            actor: Some(json!({"sub": "service-broker"})),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+        let introspection_grant = crate::database::IntrospectionGrant {
+            issuer: grant.issuer.clone(),
+            subject: grant.subject.clone(),
+            client_id: grant.client_id.clone(),
+            scopes: grant.scopes.clone(),
+            grant_type: grant.grant_type.clone(),
+            resource: grant.resource.clone(),
+            dpop_jkt: None,
+            auth_time: None,
+            mfa_verified: false,
+            authorization_details: grant.authorization_details.clone(),
+            actor: grant.actor.clone(),
+            expires_at: grant.expires_at,
+            issued_at: Utc::now(),
+        };
+
+        assert!(active_token_exchange_subject(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            snapshot.client("service-broker").expect("broker"),
+            &grant,
+        ));
+        assert!(active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &introspection_grant,
+        ));
+
+        snapshot
+            .configuration
+            .clients
+            .iter_mut()
+            .find(|client| client.id == "source-service")
+            .expect("source service")
+            .authorized_actor_clients
+            .clear();
+        assert!(!active_token_exchange_subject(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            snapshot.client("service-broker").expect("broker"),
+            &grant,
+        ));
+        assert!(!active_introspection_grant(
+            &snapshot,
+            snapshot.issuer("default").expect("issuer"),
+            &introspection_grant,
         ));
     }
 

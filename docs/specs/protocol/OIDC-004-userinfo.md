@@ -19,7 +19,9 @@ issuer-configured presentation format.
 - The subject MUST still resolve to a configured identity.
 - The issuing client, originating authorization or refresh grant, and every granted scope MUST
   remain enabled in the active configuration. A machine token MUST never satisfy UserInfo.
-- A successful response MUST contain `sub` and MAY contain only non-nil claims captured for scopes granted during authorization.
+- A successful response MUST contain `sub` and MAY contain only non-nil claims authorized by the
+  token scopes. Mapped values MUST be rebuilt from the active user and mapping definitions for each
+  response rather than copied from the stored access-token grant.
 - By default a successful response MUST be JSON. A client configured according to OIDC-013 MUST
   instead receive an audience-bound RS256 JWT with `application/jwt` through both GET and POST.
 - Claim values MUST come from validated claim mappings; reserved token claims MUST NOT be injected through configuration.
@@ -27,7 +29,7 @@ issuer-configured presentation format.
 - Bearer and DPoP challenges SHOULD also include the OAUTH-012 `resource_metadata` URL for this exact
   UserInfo endpoint.
 - An otherwise valid token that no longer meets the application's `required_acr` or
-  `max_authentication_age` policy MUST return the OAUTH-013
+  `max_authentication_age` policy, or whose active user now requires TOTP, MUST return the OAUTH-013
   `insufficient_user_authentication` challenge with the unmet `acr_values`, `max_age`, or both.
 - A bound token presented as Bearer, without a valid `ath` proof, with another key, or with a replayed
   proof MUST return HTTP 401 with a DPoP authentication challenge.
@@ -44,6 +46,8 @@ issuer-configured presentation format.
 
 - An access token carrying only `openid` returns `sub` without profile or email claims.
 - Tokens authorized for `profile` or `email` return only the mapped claims associated with those scopes.
+- Changing an active mapped user value changes the next opaque-token UserInfo response; removing
+  its mapping removes the claim without requiring token reissuance.
 - Changing or expiring a token returns the same public `invalid_token` failure.
 - A token issued for one issuer cannot be used at another issuer's UserInfo endpoint.
 - The same bearer credential returns the same claims through GET and POST.

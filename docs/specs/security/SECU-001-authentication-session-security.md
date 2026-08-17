@@ -77,9 +77,15 @@ Interactive authentication sessions resist fixation, forgery, replay, and accide
 - JSON errors, rejected cross-origin preflights, and session-origin validation responses MUST emit
   `Cache-Control: no-store` and `Pragma: no-cache`. Public metadata is cacheable only through its
   dedicated ETag-aware response path.
-- A known OAuth/OIDC protocol route invoked with an unsupported HTTP method MUST return HTTP 405,
-  an exact bounded `Allow` header, and the same non-cacheable JSON error policy. It MUST remain
-  distinguishable from an unknown route's HTTP 404 without exposing issuer or client state.
+- CORS evaluation MUST require a single valid UTF-8 `Origin`, request-method, and requested-headers
+  field wherever each field is required. Duplicate, non-UTF-8, or non-canonical method values MUST
+  be rejected before any access-control grant is emitted.
+- A known public, OAuth, or OIDC protocol route invoked with an unsupported HTTP method MUST return
+  HTTP 405, an exact bounded `Allow` header, and the same non-cacheable JSON error policy. It MUST
+  remain distinguishable from an unknown route's HTTP 404 without exposing issuer or client state.
+- Every `HEAD` response, including 404 and 405 errors, MUST be bodyless while preserving the status,
+  representation media type and non-zero GET-equivalent `Content-Length`. Actix and Vercel MUST
+  preserve the same contract.
 
 ## Session State
 

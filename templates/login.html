@@ -18,7 +18,7 @@
 
         {% if let Some(error) = error %}<div id="login-error" class="error-summary" role="alert" tabindex="-1" data-error-summary><strong>{{ messages.sign_in_error_title }}</strong><span>{{ error }}</span></div>{% endif %}
 
-        <form id="login-form" method="post" action="/{{ issuer_id }}/authorize" class="auth-form">
+        <form id="login-form" method="post" action="/{{ issuer_id }}/authorize" class="auth-form" data-submitting-label="{{ messages.form_submitting }}" data-submit-status-id="login-submit-status">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="transaction" value="{{ transaction }}">
 
@@ -27,10 +27,11 @@
           <label for="login_password">{{ messages.sign_in_password }}</label>
           <div class="password-field">
             <input id="login_password" name="password" type="password" autocomplete="current-password" required{% if has_error %} aria-invalid="true" aria-describedby="login-error"{% endif %}>
-            <button id="login-password-toggle" type="button" class="reveal-password" data-password-toggle data-show-label="{{ messages.sign_in_show_password }}" data-hide-label="{{ messages.sign_in_hide_password }}" aria-label="{{ messages.sign_in_show_password }}">{{ messages.sign_in_show_password }}</button>
+            <button id="login-password-toggle" type="button" class="reveal-password" data-password-toggle data-show-label="{{ messages.sign_in_show_password }}" data-hide-label="{{ messages.sign_in_hide_password }}" aria-label="{{ messages.sign_in_show_password }}" aria-controls="login_password" aria-pressed="false" hidden>{{ messages.sign_in_show_password }}</button>
           </div>
           <button id="login-submit" type="submit" class="primary-action">{{ messages.sign_in_submit }}</button>
         </form>
+        <span id="login-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
         <p class="privacy-note">{{ messages.sign_in_privacy_note }}</p>
         {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
           {% if let Some(url) = support_url %}<a id="login-support-link" href="{{ url }}">{{ messages.support }}</a>{% endif %}

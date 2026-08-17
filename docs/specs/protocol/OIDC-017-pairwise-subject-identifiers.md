@@ -27,7 +27,8 @@ stable local user ID; only protocol-facing subject claims are pseudonymized.
   back-channel logout tokens.
 - Authorization codes, sessions, opaque access-token records, refresh-token families, and audit
   policy checks MUST retain the internal user ID. Client-credentials subjects and actor chains are
-  service identifiers and MUST NOT be pseudonymized.
+  service identifiers and MUST NOT be pseudonymized, including when a service identifier happens
+  to equal a configured local user ID.
 - A missing or weak runtime salt MUST fail subject generation without falling back to the public
   identifier.
 - Discovery MUST advertise `pairwise` in `subject_types_supported` only when at least one configured

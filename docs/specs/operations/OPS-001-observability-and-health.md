@@ -79,6 +79,8 @@ Audit is append-only from the application's perspective. The MVP adapter writes 
   client-, subject-, credential-, or attacker-controlled metric labels.
 - Operators can compare traffic and latency by a fixed method family on Actix and Vercel, including
   requests rejected before Actix dispatch, without admitting arbitrary method labels.
+- Vercel adapter-level body-limit and overload failures preserve the global bodyless `HEAD`
+  contract while retaining the equivalent JSON representation length.
 - UserInfo success is audited only after the response is fully deliverable, and its aggregate
   metric exposes no identity or credential dimensions.
 

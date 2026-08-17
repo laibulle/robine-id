@@ -27,8 +27,8 @@ access-token grants stored by digest in PostgreSQL.
   only an allowed exact origin, expose `WWW-Authenticate`, and remain non-cacheable.
 - Revocation form extraction failures, including missing fields and the shared 16 KiB form limit,
   MUST preserve that exact-origin CORS policy even though rejection occurs before client
-  authentication. A Vercel adapter-level 413 MAY do the same only after validating the path and
-  origin against the active public-client configuration.
+  authentication. A Vercel adapter-level 413 MAY do the same only for POST after validating the
+  path and one unambiguous origin against the active public-client configuration.
 - A client MUST be able to revoke only an access or refresh token issued to that same client and
   issuer. Revoking any refresh token member revokes its complete rotation family.
 - Revocation of a matching token MUST be immediate and shared across every instance using the same
@@ -46,6 +46,9 @@ access-token grants stored by digest in PostgreSQL.
   `Accept` header; plain RFC 7662 JSON remains the default.
 - A client-credentials access grant remains active only while the issuing confidential client still
   enables that grant and every granted service scope remains allowed by both client and issuer.
+- An exchanged service grant remains active only while its machine-subject client remains active,
+  permits Client Credentials, retains its scopes and authorization-detail policy, and still
+  authorizes the broker recorded as the exchanged token's `client_id`.
 - An unknown, expired, revoked, wrong-issuer, or no-longer-valid grant MUST return only
   `{"active":false}` to an authenticated introspector.
 - Invalid client authentication MUST return HTTP 401 with an OAuth `invalid_client` response and a

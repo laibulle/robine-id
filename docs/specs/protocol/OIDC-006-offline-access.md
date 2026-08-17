@@ -22,7 +22,8 @@ requiring the user to maintain a browser session.
   endpoint's strict CORS policy; confidential client credentials MUST NOT be enabled for browser CORS.
 - Every refresh token MUST be an opaque high-entropy credential stored only as a cryptographic hash.
 - Each family MUST remain bound to its issuer, subject, client, original authentication time,
-  consented scopes, captured claims, and an absolute configured expiry.
+  consented scopes, and an absolute configured expiry. Stored claims are historical input only;
+  each successful rotation MUST rebuild mapped values from the active user and mappings.
 - Refresh-token lifetime MUST be independently configurable from 60 through 31,536,000 seconds.
 - A successful refresh MUST atomically consume the presented token and return a new refresh token in
   the same family. Only one concurrent use of one family member may succeed.
@@ -33,8 +34,10 @@ requiring the user to maintain a browser session.
 - The refreshed access token and ID token MUST retain the original issuer, subject, audience, and
   authentication time. The refreshed ID token MUST use a new issue/expiry time and MUST NOT copy the
   original nonce.
+- Rotation MUST retain the original password/TOTP context even when current interactive policy is
+  stronger. It MUST NOT label a password-only family as MFA; UserInfo enforces any resulting step-up.
 - Claims no longer authorized by a narrowed or changed active scope policy MUST be removed before
-  issuing refreshed tokens.
+  issuing refreshed tokens, and changed active user values MUST replace stored values.
 - A deleted user, removed client, removed scope, expired family, explicit revocation, or wrong
   issuer/client binding MUST return `invalid_grant` without disclosing the reason.
 - Token responses MUST disable caching. Tokens and their hashes MUST never appear in logs or

@@ -15,11 +15,13 @@
         <p class="eyebrow">{{ product_name }}</p>
         <h1 id="logout-title">{{ messages.logout_title }}</h1>
         <p class="auth-intro">{{ messages.logout_intro }}</p>
-        <form id="logout-form" method="post" action="/{{ issuer_id }}/logout" class="consent-actions">
+        <form id="logout-form" method="post" action="/{{ issuer_id }}/logout" class="consent-actions" data-submitting-label="{{ messages.form_submitting }}" data-submit-status-id="logout-submit-status">
           <input type="hidden" name="transaction" value="{{ transaction }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button id="logout-confirm" type="submit" class="primary-action full-width">{{ messages.logout_submit }}</button>
+          <a id="logout-cancel" class="secondary-link full-width" href="/">{{ messages.logout_cancel }}</a>
         </form>
+        <span id="logout-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
       </section>
     </main>
   </body>

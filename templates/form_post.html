@@ -15,10 +15,11 @@
         <p class="eyebrow">{{ product_name }}</p>
         <h1 id="form-post-title">{{ messages.form_post_title }}</h1>
         <p class="auth-intro" aria-live="polite">{{ messages.form_post_intro }}</p>
-        <form id="authorization-response-form" method="post" action="{{ redirect_uri }}" class="auth-form" data-auto-submit>
+        <form id="authorization-response-form" method="post" action="{{ redirect_uri }}" class="auth-form" data-auto-submit data-submitting-label="{{ messages.form_submitting }}" data-submit-status-id="authorization-response-submit-status">
           {% for parameter in parameters %}<input type="hidden" name="{{ parameter.0 }}" value="{{ parameter.1 }}">{% endfor %}
           <button id="authorization-response-submit" type="submit" class="primary-action">{{ messages.form_post_submit }}</button>
         </form>
+        <span id="authorization-response-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
       </section>
     </main>
   </body>

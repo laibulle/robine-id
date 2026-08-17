@@ -32,6 +32,9 @@ creating an end-user session or an OpenID identity token.
 - A service token MUST be accepted by introspection while the issuer, client, grant permission,
   scopes, and expiry remain active. The active response MUST expose the client identifier as both
   `client_id` and `sub`.
+- Machine-subject provenance MUST come from the grant type, not from a lookup in the user catalog.
+  A service identifier identical to a configured user identifier MUST therefore remain public,
+  carry no mapped user claims, and never require pairwise-subject key material.
 - UserInfo MUST reject a service token because it represents no end user.
 - The owning client MUST be able to revoke its service token through the standard revocation
   endpoint, with immediate effect across all instances sharing PostgreSQL.

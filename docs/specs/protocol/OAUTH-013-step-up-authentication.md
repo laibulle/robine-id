@@ -21,6 +21,9 @@ longer satisfies the active application policy.
   `auth_time` in the resulting access token.
 - UserInfo MUST first validate the access token and, for a sender-constrained token, its DPoP proof.
   It MUST then compare the stored `auth_time` and authentication context with the current policy.
+- Current policy includes both the client's `required_acr` and whether the active user now has a
+  configured TOTP factor. A password-only token for such a user MUST request the TOTP ACR even when
+  the client itself has no stronger static requirement.
 - A valid token with insufficient strength or recentness MUST return HTTP 401 and the registered
   `insufficient_user_authentication` error in both the JSON body and `WWW-Authenticate` challenge.
 - The challenge MUST carry `acr_values`, `max_age`, or both according to the unmet requirements.
@@ -35,7 +38,7 @@ longer satisfies the active application policy.
 ## Acceptance Criteria
 
 - A password-only token receives an `acr_values=urn:robine-id:acr:password+totp` challenge after
-  the client policy is strengthened to require TOTP.
+  the client policy is strengthened to require TOTP or TOTP is enabled for its active user.
 - A token whose authentication is older than `max_authentication_age` receives the corresponding
   `max_age` challenge, while a token at or inside the boundary remains accepted.
 - When both requirements fail, one challenge contains both parameters.

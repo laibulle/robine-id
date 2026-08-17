@@ -34,6 +34,10 @@ placing the shared authenticator secret in versioned configuration or browser st
 - Both Authorization Code and Device Authorization browser journeys MUST enforce TOTP for a
   configured user. A pre-existing password-only session MUST NOT bypass the second factor after a
   configuration revision enables TOTP for that user.
+- A password-only authorization code or approved Device grant that has not yet produced its first
+  token MUST become invalid if TOTP is enabled for the user or required by the client before token
+  exchange. Already issued access/refresh grants retain their historical context and MUST NOT be
+  silently upgraded; protected UserInfo access instead requires step-up.
 - An interactive client MAY require the TOTP ACR independently of which account signs in. Such a
   policy MUST reject password-only sessions and accounts without a factor, while voluntary
   `acr_values` preferences MUST never downgrade the configured requirement.

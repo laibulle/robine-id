@@ -15,6 +15,9 @@ Robine ID provides a polished, fast, accessible authentication experience across
 - Pages MUST meet WCAG 2.2 AA requirements, including keyboard navigation, visible focus, semantic labels, contrast, and reduced-motion support.
 - Validation MUST be shown near the relevant field and summarized accessibly without clearing valid user input.
 - Password fields MUST support reveal/hide controls and password-manager-compatible autocomplete metadata.
+- Reveal controls MUST remain hidden until the bundled enhancement has registered, so a script
+  failure never leaves a visible inert button. Their pressed state and controlled input MUST be
+  exposed to assistive technology.
 - Authentication pages MUST remain functional without client-side JavaScript unless a configured authentication method inherently requires it.
 - A form-post authorization handoff MUST expose a visible labeled fallback button while also
   submitting automatically when the same-origin bundled script executes.
@@ -31,7 +34,8 @@ Robine ID provides a polished, fast, accessible authentication experience across
 - Every form, key action, and error region MUST have a stable unique DOM identifier suitable for automated tests.
 - Pages MUST have a unique descriptive title and one primary heading.
 - Enhanced form submissions MUST expose an accessible busy state, identify the active submit action visually,
-  and suppress duplicate requests without dropping the selected OAuth decision.
+  announce localized progress through a live status outside the busy form, and suppress duplicate
+  requests without dropping the selected OAuth decision.
 - Interactive targets SHOULD be at least 44 by 44 CSS pixels.
 - Motion MUST be subtle and disabled when `prefers-reduced-motion` requests it. Forced-colors mode MUST preserve boundaries and focus.
 
@@ -55,7 +59,11 @@ consent, device authorization, and logout forms MUST work without it.
 - Browser autofill and password managers can identify both login inputs.
 - Consent approval and denial remain understandable without relying on color.
 - An enhanced form accepts one request per submission, retains the activated submit button's name and
-  value, exposes `aria-busy`, and uses a static rather than animated indicator under reduced motion.
+  value, exposes `aria-busy`, announces progress outside that busy subtree, and uses a static rather
+  than animated indicator under reduced motion.
+- Authentication layout CSS has no fixed 320-pixel minimum width, provides a narrower zoom layout,
+  and keeps long device codes and localized text inside the available inline size.
+- Logout confirmation provides distinct stable controls for ending or retaining the local session.
 
 ## Manual Verification
 

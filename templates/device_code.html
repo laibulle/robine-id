@@ -16,13 +16,14 @@
         <h1 id="device-title">{{ messages.device_title }}</h1>
         <p class="auth-intro">{{ messages.device_intro }}</p>
         {% if let Some(error) = error %}<div id="device-error" class="error-summary" role="alert" tabindex="-1" data-error-summary><strong>{{ messages.sign_in_error_title }}</strong><span>{{ error }}</span></div>{% endif %}
-        <form id="device-code-form" method="post" action="/{{ issuer_id }}/device" class="auth-form">
+        <form id="device-code-form" method="post" action="/{{ issuer_id }}/device" class="auth-form" data-submitting-label="{{ messages.form_submitting }}" data-submit-status-id="device-code-submit-status">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="action" value="verify">
           <label for="device_user_code">{{ messages.device_code }}</label>
           <input id="device_user_code" name="user_code" type="text" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" required{% if has_error %} aria-invalid="true" aria-describedby="device-error"{% else %} autofocus{% endif %}>
           <button id="device-code-submit" type="submit" class="primary-action">{{ messages.device_continue }}</button>
         </form>
+        <span id="device-code-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
         {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
           {% if let Some(url) = support_url %}<a href="{{ url }}">{{ messages.support }}</a>{% endif %}
           {% if let Some(url) = privacy_url %}<a href="{{ url }}">{{ messages.privacy }}</a>{% endif %}

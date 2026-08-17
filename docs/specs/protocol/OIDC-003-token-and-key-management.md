@@ -23,6 +23,12 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - ID tokens MUST carry `auth_time` for the authentication event that established the browser
   session, including when a later authorization reuses that session or requested `max_age`.
 - Token lifetimes, signing algorithm, and claim mappings MUST be configurable within safe validation limits.
+- Before issuing a token from a server-side authorization code, Device grant, refresh family, or
+  token-exchange subject, mapped identity claims MUST be rebuilt from the active user and mappings.
+  Stored values MAY preserve transactional continuity but MUST NOT override a changed active value.
+- Authorization codes and approved Device grants MUST satisfy active user/client MFA policy at
+  first exchange. Refresh and Token Exchange MUST preserve, rather than upgrade, an established
+  authentication context so downstream step-up decisions remain trustworthy.
 - Signing keys MUST have unique `kid` values and public keys MUST be exposed through the configured JWKS endpoint.
 - Exactly one key MUST be active for signing per issuer and algorithm.
 - Previously active public keys MUST remain published after rotation so tokens issued by retained keys remain verifiable.
@@ -51,6 +57,9 @@ Robine ID issues verifiable tokens and supports safe signing-key rotation withou
 - JWKS MUST allow credential-free cross-origin reads with `Access-Control-Allow-Origin: *` and
   `Cross-Origin-Resource-Policy: cross-origin`. Its public route MUST support `GET`, bodyless
   `HEAD`, and an `OPTIONS` preflight limited to `GET, HEAD, OPTIONS` and `If-None-Match`.
+- A JWKS preflight requesting another method or header MUST return a non-cacheable HTTP 403 without
+  an access-control grant. Any other unsupported method MUST return a non-cacheable HTTP 405 with
+  `Allow: GET, HEAD, OPTIONS`.
 - Private signing state MUST be encrypted with AES-256-GCM using key material derived from `KEY_ENCRYPTION_SECRET` (or the compatibility fallback `SECRET_KEY_BASE`) before PostgreSQL persistence.
 - A temporary `KEY_ENCRYPTION_SECRET_PREVIOUS` MAY decrypt existing rows during a staged secret
   rollover. It MUST be at least 32 bytes, differ from the current secret, and never encrypt new

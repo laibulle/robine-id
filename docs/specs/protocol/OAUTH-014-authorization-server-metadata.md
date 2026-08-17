@@ -30,6 +30,9 @@ OpenID Provider discovery.
   `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy: cross-origin`. `GET`, bodyless
   `HEAD`, and an `OPTIONS` preflight limited to `GET, HEAD, OPTIONS` and `If-None-Match` MUST use the
   same public route policy.
+- A preflight requesting another method or header MUST return a non-cacheable HTTP 403 without an
+  access-control grant. Any other unsupported method MUST return a non-cacheable HTTP 405 with
+  `Allow: GET, HEAD, OPTIONS`.
 - Unknown issuer identifiers MUST return a non-cacheable `404 invalid_request` response without
   listing configured issuers.
 

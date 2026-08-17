@@ -72,6 +72,8 @@ token-exchange, UserInfo, and introspection validation fail after the revision a
 PostgreSQL grants are not proactively enumerated or revoked, and a self-contained JWT already
 accepted by an offline resource server remains bounded by its expiry. Re-enabling an identity can
 therefore make an otherwise current server-side grant usable again; use explicit token revocation
-as well when suspension must remain irreversible. Password reset, account recovery, enrollment,
+as well when suspension must remain irreversible. Active server-side code, Device, refresh,
+exchange, and UserInfo paths rebuild mapped claims, so changed user attributes take effect without
+enumerating those grants; already issued self-contained JWTs remain immutable. Password reset, account recovery, enrollment,
 email verification, lockout state, groups, roles, external directories, and identity federation
 are outside the MVP.

@@ -34,6 +34,8 @@ the state needed by the OP iframe.
 - Before accepting a caller, the iframe MUST validate the posted client/origin pair against an
   exact registered redirect origin. Successful validations MAY be cached for the iframe lifetime;
   repeated status checks MUST be calculated locally with Web Crypto and MUST NOT poll the server.
+- A missing or malformed origin-validation query MUST return an empty non-cacheable `400`; it MUST
+  NOT render a localized HTML page, emit `Content-Language`, or disclose client registration state.
 - Malformed messages, opaque origins, unknown clients, unregistered origins, invalid browser state,
   or unavailable browser cryptography MUST return `error` and MUST NOT start reauthentication.
 - The iframe MUST use an external script, disable caching, allow framing, and apply a CSP limited to

@@ -155,7 +155,9 @@ encrypted signing keys are shared through PostgreSQL so the same
 application can run as a conventional Actix server or across Vercel Function invocations.
 Authentication forms use one shared progressive enhancement for password visibility, accessible busy
 feedback, and duplicate-submit suppression. Login, TOTP, consent, device, and logout submissions remain
-fully functional without JavaScript, and enhanced consent keeps the selected approve or deny value intact.
+fully functional without JavaScript, inert reveal controls stay hidden until enhancement is active,
+and enhanced consent keeps the selected approve or deny value intact. Progress is localized and
+announced outside the busy form subtree; the zoom layout has no fixed 320-pixel minimum width.
 Validated authorization parameters never round-trip through hidden login fields. The browser gets
 only an issuer-bound, short-lived, single-use transaction whose hash and request remain in
 PostgreSQL; an invalid password consumes and replaces it.
@@ -163,7 +165,8 @@ Discovery, WebFinger, and JWKS use weak content ETags and bounded browser/CDN ca
 repeatedly transferring unchanged public metadata, including on Vercel.
 Discovery, WebFinger, OAuth and protected-resource metadata, and JWKS also permit credential-free
 reads from any origin. Their bounded preflight exposes only `GET`, `HEAD`, `OPTIONS`, and
-`If-None-Match`; credential-bearing endpoints keep their registered-origin or same-origin policy.
+`If-None-Match`; requests for any other method or header are rejected without CORS permission.
+Credential-bearing endpoints keep their registered-origin or same-origin policy.
 The default favicon, light and dark marks, legacy SVG logo, stylesheet, scripts, and deny-all
 `robots.txt` are embedded in the Rust binary. They need no runtime asset directory and support
 bounded caching, weak content ETags, conditional GET, and bodyless HEAD responses on Actix and Vercel.
@@ -184,7 +187,8 @@ Registered public-client redirect origins can call the token, PAR, and revocatio
 browser through strict POST-only CORS policies. Revocation permits only `Content-Type` and never
 browser `Authorization`; confidential and unrelated origins are never granted CORS. Malformed and
 oversized form rejections preserve CORS only after the endpoint path and exact public-client origin
-have been validated, including before Actix dispatch on Vercel.
+have been validated, including before Actix dispatch on Vercel. Duplicate/non-UTF-8 CORS fields and
+non-canonical requested methods are rejected without an access-control grant.
 Set `token_policy.require_pushed_authorization_requests` on an issuer to require PAR globally, or
 set `require_pushed_authorization_requests` on one `authorization_code` application to enforce it
 only there. Discovery publishes the global policy. `browser_authorization_lifetime` defaults to 600
@@ -202,6 +206,12 @@ issuer/client/URI/state bindings are stored separately and revalidated, so a rem
 URI is discarded while the local session is still ended.
 Pending Device Flow confirmations likewise recheck device/refresh grants, scopes, resources, and
 rich-authorization details before displaying or accepting browser approval.
+Authorization-code, Device, refresh, and Token Exchange issuance plus opaque-token UserInfo rebuild
+mapped identity claims from the active user, so a changed email, role, or mapping is not prolonged
+by stored grant state. Already issued self-contained JWTs remain valid only until their bounded expiry.
+Before first token issuance, authorization codes and Device grants also adopt newly activated
+user/client MFA policy. Existing refresh and exchanged grants keep their truthful original context;
+UserInfo answers with an RFC 9470 MFA challenge when that context is no longer strong enough.
 
 Rotate an issuer signing key with a stable deployment identifier:
 
@@ -596,7 +606,11 @@ from the authenticated broker identifies the acting party; issued JWTs and intro
 bounded RFC 8693 `act` delegation chain. A source application can explicitly delegate to that
 broker through `authorized_actor_clients`; the resulting token keeps the original subject and
 identifies the broker in both `client_id` and `act`. Opaque and configured JWT access tokens are
-accepted and issued; scope amplification, unapproved delegation, ID tokens, and refresh tokens are rejected.
+accepted and issued. Delegated service grants remain introspectable while the source service still
+authorizes the broker; removing that allowlist entry makes them inactive. Machine subjects are
+classified from grant provenance, so a same-named local user cannot inject mapped identity claims
+or pairwise pseudonymization. Scope amplification, unapproved delegation, ID tokens, and refresh
+tokens are rejected.
 For example:
 Start from
 [`config/templates/token-exchange-client-application.json`](config/templates/token-exchange-client-application.json)
@@ -694,8 +708,14 @@ of rotation and across restarts.
 - JSON errors, rejected CORS preflights, and session-origin checks also emit `Cache-Control:
   no-store` and `Pragma: no-cache`; only explicit public metadata and asset responses opt into
   cacheability.
-- Unsupported methods on known OAuth/OIDC routes return `405 Method Not Allowed` with an exact
-  endpoint-specific `Allow` header on both Actix and Vercel; unknown routes remain HTTP 404.
+- Unsupported methods on known public, OAuth, and OIDC routes return `405 Method Not Allowed` with
+  an exact endpoint-specific `Allow` header on both Actix and Vercel; unknown routes remain HTTP
+  404.
+- `HEAD` preserves those error statuses, cache headers and GET-equivalent representation lengths
+  without returning a body. Malformed WebFinger remains a public non-cacheable JRD, while malformed
+  Session Management origin checks return an empty non-cacheable `400` on Actix and Vercel.
+- Vercel-generated body-limit `413` and worker-overload `503` errors follow the same bodyless `HEAD`
+  contract before a request reaches Actix.
 - `GET /metrics` exports bounded Prometheus counters, including per-grant token issuance,
   RFC 8693 exchange, aggregate UserInfo, MFA, PAR and Device Flow outcomes, request duration,
   readiness, and the active revision. Arbitrary grant values collapse to the fixed `unsupported`

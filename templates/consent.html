@@ -26,12 +26,13 @@
             <pre><code>{{ detail.payload }}</code></pre>
           </details>{% endfor %}
         </section>{% endif %}
-        <form id="consent-form" method="post" action="/{{ issuer_id }}/authorize/consent" class="consent-actions">
+        <form id="consent-form" method="post" action="/{{ issuer_id }}/authorize/consent" class="consent-actions" data-submitting-label="{{ messages.form_submitting }}" data-submit-status-id="consent-submit-status">
           <input type="hidden" name="transaction" value="{{ transaction }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button id="consent-approve" type="submit" name="decision" value="approve" class="primary-action full-width">{{ messages.consent_approve }}</button>
           <button id="consent-deny" type="submit" name="decision" value="deny" class="secondary-action full-width">{{ messages.consent_deny }}</button>
         </form>
+        <span id="consent-submit-status" class="visually-hidden" role="status" aria-live="polite"></span>
         <p class="privacy-note">{{ messages.consent_sign_out_note }}</p>
         {% if support_url.is_some() || privacy_url.is_some() || terms_url.is_some() %}<nav class="legal-links" aria-label="{{ messages.legal_navigation }}">
           {% if let Some(url) = support_url %}<a id="consent-support-link" href="{{ url }}">{{ messages.support }}</a>{% endif %}

@@ -6,8 +6,9 @@ refresh grants, sessions, rate limits, browser transactions, and signing keys, s
 apart from bounded in-process metrics and their immutable configuration snapshot.
 The adapter caps request bodies at 16 KiB before forwarding them into Actix, matching the form
 limit used by the conventional server. For token, PAR, and revocation only, an adapter-level 413
-echoes `Access-Control-Allow-Origin` after the exact path and origin pass the same active
-public-client redirect-origin policy; every other oversized request remains same-origin.
+echoes `Access-Control-Allow-Origin` only for POST after the exact path and one unambiguous origin
+pass the same active public-client redirect-origin policy; every other oversized request remains
+same-origin.
 Liveness and readiness probes preserve the shared Actix `GET`/bodyless-`HEAD` contract and always
 emit `Cache-Control: no-store` plus `Pragma: no-cache`; Vercel and intermediary caches must not
 retain an instance's former traffic-acceptance state.
@@ -27,11 +28,13 @@ HTTP method counters and duration summaries use only `GET`, `POST`, `HEAD`, `OPT
 Body-limit 413 and worker/queue 503 responses are recorded even when rejection happens before Actix;
 an arbitrary extension method can never become a Prometheus label or tracing-span value. These
 adapter-generated rejections carry both `Cache-Control: no-store` and `Pragma: no-cache`, matching
-route-layer transient errors.
+route-layer transient errors. On `HEAD`, they retain the status, headers, and JSON representation
+length but suppress the body exactly like route-layer errors.
 Public browser clients can use the shared token, PAR, and revocation routes cross-origin when their
 exact origin is derived from a registered redirect URI. Revocation preflight permits only POST with
 `Content-Type` and never enables browser `Authorization` or CORS for confidential-client
-credentials.
+credentials. Duplicate or non-UTF-8 CORS control fields and non-canonical requested methods are
+rejected without an access-control grant before Actix and Vercel can diverge.
 Pushed authorization requests use the same PostgreSQL authority as conventional Actix instances,
 so a PAR reference created by one warm function process can be consumed by another. References are
 single-use and short-lived; clients must not assume invocation affinity.
