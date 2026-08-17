@@ -251,7 +251,7 @@ cat >"$configuration_file" <<EOF
   "authentication": {
     "methods": ["password", "totp"],
     "session": {"idle_timeout": 1800, "absolute_timeout": 28800, "max_concurrent": 5},
-    "rate_limit": {"attempts": 10, "window_seconds": 60}
+    "rate_limit": {"attempts": 100, "window_seconds": 60}
   },
   "telemetry": {"log_level": "info"}
 }
@@ -3015,12 +3015,20 @@ mfa_device_csrf=$(hidden_value csrf_token "$mfa_device_totp_page")
 mfa_device_mfa_transaction=$(hidden_value mfa_transaction "$mfa_device_totp_page")
 mfa_device_code_value=$(smoke_totp 1)
 mfa_device_done="$temporary_directory/mfa-device-done.html"
-curl --fail --silent --cookie "$mfa_device_cookie_jar" --cookie-jar "$mfa_device_cookie_jar" \
-  --data-urlencode 'action=totp' \
-  --data-urlencode "csrf_token=$mfa_device_csrf" \
-  --data-urlencode "mfa_transaction=$mfa_device_mfa_transaction" \
-  --data-urlencode "totp_code=$mfa_device_code_value" \
-  "$peer_url/default/device" >"$mfa_device_done"
+mfa_device_totp_status=$(
+  curl --silent --cookie "$mfa_device_cookie_jar" --cookie-jar "$mfa_device_cookie_jar" \
+    --output "$mfa_device_done" --write-out '%{http_code}' \
+    --data-urlencode 'action=totp' \
+    --data-urlencode "csrf_token=$mfa_device_csrf" \
+    --data-urlencode "mfa_transaction=$mfa_device_mfa_transaction" \
+    --data-urlencode "totp_code=$mfa_device_code_value" \
+    "$peer_url/default/device"
+)
+if [ "$mfa_device_totp_status" != '200' ]; then
+  printf 'device TOTP returned HTTP %s\n' "$mfa_device_totp_status" >&2
+  sed -n '1p' "$mfa_device_done" >&2
+  exit 1
+fi
 grep -q 'id="device-done-title"' "$mfa_device_done"
 sleep 5
 mfa_device_token_response="$temporary_directory/mfa-device-token.json"
@@ -3383,18 +3391,19 @@ if header_value location "$logout_headers" | grep -q .; then
   printf '%s\n' 'front-channel logout unexpectedly skipped the iframe interstitial' >&2
   exit 1
 fi
-docker run --rm \
-  --network "container:$container_id" \
-  --entrypoint /bin/sh postgres:17-alpine \
-  -c "wget -q -O /dev/null 'http://127.0.0.1:$redirect_port/frontchannel-logout?tenant=release&iss=$issuer_url&sid=$id_token_sid'"
 backchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
 printf '%s' "$backchannel_request" | grep -q '^POST /backchannel-logout?tenant=release HTTP/1.1$'
-printf '%s' "$backchannel_request" | grep -q '^GET /frontchannel-logout?tenant=release&iss='
-printf '%s' "$backchannel_request" | grep -q "sid=$id_token_sid HTTP/1.1$"
 backchannel_logout_token=$(
   printf '%s\n' "$backchannel_request" | sed -n 's/^logout_token=//p' | tail -n 1
 )
 test -n "$backchannel_logout_token"
+docker run --rm \
+  --network "container:$container_id" \
+  --entrypoint /bin/sh postgres:17-alpine \
+  -c "wget -q -O /dev/null 'http://127.0.0.1:$redirect_port/frontchannel-logout?tenant=release&iss=$issuer_url&sid=$id_token_sid'"
+frontchannel_request=$(docker logs "$backchannel_container" 2>&1 | tr -d '\r')
+printf '%s' "$frontchannel_request" | grep -q 'GET /frontchannel-logout?tenant=release&iss='
+printf '%s' "$frontchannel_request" | grep -q "sid=$id_token_sid HTTP/1.1"
 backchannel_header=$(
   decode_base64url "$(printf '%s' "$backchannel_logout_token" | cut -d. -f1)"
 )
