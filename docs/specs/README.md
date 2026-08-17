@@ -142,7 +142,7 @@ the same database.
 | SECU-001 | Rust web/PostgreSQL tests, zeroizing deployment and submitted-credential lifecycles, and multi-instance session/replay checks in `make release-smoke` |
 | SECU-002 | RFC 6238 vectors, canonical secret/recovery generators, Rust configuration/Askama/token tests, PostgreSQL challenge/counter tests, and Authorization Code plus Device Flow journeys in `make release-smoke` |
 | OPS-001 | Rust health/metrics tests, JSON operational events, and the real-server smoke gate |
-| OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), canonical independent deployment-secret generators, bounded zeroizing direct/file credential initialization, Compose secrets-overlay validation, release build, readiness, and real-client manual gates |
+| OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), canonical independent assignment and no-overwrite `0600` file generators, bounded zeroizing direct/file credential initialization, Compose secrets-overlay validation, release build, readiness, and real-client manual gates |
 | OPS-003 | retained Phoenix compatibility only: clean SQLite migration, authentication-context trigger, `runtime_test.exs`, and embedded-host tests |
 
 Before a release, perform these documented manual checks against the built production assets:

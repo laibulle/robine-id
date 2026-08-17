@@ -52,18 +52,19 @@ Copy both emitted assignments into `.env.release`. Each value contains an indepe
 operating-system entropy and uses only environment-file-safe Base64URL characters.
 
 To keep the database password and wrapping key out of the container environment, use the optional
-Compose secrets overlay instead. Copy `.env.release.files.example` to `.env.release.files`, create
-the two files named by `ROBINE_ID_POSTGRES_PASSWORD_PATH` and
-`ROBINE_ID_KEY_ENCRYPTION_SECRET_PATH`, store only the corresponding generated value in each file,
-and restrict the host files to the deployment account:
+Compose secrets overlay instead. The canonical file generator creates both independent values,
+tightens the directory to mode `0700`, creates each file with mode `0600`, synchronizes it, and
+refuses to replace either existing file:
 
 ```sh
-install -d -m 700 deploy/secrets
-install -m 600 /dev/null deploy/secrets/postgres_password
-install -m 600 /dev/null deploy/secrets/key_encryption_secret
-# Paste only each generated value into its matching file, without the NAME= prefix.
+make deployment-secret-files
 cp .env.release.files.example .env.release.files
 ```
+
+Override `SECRET_DIRECTORY` only when the two paths in `.env.release.files` point to that same
+directory. A retry deliberately fails once either secret exists; move the complete old directory
+aside before intentionally provisioning a different deployment. No secret value is printed in
+file mode.
 
 Then add `-f compose.release.secrets.yml` and set `ROBINE_ID_ENV_FILE=.env.release.files` on every
 Compose invocation, for example:

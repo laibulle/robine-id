@@ -804,8 +804,9 @@ docker compose --env-file .env.release -f compose.release.yml ps
 ```
 
 For file-mounted PostgreSQL and wrapping secrets, copy `.env.release.files.example` to
-`.env.release.files`, write the generated values to the two paths declared there with mode `0600`,
-and add the overlay to each Compose command:
+`.env.release.files`, run `make deployment-secret-files`, and add the overlay to each Compose
+command. The generator restricts the directory and files, never overwrites existing material, and
+does not print the values:
 
 ```sh
 ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.files \

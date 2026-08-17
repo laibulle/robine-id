@@ -13,7 +13,7 @@ LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective deployment-secrets encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective deployment-secrets deployment-secret-files encryption-secret user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -28,6 +28,7 @@ help:
 	@echo "  make config-apply [CONFIG=path]    Validate and atomically apply in the command runtime"
 	@echo "  make config-effective Print the redacted effective Rust configuration"
 	@echo "  make deployment-secrets  Generate independent release database/encryption secrets"
+	@echo "  make deployment-secret-files [SECRET_DIRECTORY=deploy/secrets]  Create protected secret files once"
 	@echo "  make encryption-secret  Generate one production key-encryption secret"
 	@echo "  make user-password [BCRYPT_COST=12]  Generate one initial password and hash"
 	@echo "  make totp-secret  Generate one canonical 160-bit TOTP secret"
@@ -91,6 +92,10 @@ config-effective:
 
 deployment-secrets:
 	cargo run --bin generate_deployment_secrets
+
+SECRET_DIRECTORY ?= deploy/secrets
+deployment-secret-files:
+	cargo run --bin generate_deployment_secrets -- --directory "$(SECRET_DIRECTORY)"
 
 encryption-secret:
 	cargo run --bin generate_encryption_secret

@@ -225,7 +225,8 @@ mod tests {
     fn creates_independent_canonical_secret_files_with_restrictive_permissions() {
         let directory = temporary_directory("deployment-secret-files");
         let files = create_deployment_secret_files(&directory).expect("create deployment secrets");
-        let database_password = fs::read_to_string(&files.database_password).expect("database file");
+        let database_password =
+            fs::read_to_string(&files.database_password).expect("database file");
         let key_encryption_secret =
             fs::read_to_string(&files.key_encryption_secret).expect("encryption file");
 
@@ -286,5 +287,30 @@ mod tests {
         assert!(!directory.join(DATABASE_PASSWORD_FILE).exists());
 
         fs::remove_dir_all(directory).expect("remove collision directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symbolic_link_as_the_secret_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_directory("deployment-secret-symlink");
+        let target = root.join("target");
+        let link = root.join("secrets");
+        fs::create_dir_all(&target).expect("create symlink target");
+        symlink(&target, &link).expect("create secret directory symlink");
+
+        assert!(matches!(
+            create_deployment_secret_files(&link),
+            Err(DeploymentSecretFilesError::PrepareDirectory)
+        ));
+        assert_eq!(
+            fs::read_dir(&target)
+                .expect("read untouched symlink target")
+                .count(),
+            0
+        );
+
+        fs::remove_dir_all(root).expect("remove symlink test directory");
     }
 }
