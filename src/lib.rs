@@ -34,7 +34,6 @@ impl Application {
         }
     }
 
-    #[cfg(test)]
     pub fn without_database(snapshot: Snapshot) -> Self {
         Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),

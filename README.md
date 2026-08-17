@@ -149,6 +149,7 @@ Inspect configuration changes and the redacted effective configuration with:
 ```sh
 make config-preview
 make config-preview CONFIG=path/to/robine_id.json
+make config-apply CONFIG=path/to/robine_id.json
 make config-effective
 ```
 
@@ -221,6 +222,7 @@ Every application document declares `schema_version: 1` and `kind: "oidc_applica
 # Rust runtime
 make config-validate
 make config-preview CONFIG=path/to/robine_id.json
+make config-apply CONFIG=path/to/robine_id.json
 make config-effective
 make keys-rotate ISSUER=default ROTATION_ID=deployment-2026-08
 
