@@ -243,6 +243,10 @@ async fn persists_and_atomically_consumes_security_state() {
         auth_time: Some(Utc::now().timestamp()),
         mfa_verified: false,
         claims: json!({"name": "Integration"}),
+        authorization_details: json!([{
+            "type": "account_information",
+            "actions": ["read_balances"]
+        }]),
         expires_at: Utc::now() + Duration::minutes(5),
     };
 
@@ -291,6 +295,7 @@ async fn persists_and_atomically_consumes_security_state() {
         login_hint: None,
         acr_values: None,
         claims: None,
+        authorization_details: None,
         dpop_jkt: Some(dpop_jkt.clone()),
     };
     assert!(
@@ -396,6 +401,7 @@ async fn persists_and_atomically_consumes_security_state() {
             "integration-client",
             &["openid".to_owned(), "profile".to_owned()],
             Some("https://api.example/resource"),
+            &json!([{"type": "account_information", "actions": ["read_balances"]}]),
             600,
             5,
         )
@@ -479,6 +485,7 @@ async fn persists_and_atomically_consumes_security_state() {
             "integration-client",
             &["openid".to_owned()],
             None,
+            &json!([]),
             600,
             5,
         )
@@ -534,6 +541,7 @@ async fn persists_and_atomically_consumes_security_state() {
             auth_time: Some(Utc::now().timestamp()),
             mfa_verified: true,
             claims: json!({"name": "Integration"}),
+            authorization_details: grant.authorization_details.clone(),
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -552,6 +560,10 @@ async fn persists_and_atomically_consumes_security_state() {
     assert_eq!(introspection.dpop_jkt.as_deref(), Some(dpop_jkt.as_str()));
     assert!(introspection.auth_time.is_some());
     assert!(introspection.mfa_verified);
+    assert_eq!(
+        introspection.authorization_details,
+        grant.authorization_details
+    );
     assert!(introspection.expires_at > Utc::now());
     assert!(
         !database
@@ -585,6 +597,7 @@ async fn persists_and_atomically_consumes_security_state() {
             auth_time: Some(Utc::now().timestamp()),
             mfa_verified: true,
             claims: json!({"name": "Integration"}),
+            authorization_details: json!([]),
             expires_at: Utc::now() + Duration::minutes(4),
         })
         .await
@@ -618,6 +631,7 @@ async fn persists_and_atomically_consumes_security_state() {
             auth_time: Some(Utc::now().timestamp()),
             mfa_verified: false,
             claims: json!({}),
+            authorization_details: json!([]),
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -648,6 +662,7 @@ async fn persists_and_atomically_consumes_security_state() {
         auth_time: Some(Utc::now().timestamp()),
         mfa_verified: false,
         claims: json!({"name": "Integration"}),
+        authorization_details: grant.authorization_details.clone(),
         expires_at: Utc::now() + Duration::days(30),
     };
     let refresh_token = database
@@ -1064,6 +1079,7 @@ async fn persists_and_atomically_consumes_security_state() {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("none".to_owned()),
             secret_reference: None,
             jwks: None,
@@ -1088,6 +1104,7 @@ async fn persists_and_atomically_consumes_security_state() {
             introspection_allowed: true,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("client_secret_basic".to_owned()),
             secret_reference: Some(json!({
                 "provider": "env",

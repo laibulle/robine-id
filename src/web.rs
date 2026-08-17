@@ -6,7 +6,10 @@ use crate::{
         RefreshRotation, SigningKey,
     },
     metrics::{DeviceAuthorizationOutcome, MfaOutcome},
-    protocol::{AuthorizationGrant, AuthorizationRequest, DiscoveryDocument},
+    protocol::{
+        AuthorizationGrant, AuthorizationRequest, DiscoveryDocument, authorization_details_subset,
+        validated_authorization_details,
+    },
     tokens,
 };
 use actix_web::{
@@ -401,6 +404,7 @@ struct AuthorizationPostForm {
     login_hint: Option<String>,
     acr_values: Option<String>,
     claims: Option<String>,
+    authorization_details: Option<String>,
     dpop_jkt: Option<String>,
     transaction: Option<String>,
     csrf_token: Option<String>,
@@ -431,6 +435,7 @@ struct TokenForm {
     code_verifier: Option<String>,
     scope: Option<String>,
     resource: Option<String>,
+    authorization_details: Option<String>,
     audience: Option<String>,
     subject_token: Option<String>,
     subject_token_type: Option<String>,
@@ -447,6 +452,7 @@ struct DeviceAuthorizationForm {
     client_assertion: Option<String>,
     scope: Option<String>,
     resource: Option<String>,
+    authorization_details: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -525,6 +531,8 @@ struct PushedAuthorizationForm {
     #[serde(default)]
     claims: Option<String>,
     #[serde(default)]
+    authorization_details: Option<String>,
+    #[serde(default)]
     dpop_jkt: Option<String>,
     client_secret: Option<String>,
     client_assertion_type: Option<String>,
@@ -560,6 +568,7 @@ impl PushedAuthorizationForm {
                 login_hint: self.login_hint,
                 acr_values: self.acr_values,
                 claims: self.claims,
+                authorization_details: self.authorization_details,
                 dpop_jkt: self.dpop_jkt,
             }
             .normalize_empty_optional_parameters(),
@@ -1126,6 +1135,19 @@ fn merge_signed_authorization_request(
                 )
                 .is_some_and(|(outside, inside)| outside == inside)
     };
+    let authorization_details_match = |outside: &Option<String>, inside: &Option<String>| {
+        outside.is_none()
+            || outside == inside
+            || outside
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .zip(
+                    inside
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<Value>(value).ok()),
+                )
+                .is_some_and(|(outside, inside)| outside == inside)
+    };
     if outer.client_id != signed.client_id
         || !string_matches(&outer.response_type, &signed.response_type)
         || !string_matches(&outer.redirect_uri, &signed.redirect_uri)
@@ -1142,6 +1164,7 @@ fn merge_signed_authorization_request(
         || !option_matches(&outer.login_hint, &signed.login_hint)
         || !option_matches(&outer.acr_values, &signed.acr_values)
         || !claims_match(&outer.claims, &signed.claims)
+        || !authorization_details_match(&outer.authorization_details, &signed.authorization_details)
         || !option_matches(&outer.dpop_jkt, &signed.dpop_jkt)
     {
         return None;
@@ -1453,6 +1476,7 @@ async fn authorize_post(
         login_hint,
         acr_values,
         claims,
+        authorization_details,
         dpop_jkt,
         transaction,
         csrf_token,
@@ -1479,6 +1503,7 @@ async fn authorize_post(
         && login_hint.is_none()
         && acr_values.is_none()
         && claims.is_none()
+        && authorization_details.is_none()
         && dpop_jkt.is_none();
     if mfa_transaction.is_some() {
         let (Some(mfa_transaction), Some(csrf_token), Some(totp_code)) =
@@ -1593,6 +1618,7 @@ async fn authorize_post(
         login_hint,
         acr_values,
         claims,
+        authorization_details,
         dpop_jkt,
     }
     .normalize_empty_optional_parameters();
@@ -1994,6 +2020,12 @@ fn build_authorization_grant(
     let issuer = snapshot.issuer(issuer_id).expect("validated issuer");
     let scopes = normalized_scopes(&authorization.scope);
     let claims = tokens::mapped_claims(snapshot, user, &scopes);
+    let client = snapshot
+        .client(&authorization.client_id)
+        .expect("validated authorization client");
+    let authorization_details = authorization
+        .authorization_details_value(snapshot, client)
+        .expect("validated authorization details");
     AuthorizationGrant {
         issuer: issuer.url.trim_end_matches('/').to_owned(),
         subject: user.id.clone(),
@@ -2008,6 +2040,7 @@ fn build_authorization_grant(
         auth_time: Some(auth_time),
         mfa_verified,
         claims: json!(claims),
+        authorization_details,
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.authorization_code_lifetime),
     }
 }
@@ -3092,6 +3125,7 @@ impl From<PendingAuthorization> for AuthorizationGrant {
             auth_time: pending.auth_time,
             mfa_verified: pending.mfa_verified,
             claims: pending.claims,
+            authorization_details: pending.authorization_details,
             expires_at: pending.expires_at,
         }
     }
@@ -3353,6 +3387,16 @@ async fn device_authorization(
             "the requested resource is not registered for this client",
         );
     }
+    let authorization_details = match crate::protocol::validated_authorization_details(
+        form.authorization_details.as_deref(),
+        &snapshot,
+        client,
+    ) {
+        Ok(details) => details,
+        Err(error) => {
+            return oauth_error(StatusCode::BAD_REQUEST, error.code, error.description);
+        }
+    };
     let Some(database) = application.database() else {
         return oauth_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3366,6 +3410,7 @@ async fn device_authorization(
             &client.id,
             &scopes,
             form.resource.as_deref(),
+            &authorization_details,
             issuer.token_policy.device_code_lifetime,
             issuer.token_policy.device_poll_interval,
         )
@@ -4688,6 +4733,7 @@ async fn exchange_token_inner(
         "authorization_code" => {
             exchange_authorization_code_grant(
                 &issuer_id,
+                &snapshot,
                 issuer,
                 client,
                 &form,
@@ -4785,6 +4831,11 @@ async fn exchange_device_code_grant(
             "device code is invalid",
         );
     }
+    let requested_authorization_details = match token_authorization_details(form, snapshot, client)
+    {
+        Ok(details) => details,
+        Err(response) => return response,
+    };
     let grant = match database
         .poll_device_authorization(device_code, issuer.url.trim_end_matches('/'), &client.id)
         .await
@@ -4853,7 +4904,8 @@ async fn exchange_device_code_grant(
         && grant
             .resource
             .as_ref()
-            .is_none_or(|resource| client.resources.contains(resource));
+            .is_none_or(|resource| client.resources.contains(resource))
+        && authorization_details_currently_allowed(snapshot, client, &grant.authorization_details);
     if !currently_valid {
         metrics.device_authorization(DeviceAuthorizationOutcome::Rejected);
         return oauth_error(
@@ -4862,6 +4914,20 @@ async fn exchange_device_code_grant(
             "device authorization grant is no longer active",
         );
     }
+
+    let authorization_details = match requested_authorization_details {
+        Some(requested)
+            if !authorization_details_subset(&requested, &grant.authorization_details) =>
+        {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_authorization_details",
+                "requested authorization_details exceeds the device grant",
+            );
+        }
+        Some(requested) => requested,
+        None => grant.authorization_details.clone(),
+    };
 
     let dpop_jkt = dpop.map(|proof| proof.jkt.clone());
     let claims = refresh_claims(snapshot, &grant.scopes, grant.claims);
@@ -4890,6 +4956,7 @@ async fn exchange_device_code_grant(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             claims: claims.clone(),
+            authorization_details: authorization_details.clone(),
             expires_at: Utc::now() + Duration::seconds(issuer.token_policy.refresh_token_lifetime),
         };
         match database.issue_refresh_token(&refresh_grant).await {
@@ -4923,6 +4990,7 @@ async fn exchange_device_code_grant(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             claims,
+            authorization_details,
         },
         refresh_token,
         DEVICE_CODE_GRANT,
@@ -4947,10 +5015,12 @@ struct TokenIssue {
     auth_time: Option<i64>,
     mfa_verified: bool,
     claims: Value,
+    authorization_details: Value,
 }
 
 async fn exchange_authorization_code_grant(
     issuer_id: &str,
+    snapshot: &crate::configuration::Snapshot,
     issuer: &crate::configuration::Issuer,
     client: &crate::configuration::Client,
     form: &TokenForm,
@@ -4983,6 +5053,11 @@ async fn exchange_authorization_code_grant(
             "authorization code parameters are invalid",
         );
     }
+    let requested_authorization_details = match token_authorization_details(form, snapshot, client)
+    {
+        Ok(details) => details,
+        Err(response) => return response,
+    };
     let grant = match database.consume_authorization_code(code).await {
         Ok(Some(grant)) => grant,
         Ok(None) => {
@@ -5009,6 +5084,7 @@ async fn exchange_authorization_code_grant(
             .resource
             .as_ref()
             .is_some_and(|resource| !client.resources.contains(resource))
+        || !authorization_details_currently_allowed(snapshot, client, &grant.authorization_details)
         || !verify_pkce(
             grant.code_challenge.as_deref(),
             form.code_verifier.as_deref(),
@@ -5020,6 +5096,19 @@ async fn exchange_authorization_code_grant(
             "authorization code validation failed",
         );
     }
+    let authorization_details = match requested_authorization_details {
+        Some(requested)
+            if !authorization_details_subset(&requested, &grant.authorization_details) =>
+        {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_authorization_details",
+                "requested authorization_details exceeds the authorization grant",
+            );
+        }
+        Some(requested) => requested,
+        None => grant.authorization_details.clone(),
+    };
     if form.resource.as_ref() != grant.resource.as_ref() && form.resource.is_some() {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -5061,6 +5150,7 @@ async fn exchange_authorization_code_grant(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             claims: grant.claims.clone(),
+            authorization_details: authorization_details.clone(),
             expires_at: Utc::now() + Duration::seconds(issuer.token_policy.refresh_token_lifetime),
         };
         match database.issue_refresh_token(&refresh_grant).await {
@@ -5092,6 +5182,7 @@ async fn exchange_authorization_code_grant(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             claims: grant.claims,
+            authorization_details,
         },
         refresh_token,
         "authorization_code",
@@ -5154,6 +5245,11 @@ async fn exchange_refresh_token_grant(
         }
         None => None,
     };
+    let requested_authorization_details = match token_authorization_details(form, snapshot, client)
+    {
+        Ok(details) => details,
+        Err(response) => return response,
+    };
     let rotation = match database
         .rotate_refresh_token(
             refresh_token,
@@ -5161,6 +5257,7 @@ async fn exchange_refresh_token_grant(
             &client.id,
             requested_scopes.as_deref(),
             form.resource.as_deref(),
+            requested_authorization_details.as_ref(),
             (client.client_type == "public")
                 .then(|| dpop.map(|proof| proof.jkt.as_str()))
                 .flatten(),
@@ -5191,6 +5288,13 @@ async fn exchange_refresh_token_grant(
                 StatusCode::BAD_REQUEST,
                 "invalid_target",
                 "the requested resource does not match the refresh grant",
+            );
+        }
+        RefreshRotation::InvalidAuthorizationDetails => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_authorization_details",
+                "requested authorization_details exceeds the refresh grant",
             );
         }
         RefreshRotation::InvalidDpopProof => {
@@ -5226,7 +5330,8 @@ async fn exchange_refresh_token_grant(
         && grant
             .scopes
             .iter()
-            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope));
+            .all(|scope| issuer.scopes.contains(scope) && client.scopes.contains(scope))
+        && authorization_details_currently_allowed(snapshot, client, &grant.authorization_details);
     if !currently_valid {
         let _ = database
             .revoke_refresh_token(&rotated_token, &grant.issuer, &grant.client_id)
@@ -5253,6 +5358,7 @@ async fn exchange_refresh_token_grant(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             claims: grant.claims,
+            authorization_details: grant.authorization_details,
         },
         Some(rotated_token),
         "refresh_token",
@@ -5292,6 +5398,11 @@ async fn exchange_client_credentials_grant(
             "the requested resource is not registered for this client",
         );
     }
+    let authorization_details = match token_authorization_details(form, snapshot, client) {
+        Ok(Some(details)) => details,
+        Ok(None) => Value::Array(vec![]),
+        Err(response) => return response,
+    };
     let eligible = |scope: &&String| {
         issuer.scopes.contains(*scope) && service_scope_allowed(snapshot, scope.as_str())
     };
@@ -5344,6 +5455,7 @@ async fn exchange_client_credentials_grant(
         auth_time: None,
         mfa_verified: false,
         claims: json!({}),
+        authorization_details: authorization_details.clone(),
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
     };
     match issue_access_credential(issuer, database, &access_grant).await {
@@ -5367,6 +5479,7 @@ async fn exchange_client_credentials_grant(
             {
                 body.insert("resource".to_owned(), json!(resource));
             }
+            insert_authorization_details(&mut body, &authorization_details);
             no_store_json_response(StatusCode::OK, body)
         }
         Err(error) => {
@@ -5452,6 +5565,11 @@ async fn exchange_access_token_grant(
             "token exchange parameters are invalid",
         );
     }
+    let requested_authorization_details = match token_authorization_details(form, snapshot, client)
+    {
+        Ok(details) => details,
+        Err(response) => return response,
+    };
 
     let subject = match database.access_grant(subject_token).await {
         Ok(Some(grant)) => grant,
@@ -5485,6 +5603,20 @@ async fn exchange_access_token_grant(
     {
         return invalid_dpop_proof_response("the DPoP proof does not match the subject token");
     }
+
+    let authorization_details = match requested_authorization_details {
+        Some(requested)
+            if !authorization_details_subset(&requested, &subject.authorization_details) =>
+        {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_authorization_details",
+                "requested authorization_details exceeds the subject token grant",
+            );
+        }
+        Some(requested) => requested,
+        None => subject.authorization_details.clone(),
+    };
 
     let target = match (form.resource.as_deref(), form.audience.as_deref()) {
         (Some(resource), Some(audience)) if resource != audience => {
@@ -5575,6 +5707,7 @@ async fn exchange_access_token_grant(
         auth_time: subject.auth_time,
         mfa_verified: subject.mfa_verified,
         claims: subject.claims,
+        authorization_details: authorization_details.clone(),
         expires_at: now + Duration::seconds(expires_in),
     };
     match issue_access_credential(issuer, database, &exchanged_grant).await {
@@ -5600,6 +5733,7 @@ async fn exchange_access_token_grant(
             {
                 body.insert("resource".to_owned(), json!(resource));
             }
+            insert_authorization_details(&mut body, &authorization_details);
             no_store_json_response(StatusCode::OK, body)
         }
         Err(error) => {
@@ -5694,6 +5828,7 @@ async fn issue_access_credential(
             auth_time: grant.auth_time,
             mfa_verified: grant.mfa_verified,
             dpop_jkt: grant.dpop_jkt.as_deref(),
+            authorization_details: &grant.authorization_details,
             claims: &claims,
             now,
             lifetime,
@@ -5731,6 +5866,7 @@ async fn issue_token_response(
         auth_time: grant.auth_time,
         mfa_verified: grant.mfa_verified,
         claims: grant.claims.clone(),
+        authorization_details: grant.authorization_details.clone(),
         expires_at: Utc::now() + Duration::seconds(issuer.token_policy.access_token_lifetime),
     };
     let (access_token, access_token_key) =
@@ -5812,6 +5948,7 @@ async fn issue_token_response(
     {
         body.insert("resource".to_owned(), json!(resource));
     }
+    insert_authorization_details(&mut body, &grant.authorization_details);
     tracing::info!(
         event = "token_exchange",
         outcome = "success",
@@ -5944,6 +6081,7 @@ async fn introspect_token(
                         },
                     );
                 }
+                insert_authorization_details(&mut response, &grant.authorization_details);
                 response
             },
         );
@@ -6419,6 +6557,7 @@ fn active_token_exchange_subject(
             .scopes
             .iter()
             .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
+        || !authorization_details_currently_allowed(snapshot, client, &grant.authorization_details)
     {
         return false;
     }
@@ -6474,6 +6613,7 @@ fn active_introspection_grant(
             .scopes
             .iter()
             .any(|scope| !issuer.scopes.contains(scope) || !client.scopes.contains(scope))
+        || !authorization_details_currently_allowed(snapshot, client, &grant.authorization_details)
     {
         return false;
     }
@@ -6911,6 +7051,43 @@ fn authorization_consent_required(
     client.consent_required.unwrap_or(true)
         || authorization.has_prompt("consent")
         || authorization.requests_scope("offline_access")
+        || authorization.authorization_details.is_some()
+}
+
+fn token_authorization_details(
+    form: &TokenForm,
+    snapshot: &crate::configuration::Snapshot,
+    client: &crate::configuration::Client,
+) -> Result<Option<Value>, HttpResponse> {
+    form.authorization_details
+        .as_deref()
+        .map(|serialized| {
+            validated_authorization_details(Some(serialized), snapshot, client).map_err(|error| {
+                oauth_error(StatusCode::BAD_REQUEST, error.code, error.description)
+            })
+        })
+        .transpose()
+}
+
+fn authorization_details_currently_allowed(
+    snapshot: &crate::configuration::Snapshot,
+    client: &crate::configuration::Client,
+    details: &Value,
+) -> bool {
+    if details.as_array().is_some_and(Vec::is_empty) {
+        return true;
+    }
+    serde_json::to_string(details).is_ok_and(|serialized| {
+        validated_authorization_details(Some(&serialized), snapshot, client).is_ok()
+    })
+}
+
+fn insert_authorization_details(response: &mut Value, details: &Value) {
+    if !details.as_array().is_some_and(Vec::is_empty)
+        && let Some(response) = response.as_object_mut()
+    {
+        response.insert("authorization_details".to_owned(), details.clone());
+    }
 }
 
 fn normalized_scopes(scope: &str) -> Vec<String> {
@@ -7361,6 +7538,7 @@ mod tests {
                 branding: Branding::default(),
                 users: vec![],
                 claims: Default::default(),
+                authorization_detail_types: vec![],
                 authentication: Default::default(),
                 reconciliation: Default::default(),
                 storage: None,
@@ -7573,6 +7751,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: true,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: None,
                 secret_reference: None,
                 jwks: None,
@@ -8658,6 +8837,7 @@ mod tests {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("none".to_owned()),
             secret_reference: None,
             jwks: None,
@@ -8682,6 +8862,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -8759,6 +8940,7 @@ mod tests {
                 })
                 .to_string(),
             ),
+            authorization_details: None,
             dpop_jkt: None,
         };
         assert!(essential_claims_satisfied(
@@ -8805,6 +8987,7 @@ mod tests {
             login_hint: None,
             acr_values: Some(crate::configuration::MFA_ACR.to_owned()),
             claims: Some(json!({"id_token": {"acr": {"essential": true}}}).to_string()),
+            authorization_details: None,
             dpop_jkt: Some("A".repeat(43)),
         };
         let mut outer = AuthorizationRequest {
@@ -8826,6 +9009,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
         let merged = merge_signed_authorization_request(&outer, signed.clone())
@@ -8850,9 +9034,7 @@ mod tests {
         outer.acr_values = Some(crate::configuration::PASSWORD_ACR.to_owned());
         assert!(merge_signed_authorization_request(&outer, signed.clone()).is_none());
         outer.acr_values = None;
-        outer.claims = Some(
-            "{ \"id_token\": { \"acr\": { \"essential\": true } } }".to_owned(),
-        );
+        outer.claims = Some("{ \"id_token\": { \"acr\": { \"essential\": true } } }".to_owned());
         assert!(merge_signed_authorization_request(&outer, signed.clone()).is_some());
         outer.claims = Some(json!({"id_token": {"sub": null}}).to_string());
         assert!(merge_signed_authorization_request(&outer, signed.clone()).is_none());
@@ -8960,6 +9142,7 @@ mod tests {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("client_secret_post".to_owned()),
             secret_reference: Some(json!({"provider": "env", "key": "PATH"})),
             jwks: None,
@@ -9017,6 +9200,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: None,
                 secret_reference: None,
                 jwks: None,
@@ -9033,6 +9217,7 @@ mod tests {
             auth_time: Some(Utc::now().timestamp()),
             mfa_verified: false,
             claims: json!({}),
+            authorization_details: Value::Array(vec![]),
             expires_at: Utc::now() + Duration::minutes(5),
         };
 
@@ -9071,6 +9256,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: Some("client_secret_basic".to_owned()),
                 secret_reference: Some(json!({"provider": "env", "key": "SERVICE_SECRET"})),
                 jwks: None,
@@ -9086,6 +9272,7 @@ mod tests {
             dpop_jkt: None,
             auth_time: None,
             mfa_verified: false,
+            authorization_details: Value::Array(vec![]),
             expires_at: Utc::now() + Duration::minutes(5),
             issued_at: Utc::now(),
         };
@@ -9159,6 +9346,7 @@ mod tests {
                 introspection_allowed: true,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: Some("client_secret_basic".to_owned()),
                 secret_reference: Some(json!({"provider": "env", "key": "BROKER_SECRET"})),
                 jwks: None,
@@ -9177,6 +9365,7 @@ mod tests {
             auth_time: None,
             mfa_verified: false,
             claims: json!({}),
+            authorization_details: Value::Array(vec![]),
             expires_at: Utc::now() + Duration::minutes(5),
         };
 

@@ -1,4 +1,4 @@
-use crate::protocol::{AuthorizationGrant, AuthorizationRequest};
+use crate::protocol::{AuthorizationGrant, AuthorizationRequest, authorization_details_subset};
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
@@ -217,6 +217,7 @@ pub struct AccessGrant {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -231,6 +232,7 @@ pub struct IntrospectionGrant {
     pub dpop_jkt: Option<String>,
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
     pub issued_at: DateTime<Utc>,
 }
@@ -241,6 +243,7 @@ pub struct DeviceAuthorization {
     pub client_id: String,
     pub scopes: Vec<String>,
     pub resource: Option<String>,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -254,6 +257,7 @@ pub struct DeviceGrant {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -278,6 +282,7 @@ pub struct RefreshGrant {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -290,6 +295,7 @@ pub enum RefreshRotation {
     Invalid,
     InvalidScope,
     InvalidTarget,
+    InvalidAuthorizationDetails,
     InvalidDpopProof,
     Replayed,
 }
@@ -306,6 +312,7 @@ struct StoredRefreshToken {
     auth_time: Option<i64>,
     mfa_verified: bool,
     claims: Value,
+    authorization_details: Value,
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
@@ -327,6 +334,7 @@ pub struct PendingAuthorization {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -631,8 +639,9 @@ impl Database {
         sqlx::query(
             "INSERT INTO authorization_codes
              (code_hash, issuer, subject, client_id, redirect_uri, scopes, nonce, code_challenge,
-              response_mode, resource, dpop_jkt, auth_time, mfa_verified, claims, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+              response_mode, resource, dpop_jkt, auth_time, mfa_verified, claims,
+              authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(hash)
         .bind(&grant.issuer)
@@ -648,6 +657,7 @@ impl Database {
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
+        .bind(&grant.authorization_details)
         .bind(grant.expires_at)
         .execute(&self.pool)
         .await?;
@@ -868,7 +878,7 @@ impl Database {
             "DELETE FROM authorization_codes WHERE code_hash = $1
              RETURNING issuer, subject, client_id, redirect_uri, scopes, nonce,
                        code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-                       claims, expires_at",
+                       claims, authorization_details, expires_at",
         )
         .bind(digest(code))
         .fetch_optional(&self.pool)
@@ -881,6 +891,7 @@ impl Database {
         client_id: &str,
         scopes: &[String],
         resource: Option<&str>,
+        authorization_details: &Value,
         lifetime_seconds: i64,
         poll_interval_seconds: i32,
     ) -> Result<(String, String), sqlx::Error> {
@@ -899,8 +910,8 @@ impl Database {
             let result = sqlx::query(
                 "INSERT INTO device_authorizations
                  (device_code_hash, user_code_hash, issuer, client_id, scopes, resource,
-                  poll_interval, last_polled_at, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now() + ($8 * interval '1 second'))
+                  authorization_details, poll_interval, last_polled_at, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now() + ($9 * interval '1 second'))
                  ON CONFLICT DO NOTHING",
             )
             .bind(digest(&device_code))
@@ -909,6 +920,7 @@ impl Database {
             .bind(client_id)
             .bind(scopes)
             .bind(resource)
+            .bind(authorization_details)
             .bind(poll_interval_seconds)
             .bind(lifetime_seconds)
             .execute(&self.pool)
@@ -933,7 +945,7 @@ impl Database {
              SET verification_hash = $1
              WHERE user_code_hash = $2 AND issuer = $3 AND status = 'pending'
                AND expires_at > now()
-             RETURNING issuer, client_id, scopes, resource, expires_at",
+             RETURNING issuer, client_id, scopes, resource, authorization_details, expires_at",
         )
         .bind(digest(&transaction))
         .bind(digest(user_code))
@@ -949,7 +961,7 @@ impl Database {
         user_code: &str,
     ) -> Result<Option<DeviceAuthorization>, sqlx::Error> {
         sqlx::query_as::<_, DeviceAuthorization>(
-            "SELECT issuer, client_id, scopes, resource, expires_at
+            "SELECT issuer, client_id, scopes, resource, authorization_details, expires_at
              FROM device_authorizations
              WHERE verification_hash = $1 AND user_code_hash = $2
                AND status = 'pending' AND expires_at > now()",
@@ -968,7 +980,7 @@ impl Database {
             return Ok(None);
         }
         sqlx::query_as::<_, DeviceAuthorization>(
-            "SELECT issuer, client_id, scopes, resource, expires_at
+            "SELECT issuer, client_id, scopes, resource, authorization_details, expires_at
              FROM device_authorizations
              WHERE verification_hash = $1 AND status = 'pending' AND expires_at > now()",
         )
@@ -1022,6 +1034,7 @@ impl Database {
             auth_time: Option<i64>,
             mfa_verified: bool,
             claims: Value,
+            authorization_details: Value,
             expires_at: DateTime<Utc>,
             poll_interval: i32,
             last_polled_at: Option<DateTime<Utc>>,
@@ -1031,6 +1044,7 @@ impl Database {
         let mut transaction = self.pool.begin().await?;
         let stored = sqlx::query_as::<_, StoredDeviceAuthorization>(
             "SELECT status, issuer, subject, client_id, scopes, resource, auth_time, mfa_verified, claims,
+                    authorization_details,
                     expires_at, poll_interval, last_polled_at
              FROM device_authorizations
              WHERE device_code_hash = $1 AND issuer = $2 AND client_id = $3
@@ -1082,6 +1096,7 @@ impl Database {
                 auth_time: Some(auth_time),
                 mfa_verified: stored.mfa_verified,
                 claims: stored.claims,
+                authorization_details: stored.authorization_details,
                 expires_at: stored.expires_at,
             }));
         }
@@ -1131,8 +1146,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO access_tokens
              (token_hash, issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-              auth_time, mfa_verified, claims, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+              auth_time, mfa_verified, claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(digest(token))
         .bind(&grant.issuer)
@@ -1145,6 +1160,7 @@ impl Database {
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
+        .bind(&grant.authorization_details)
         .bind(grant.expires_at)
         .execute(&self.pool)
         .await?;
@@ -1154,7 +1170,7 @@ impl Database {
     pub async fn access_grant(&self, token: &str) -> Result<Option<AccessGrant>, sqlx::Error> {
         sqlx::query_as::<_, AccessGrant>(
             "SELECT issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-                    auth_time, mfa_verified, claims, expires_at
+                    auth_time, mfa_verified, claims, authorization_details, expires_at
              FROM access_tokens WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(digest(token))
@@ -1169,7 +1185,7 @@ impl Database {
     ) -> Result<Option<IntrospectionGrant>, sqlx::Error> {
         sqlx::query_as::<_, IntrospectionGrant>(
             "SELECT issuer, subject, client_id, scopes, grant_type, resource, dpop_jkt,
-                    auth_time, mfa_verified, expires_at, created_at AS issued_at
+                    auth_time, mfa_verified, authorization_details, expires_at, created_at AS issued_at
              FROM access_tokens
              WHERE token_hash = $1 AND issuer = $2 AND expires_at > now()",
         )
@@ -1212,12 +1228,13 @@ impl Database {
         client_id: &str,
         requested_scopes: Option<&[String]>,
         requested_resource: Option<&str>,
+        requested_authorization_details: Option<&Value>,
         requested_dpop_jkt: Option<&str>,
     ) -> Result<RefreshRotation, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let stored = sqlx::query_as::<_, StoredRefreshToken>(
             "SELECT family_id, issuer, subject, client_id, scopes, resource, dpop_jkt, auth_time,
-                    mfa_verified, claims, expires_at,
+                    mfa_verified, claims, authorization_details, expires_at,
                     consumed_at, revoked_at
              FROM refresh_tokens
              WHERE token_hash = $1 AND issuer = $2 AND client_id = $3
@@ -1270,6 +1287,16 @@ impl Database {
             Some(scopes) => scopes.to_vec(),
             None => stored.scopes,
         };
+        let authorization_details = match requested_authorization_details {
+            Some(requested)
+                if !authorization_details_subset(requested, &stored.authorization_details) =>
+            {
+                transaction.commit().await?;
+                return Ok(RefreshRotation::InvalidAuthorizationDetails);
+            }
+            Some(requested) => requested.clone(),
+            None => stored.authorization_details,
+        };
 
         sqlx::query("UPDATE refresh_tokens SET consumed_at = now() WHERE token_hash = $1")
             .bind(digest(token))
@@ -1288,6 +1315,7 @@ impl Database {
             auth_time: stored.auth_time,
             mfa_verified: stored.mfa_verified,
             claims: stored.claims,
+            authorization_details,
             expires_at: stored.expires_at,
         };
         self.insert_refresh_token(&rotated, &stored.family_id, &grant, &mut *transaction)
@@ -1333,8 +1361,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO refresh_tokens
              (token_hash, family_id, issuer, subject, client_id, scopes, resource, dpop_jkt, auth_time,
-              mfa_verified, claims, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+              mfa_verified, claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(digest(token))
         .bind(family_id)
@@ -1347,6 +1375,7 @@ impl Database {
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
+        .bind(&grant.authorization_details)
         .bind(grant.expires_at)
         .execute(executor)
         .await?;
@@ -1486,8 +1515,8 @@ impl Database {
             "INSERT INTO pending_authorizations
              (transaction_hash, issuer, subject, client_id, redirect_uri, scopes, state,
               nonce, code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-              claims, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+              claims, authorization_details, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         )
         .bind(digest(&transaction))
         .bind(&grant.issuer)
@@ -1504,6 +1533,7 @@ impl Database {
         .bind(grant.auth_time)
         .bind(grant.mfa_verified)
         .bind(&grant.claims)
+        .bind(&grant.authorization_details)
         .bind(grant.expires_at)
         .execute(&self.pool)
         .await?;
@@ -1518,7 +1548,7 @@ impl Database {
             "DELETE FROM pending_authorizations WHERE transaction_hash = $1
              RETURNING issuer, subject, client_id, redirect_uri, scopes, state, nonce,
                        code_challenge, response_mode, resource, dpop_jkt, auth_time, mfa_verified,
-                       claims, expires_at",
+                       claims, authorization_details, expires_at",
         )
         .bind(digest(transaction))
         .fetch_optional(&self.pool)

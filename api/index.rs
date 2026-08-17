@@ -694,6 +694,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: Some("client_secret_basic".to_owned()),
                 secret_reference: Some(serde_json::json!({
                     "provider": "env",
@@ -771,6 +772,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: Some("private_key_jwt".to_owned()),
                 secret_reference: None,
                 jwks: Some(robine_id::configuration::ClientJwkSet {
@@ -875,6 +877,7 @@ mod tests {
                 introspection_allowed: false,
                 require_pushed_authorization_requests: false,
                 required_acr: None,
+                authorization_details_types: vec![],
                 authentication_method: Some("private_key_jwt".to_owned()),
                 secret_reference: None,
                 jwks: Some(robine_id::configuration::ClientJwkSet {

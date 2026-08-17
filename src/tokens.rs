@@ -52,6 +52,8 @@ struct AccessTokenClaims<'a> {
     amr: Option<Vec<&'static str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cnf: Option<AccessTokenConfirmation<'a>>,
+    #[serde(skip_serializing_if = "authorization_details_empty")]
+    authorization_details: &'a Value,
     #[serde(flatten)]
     extra: &'a Map<String, Value>,
 }
@@ -100,6 +102,7 @@ pub struct AccessTokenInput<'a> {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub dpop_jkt: Option<&'a str>,
+    pub authorization_details: &'a Value,
     pub claims: &'a Map<String, Value>,
     pub now: i64,
     pub lifetime: i64,
@@ -255,10 +258,15 @@ pub fn issue_access_token(
                 }
             }),
             cnf: input.dpop_jkt.map(|jkt| AccessTokenConfirmation { jkt }),
+            authorization_details: input.authorization_details,
             extra: input.claims,
         },
         &EncodingKey::from_rsa_pem(key.private_key_pem.as_bytes())?,
     )
+}
+
+fn authorization_details_empty(value: &&Value) -> bool {
+    value.as_array().is_some_and(Vec::is_empty)
 }
 
 pub fn issue_authorization_response(
@@ -736,6 +744,10 @@ mod tests {
         };
         let now = chrono::Utc::now().timestamp();
         let claims = Map::from_iter([("tenant".to_owned(), serde_json::json!("base59"))]);
+        let authorization_details = serde_json::json!([{
+            "type": "account_information",
+            "actions": ["read_balances"]
+        }]);
         let token = issue_access_token(
             &key,
             &AccessTokenInput {
@@ -748,6 +760,7 @@ mod tests {
                 auth_time: Some(now - 60),
                 mfa_verified: true,
                 dpop_jkt: Some("proof-thumbprint"),
+                authorization_details: &authorization_details,
                 claims: &claims,
                 now,
                 lifetime: 300,
@@ -777,6 +790,10 @@ mod tests {
         assert_eq!(decoded.claims["acr"], MFA_ACR);
         assert_eq!(decoded.claims["amr"], serde_json::json!(["pwd", "otp"]));
         assert_eq!(decoded.claims["tenant"], "base59");
+        assert_eq!(
+            decoded.claims["authorization_details"],
+            authorization_details
+        );
         assert_eq!(decoded.claims["iat"], now);
         assert_eq!(decoded.claims["exp"], now + 300);
 
@@ -792,6 +809,7 @@ mod tests {
                 auth_time: None,
                 mfa_verified: false,
                 dpop_jkt: None,
+                authorization_details: &Value::Array(vec![]),
                 claims: &Map::new(),
                 now,
                 lifetime: 300,
@@ -807,6 +825,7 @@ mod tests {
         assert!(machine.claims.get("auth_time").is_none());
         assert!(machine.claims.get("acr").is_none());
         assert!(machine.claims.get("amr").is_none());
+        assert!(machine.claims.get("authorization_details").is_none());
     }
 
     #[test]

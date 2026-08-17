@@ -31,6 +31,8 @@ pub struct RootConfiguration {
     #[serde(default)]
     pub claims: std::collections::HashMap<String, ClaimMapping>,
     #[serde(default)]
+    pub authorization_detail_types: Vec<AuthorizationDetailType>,
+    #[serde(default)]
     pub authentication: AuthenticationPolicy,
     #[serde(default)]
     pub reconciliation: ReconciliationPolicy,
@@ -97,6 +99,8 @@ pub struct Client {
     pub require_pushed_authorization_requests: bool,
     #[serde(default)]
     pub required_acr: Option<String>,
+    #[serde(default)]
+    pub authorization_details_types: Vec<String>,
     pub authentication_method: Option<String>,
     pub secret_reference: Option<serde_json::Value>,
     #[serde(default)]
@@ -143,6 +147,18 @@ pub struct User {
 pub struct ClaimMapping {
     pub source: String,
     pub scope: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationDetailType {
+    #[serde(rename = "type")]
+    pub type_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub allowed_fields: Vec<String>,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -625,6 +641,13 @@ impl Snapshot {
             .find(|client| client.id == id)
     }
 
+    pub fn authorization_detail_type(&self, type_id: &str) -> Option<&AuthorizationDetailType> {
+        self.configuration
+            .authorization_detail_types
+            .iter()
+            .find(|detail_type| detail_type.type_id == type_id)
+    }
+
     pub fn default_issuer(&self) -> Option<&Issuer> {
         self.configuration
             .issuers
@@ -837,10 +860,42 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         || configuration.clients.len() > MAX_RESOURCES
         || configuration.users.len() > MAX_RESOURCES
         || configuration.claims.len() > MAX_RESOURCES
+        || configuration.authorization_detail_types.len() > 256
     {
         return Err(ConfigurationError::Invalid(format!(
             "configuration collections cannot exceed {MAX_RESOURCES} resources"
         )));
+    }
+
+    let mut authorization_detail_type_ids = std::collections::HashSet::new();
+    for detail_type in &configuration.authorization_detail_types {
+        if detail_type.type_id.is_empty()
+            || detail_type.type_id.len() > MAX_IDENTIFIER_LENGTH
+            || detail_type.type_id.chars().any(char::is_control)
+            || detail_type.type_id.chars().any(char::is_whitespace)
+            || detail_type.name.is_empty()
+            || detail_type.name.len() > MAX_DISPLAY_TEXT_LENGTH
+            || detail_type.allowed_fields.len() > 64
+            || detail_type.required_fields.len() > 64
+            || !unique_strings(&detail_type.allowed_fields)
+            || !unique_strings(&detail_type.required_fields)
+            || detail_type.allowed_fields.iter().any(|field| {
+                field == "type"
+                    || field.is_empty()
+                    || field.len() > MAX_IDENTIFIER_LENGTH
+                    || field.chars().any(char::is_control)
+            })
+            || detail_type
+                .required_fields
+                .iter()
+                .any(|field| !detail_type.allowed_fields.contains(field))
+            || !authorization_detail_type_ids.insert(&detail_type.type_id)
+        {
+            return Err(ConfigurationError::Invalid(
+                "authorization detail types require unique bounded type identifiers, display names, and unique required fields contained in allowed_fields"
+                    .to_owned(),
+            ));
+        }
     }
 
     validate_branding(
@@ -1104,6 +1159,18 @@ fn validate(configuration: &RootConfiguration) -> Result<(), ConfigurationError>
         if client.introspection_allowed && client.client_type != "confidential" {
             return Err(ConfigurationError::Invalid(format!(
                 "client {} must be confidential to use token introspection",
+                client.id
+            )));
+        }
+        if client.authorization_details_types.len() > 64
+            || !unique_strings(&client.authorization_details_types)
+            || client
+                .authorization_details_types
+                .iter()
+                .any(|type_id| !authorization_detail_type_ids.contains(type_id))
+        {
+            return Err(ConfigurationError::Invalid(format!(
+                "client {} authorization_details_types must be unique configured type identifiers",
                 client.id
             )));
         }
@@ -2518,6 +2585,7 @@ mod tests {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: None,
             secret_reference: None,
             jwks: None,
@@ -2545,6 +2613,7 @@ mod tests {
             introspection_allowed: true,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: None,
             secret_reference: None,
             jwks: None,
@@ -2572,6 +2641,7 @@ mod tests {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("client_secret_basic".to_owned()),
             secret_reference: Some(serde_json::json!("must-not-be-inline")),
             jwks: None,
@@ -2605,6 +2675,7 @@ mod tests {
             introspection_allowed: true,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("client_secret_basic".to_owned()),
             secret_reference: Some(serde_json::json!({
                 "provider": "env",
@@ -2679,6 +2750,7 @@ mod tests {
             introspection_allowed: true,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("client_secret_basic".to_owned()),
             secret_reference: Some(serde_json::json!({
                 "provider": "env",
@@ -2727,6 +2799,7 @@ mod tests {
             introspection_allowed: false,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: None,
             secret_reference: None,
             jwks: None,
@@ -2774,6 +2847,7 @@ mod tests {
             introspection_allowed: true,
             require_pushed_authorization_requests: false,
             required_acr: None,
+            authorization_details_types: vec![],
             authentication_method: Some("private_key_jwt".to_owned()),
             secret_reference: None,
             jwks: Some(ClientJwkSet {

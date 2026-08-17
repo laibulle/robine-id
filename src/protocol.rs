@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 const MAX_CLAIMS_PARAMETER_LENGTH: usize = 8_192;
+const MAX_AUTHORIZATION_DETAILS_LENGTH: usize = 8_192;
+const MAX_AUTHORIZATION_DETAILS: usize = 16;
 const MAX_REQUESTED_CLAIMS_PER_DESTINATION: usize = 64;
 const MAX_REQUESTED_CLAIM_NAME_LENGTH: usize = 256;
 const MAX_REQUESTED_CLAIM_VALUES: usize = 16;
@@ -52,6 +54,8 @@ pub struct DiscoveryDocument {
     pub grant_types_supported: Vec<&'static str>,
     pub subject_types_supported: Vec<&'static str>,
     pub acr_values_supported: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authorization_details_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token_signing_alg_values_supported: Option<Vec<&'static str>>,
@@ -116,6 +120,11 @@ pub struct AuthorizationRequest {
     pub acr_values: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_claims_parameter")]
     pub claims: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_authorization_details_parameter"
+    )]
+    pub authorization_details: Option<String>,
     #[serde(default)]
     pub dpop_jkt: Option<String>,
 }
@@ -135,6 +144,7 @@ pub struct AuthorizationGrant {
     pub auth_time: Option<i64>,
     pub mfa_verified: bool,
     pub claims: Value,
+    pub authorization_details: Value,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -266,6 +276,23 @@ impl DiscoveryDocument {
             } else {
                 vec![crate::tokens::PASSWORD_ACR]
             },
+            authorization_details_types_supported: {
+                let mut supported = snapshot
+                    .configuration
+                    .clients
+                    .iter()
+                    .filter(|client| {
+                        client
+                            .scopes
+                            .iter()
+                            .any(|scope| issuer.scopes.contains(scope))
+                    })
+                    .flat_map(|client| client.authorization_details_types.iter().cloned())
+                    .collect::<Vec<_>>();
+                supported.sort();
+                supported.dedup();
+                supported
+            },
             id_token_signing_alg_values_supported: vec!["RS256"],
             access_token_signing_alg_values_supported: (issuer.token_policy.access_token_format
                 == "jwt")
@@ -326,6 +353,7 @@ impl AuthorizationRequest {
             &mut self.login_hint,
             &mut self.acr_values,
             &mut self.claims,
+            &mut self.authorization_details,
             &mut self.dpop_jkt,
         ] {
             if parameter.as_deref() == Some("") {
@@ -390,6 +418,10 @@ impl AuthorizationRequest {
                 .claims
                 .as_deref()
                 .is_some_and(|value| value.len() > MAX_CLAIMS_PARAMETER_LENGTH)
+            || self
+                .authorization_details
+                .as_deref()
+                .is_some_and(|value| value.len() > MAX_AUTHORIZATION_DETAILS_LENGTH)
         {
             return Err(AuthorizationError::new(
                 "invalid_request",
@@ -481,6 +513,7 @@ impl AuthorizationRequest {
         let client = snapshot
             .client(&self.client_id)
             .ok_or_else(|| AuthorizationError::new("invalid_request", "Unknown client"))?;
+        self.authorization_details_value(snapshot, client)?;
         if !client
             .grant_types
             .iter()
@@ -612,6 +645,14 @@ impl AuthorizationRequest {
                 })
         })
         .collect()
+    }
+
+    pub fn authorization_details_value(
+        &self,
+        snapshot: &Snapshot,
+        client: &Client,
+    ) -> Result<Value, AuthorizationError> {
+        validated_authorization_details(self.authorization_details.as_deref(), snapshot, client)
     }
 
     pub fn authentication_context_satisfies(&self, mfa_verified: bool) -> bool {
@@ -792,6 +833,233 @@ where
     deserializer.deserialize_option(OptionalClaimsVisitor)
 }
 
+fn deserialize_optional_authorization_details_parameter<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalDetailsVisitor;
+    struct DetailsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OptionalDetailsVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON-serialized authorization details array or JSON array")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(DetailsVisitor).map(Some)
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for DetailsVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON-serialized authorization details array or JSON array")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value.to_owned())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let values =
+                Vec::<Value>::deserialize(serde::de::value::SeqAccessDeserializer::new(sequence))?;
+            Ok(Value::Array(values).to_string())
+        }
+    }
+
+    deserializer.deserialize_option(OptionalDetailsVisitor)
+}
+
+pub fn validated_authorization_details(
+    serialized: Option<&str>,
+    snapshot: &Snapshot,
+    client: &Client,
+) -> Result<Value, AuthorizationError> {
+    let Some(serialized) = serialized else {
+        return Ok(Value::Array(vec![]));
+    };
+    let details = serde_json::from_str::<Value>(serialized)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .filter(|details| !details.is_empty() && details.len() <= MAX_AUTHORIZATION_DETAILS)
+        .ok_or_else(invalid_authorization_details)?;
+    let mut nodes = 0usize;
+    for detail in &details {
+        if !bounded_json(detail, 0, &mut nodes) {
+            return Err(invalid_authorization_details());
+        }
+        let object = detail
+            .as_object()
+            .filter(|object| !object.is_empty() && object.len() <= 65)
+            .ok_or_else(invalid_authorization_details)?;
+        let type_id = object
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|type_id| {
+                client
+                    .authorization_details_types
+                    .iter()
+                    .any(|id| id == type_id)
+            })
+            .ok_or_else(invalid_authorization_details)?;
+        let definition = snapshot
+            .authorization_detail_type(type_id)
+            .ok_or_else(invalid_authorization_details)?;
+        if object.keys().any(|field| {
+            field != "type"
+                && !definition
+                    .allowed_fields
+                    .iter()
+                    .any(|allowed| allowed == field)
+        }) || definition
+            .required_fields
+            .iter()
+            .any(|field| !object.contains_key(field))
+        {
+            return Err(invalid_authorization_details());
+        }
+        for (field, value) in object {
+            match field.as_str() {
+                "type" => {}
+                "identifier" => {
+                    if !bounded_detail_string(value) {
+                        return Err(invalid_authorization_details());
+                    }
+                }
+                "locations" => {
+                    let Some(locations) = bounded_detail_strings(value) else {
+                        return Err(invalid_authorization_details());
+                    };
+                    if locations.iter().any(|location| {
+                        !client.resources.iter().any(|resource| resource == location)
+                    }) {
+                        return Err(invalid_authorization_details());
+                    }
+                }
+                "actions" | "datatypes" | "privileges" => {
+                    if bounded_detail_strings(value).is_none() {
+                        return Err(invalid_authorization_details());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(Value::Array(details))
+}
+
+fn invalid_authorization_details() -> AuthorizationError {
+    AuthorizationError::new(
+        "invalid_authorization_details",
+        "authorization_details does not match an allowed registered type",
+    )
+}
+
+fn bounded_json(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    *nodes = nodes.saturating_add(1);
+    if *nodes > 512 || depth > 8 {
+        return false;
+    }
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        Value::String(value) => value.len() <= 2_048 && !value.chars().any(char::is_control),
+        Value::Array(values) => {
+            values.len() <= 64
+                && values
+                    .iter()
+                    .all(|value| bounded_json(value, depth + 1, nodes))
+        }
+        Value::Object(values) => {
+            values.len() <= 64
+                && values.iter().all(|(key, value)| {
+                    !key.is_empty()
+                        && key.len() <= 256
+                        && !key.chars().any(char::is_control)
+                        && bounded_json(value, depth + 1, nodes)
+                })
+        }
+    }
+}
+
+fn bounded_detail_string(value: &Value) -> bool {
+    value.as_str().is_some_and(valid_detail_text)
+}
+
+fn bounded_detail_strings(value: &Value) -> Option<Vec<&str>> {
+    let values = value.as_array()?;
+    if values.is_empty() || values.len() > 64 {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| value.as_str().filter(|value| valid_detail_text(value)))
+        .collect()
+}
+
+fn valid_detail_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 2_048 && !value.chars().any(char::is_control)
+}
+
+/// Returns true when every requested rich authorization detail is a conservative
+/// structural subset of at least one detail in the original grant.
+///
+/// Authorization detail comparison is type-specific in RFC 9396. Robine ID's
+/// configurable detail types therefore use a safe generic rule: scalar values
+/// must remain identical, object fields may only be removed, and array members
+/// may only be removed. This permits downscoping without granting new values.
+pub fn authorization_details_subset(requested: &Value, granted: &Value) -> bool {
+    let (Some(requested), Some(granted)) = (requested.as_array(), granted.as_array()) else {
+        return false;
+    };
+    !requested.is_empty()
+        && requested.iter().all(|requested_detail| {
+            granted.iter().any(|granted_detail| {
+                authorization_detail_value_subset(requested_detail, granted_detail)
+            })
+        })
+}
+
+fn authorization_detail_value_subset(requested: &Value, granted: &Value) -> bool {
+    match (requested, granted) {
+        (Value::Object(requested), Value::Object(granted)) => {
+            requested.iter().all(|(key, value)| {
+                granted
+                    .get(key)
+                    .is_some_and(|granted| authorization_detail_value_subset(value, granted))
+            })
+        }
+        (Value::Array(requested), Value::Array(granted)) => requested.iter().all(|value| {
+            granted
+                .iter()
+                .any(|granted| authorization_detail_value_subset(value, granted))
+        }),
+        _ => requested == granted,
+    }
+}
+
 fn validate_claim_requirement(requirement: &Value) -> Result<(), AuthorizationError> {
     if requirement.is_null() {
         return Ok(());
@@ -929,6 +1197,7 @@ mod tests {
                     introspection_allowed: false,
                     require_pushed_authorization_requests: false,
                     required_acr: None,
+                    authorization_details_types: vec![],
                     authentication_method: None,
                     secret_reference: None,
                     jwks: None,
@@ -937,6 +1206,7 @@ mod tests {
                 branding: Branding::default(),
                 users: vec![],
                 claims: Default::default(),
+                authorization_detail_types: vec![],
                 authentication: Default::default(),
                 reconciliation: Default::default(),
                 storage: None,
@@ -967,6 +1237,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1003,6 +1274,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
         assert!(request.validate(&snapshot, "default").is_ok());
@@ -1034,6 +1306,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1069,6 +1342,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1096,6 +1370,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1130,6 +1405,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1167,6 +1443,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1394,6 +1671,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
 
@@ -1460,6 +1738,7 @@ mod tests {
             login_hint: Some(String::new()),
             acr_values: Some(String::new()),
             claims: Some(String::new()),
+            authorization_details: None,
             dpop_jkt: Some(String::new()),
         }
         .normalize_empty_optional_parameters();
@@ -1491,6 +1770,7 @@ mod tests {
             login_hint: None,
             acr_values: None,
             claims: None,
+            authorization_details: None,
             dpop_jkt: None,
         };
         assert!(request.validate(&snapshot(), "default").is_ok());
@@ -1573,9 +1853,9 @@ mod tests {
             .to_string(),
             Value::Object(Map::from_iter([(
                 "id_token".to_owned(),
-                Value::Object(Map::from_iter((0..65).map(|index| {
-                    (format!("claim-{index}"), Value::Null)
-                }))),
+                Value::Object(Map::from_iter(
+                    (0..65).map(|index| (format!("claim-{index}"), Value::Null)),
+                )),
             )]))
             .to_string(),
         ] {

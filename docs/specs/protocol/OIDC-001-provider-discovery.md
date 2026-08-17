@@ -37,7 +37,8 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 - The provider MUST advertise query and form-post authorization responses and
   `authorization_response_iss_parameter_supported: true`.
 - Signed RS256 JWT request objects MUST be advertised through `request_parameter_supported` and
-  `request_object_signing_alg_values_supported`. The `claims` request parameter remains unsupported.
+  `request_object_signing_alg_values_supported`. The `claims` request parameter MUST be advertised
+  and implemented according to OIDC-011.
 - JARM MUST advertise `jwt`, `query.jwt`, and `form_post.jwt` response modes plus RS256 through
   `authorization_signing_alg_values_supported`.
   PAR request URIs MUST be advertised as supported, together with the pushed
