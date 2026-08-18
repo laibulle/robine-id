@@ -178,7 +178,6 @@ check-variables:
 	@test -n "$(VERSION)" || (echo "VERSION could not be read from Cargo.toml" >&2; exit 1)
 
 preflight: check-variables compose-validate rust-preflight
-	mix precommit
 	ROBINE_ID_CONFIG="$(CURDIR)/deploy/image-config/robine_id.json" \
 		ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/image-config/applications" \
 		cargo run --bin validate_config

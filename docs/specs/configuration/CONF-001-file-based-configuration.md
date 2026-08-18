@@ -33,7 +33,7 @@ and secrets.
 
 The root is a JSON object with `schema_version: 1`. Supported sections are `issuers`, `users`,
 `claims`, `authorization_detail_types`, `branding`, `reconciliation`, `authentication`, and `telemetry`. A `storage` object is
-accepted only as legacy Phoenix compatibility metadata and does not configure Rust persistence.
+accepted only as reserved compatibility metadata and does not configure persistence.
 Unknown fields at all validated levels are errors. A legacy root `clients` list MAY be composed for
 compatibility but new applications MUST use individual documents.
 
@@ -59,7 +59,7 @@ compatibility but new applications MUST use individual documents.
   `totp_secret_reference` and requires the global method to be enabled.
   A TOTP-enabled user may also contain at most 16 unique, canonical `sha256:` values in
   `recovery_code_hashes`; this entire field is secret-redacted and is invalid without the factor.
-- `storage` is optional legacy compatibility metadata; the Rust runtime persists all mutable state and encrypted signing keys in PostgreSQL.
+- `storage` is optional reserved compatibility metadata; the runtime persists all mutable state and encrypted signing keys in PostgreSQL.
 - `telemetry.log_level` is one of `debug`, `info`, `warning`, or `error`.
 
 Issuer token-policy fields include authorization-code, ID-token, and access-token lifetimes plus
@@ -112,9 +112,6 @@ Each application document MUST be a JSON object containing `schema_version: 1`, 
 - `make config-apply CONFIG=PATH` validates and activates one revision in the command runtime.
 - `make config-effective` prints the redacted effective configuration.
 - `make keys-rotate ISSUER=ID ROTATION_ID=ID` performs an idempotent PostgreSQL-backed key rotation.
-
-The equivalent `mix robine_id.*` commands remain available only for the legacy Phoenix parity
-suite and are not production runtime entry points.
 
 Effective output MUST redact passwords, hashes, secret references, tokens, and private key material.
 

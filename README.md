@@ -1,7 +1,6 @@
 # Robine ID
 
 [![build](https://ci.base59.dev/badges/github/laibulle/robine-id/build.svg)](https://ci.base59.dev/repositories)
-[![coverage](https://ci.base59.dev/badges/github/laibulle/robine-id/coverage.svg)](https://ci.base59.dev/repositories)
 [![release](https://img.shields.io/github/v/release/laibulle/robine-id?display_name=tag&sort=semver)](https://github.com/laibulle/robine-id/releases)
 
 Robine ID is a file-configured OpenID Connect provider. Its production runtime uses Rust, Actix Web,
@@ -20,9 +19,8 @@ Front-Channel and Back-Channel Logout, plus origin-bound OIDC Session Management
 Authorization responses identify their issuer according to RFC 9207 so multi-provider clients can
 reject authorization-server mix-up.
 
-The former Phoenix implementation remains in the repository as a parity oracle and regression suite;
-it is no longer packaged by the canonical `Dockerfile` or release Compose stack. The same Actix
-application runs as a conventional server and through the Vercel Function entrypoint.
+The same Actix application runs as a conventional server and through the Vercel Function
+entrypoint.
 
 ## Getting started with Docker
 
@@ -114,11 +112,6 @@ token across instances, performs RP-initiated logout, introspects and revokes a 
 token, then dumps, recreates, and restores PostgreSQL before checking refresh-token replay
 detection, the restored access grant, and both current and retained signing keys. It removes only
 its own temporary containers, network, volume, and files.
-
-The legacy Phoenix regression suite remains available through `mix precommit`; its coverage reports
-are written to `cover/` and retained by Robine CI.
-Set `ROBINE_ID_TEST_DATABASE` to an isolated SQLite path to prove that the retained migration chain
-can initialize a completely empty database without reusing local state.
 
 Then open <http://localhost:4001>.
 
@@ -414,7 +407,7 @@ Every document declares `schema_version: 1`. The root supports these sections:
 - `branding`: product name, assets, accessible theme tokens, locales, message overrides, and legal/support links;
 - `reconciliation`: explicit removal policy;
 - `authentication`: session and rate-limit policy;
-- `storage`: legacy Phoenix storage compatibility metadata (Rust persistence is configured through PostgreSQL environment variables);
+- `storage`: reserved compatibility metadata; persistence is configured through PostgreSQL environment variables;
 - `telemetry`: validated operational log level.
 
 Set `"enabled": false` on an issuer to suspend the complete tenant without deleting its URL,
@@ -487,24 +480,15 @@ Every application document declares `schema_version: 1` and `kind: "oidc_applica
 ### Configuration commands
 
 ```sh
-# Rust runtime
 make config-validate
 make config-preview CONFIG=path/to/robine_id.json
 make config-apply CONFIG=path/to/robine_id.json
 make config-effective
 make keys-rotate ISSUER=default ROTATION_ID=deployment-2026-08
-
-# Phoenix runtime
-mix robine_id.config.validate path/to/robine_id.json
-mix robine_id.config.preview path/to/robine_id.json
-mix robine_id.config.apply path/to/robine_id.json
-mix robine_id.config.effective
-mix robine_id.keys.rotate default deployment-2026-08
 ```
 
-`preview` does not mutate state. File-backed Rust servers activate valid changes automatically;
-Phoenix `apply` validates the complete revision before atomically activating it. Applying an
-equivalent semantic revision is a no-op. Both effective commands redact passwords, hashes, secret
+`preview` does not mutate state. File-backed servers activate valid changes automatically. Applying
+an equivalent semantic revision is a no-op. Effective output redacts passwords, hashes, secret
 references, tokens, and private material.
 
 ## OpenID Connect endpoints
@@ -882,7 +866,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 make rust-integration
 make release-smoke
-mix precommit # legacy parity regression suite
 ```
 
 The test suite covers domain entities and use cases, adapter contracts, idempotent reconciliation,

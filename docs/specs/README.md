@@ -1,6 +1,8 @@
 # Robine ID Specifications
 
-Robine ID is a configurable, idempotent OpenID Connect provider whose production runtime is built with Rust, Actix Web, Askama, and PostgreSQL. The retained Elixir/Phoenix implementation is a compatibility oracle and regression suite. These specifications define externally observable behavior and product requirements independently of implementation details.
+Robine ID is a configurable, idempotent OpenID Connect provider built with Rust, Actix Web,
+Askama, and PostgreSQL. These specifications define externally observable behavior and product
+requirements independently of implementation details.
 
 ## Conventions
 
@@ -53,7 +55,6 @@ Robine ID is a configurable, idempotent OpenID Connect provider whose production
 - [SECU-002 — TOTP Multi-Factor Authentication](security/SECU-002-totp-multi-factor-authentication.md)
 - [OPS-001 — Observability and Health](operations/OPS-001-observability-and-health.md)
 - [OPS-002 — Production Deployment](operations/OPS-002-production-deployment.md)
-- [OPS-003 — Embedded Provider](operations/OPS-003-embedded-provider.md)
 
 ## Production scope
 
@@ -143,7 +144,6 @@ the same database.
 | SECU-002 | RFC 6238 vectors, canonical secret/recovery generators, Rust configuration/Askama/token tests, PostgreSQL challenge/counter tests, and Authorization Code plus Device Flow journeys in `make release-smoke` |
 | OPS-001 | Rust health/metrics authentication and bounded-label tests, Vercel parity, native metrics-token generation, bounded read-only doctor unit/process/PostgreSQL checks, JSON operational events, and the real-server smoke gate |
 | OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), `make rp-smoke` against digest-pinned OAuth2 Proxy, runtime-asserted internal PostgreSQL networking plus read-only-root/init/PID/tmpfs/log isolation, canonical independent assignment and no-overwrite `0600` file generators, bounded zeroizing direct/file credential initialization, Compose secrets-overlay validation, release build, readiness, and remaining deployment/manual gates |
-| OPS-003 | retained Phoenix compatibility only: clean SQLite migration, authentication-context trigger, `runtime_test.exs`, and embedded-host tests |
 
 Before a release, perform these documented manual checks against the built production assets:
 

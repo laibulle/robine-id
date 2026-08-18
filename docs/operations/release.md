@@ -4,8 +4,8 @@
 
 The supported self-hosted topology is the non-root Actix container behind Caddy plus PostgreSQL 17.
 Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4042`. The canonical
-`Dockerfile` contains only the Rust runtime and its operational commands; Phoenix is not present in
-the production image. Compose additionally makes the application root filesystem read-only, drops
+`Dockerfile` contains only the Rust runtime and its operational commands. Compose additionally
+makes the application root filesystem read-only, drops
 all Linux capabilities, and enables `no-new-privileges`; only a small temporary in-memory filesystem
 is writable, and that `/tmp` mount is `noexec`, `nosuid`, and `nodev`. PostgreSQL also uses a
 read-only root with `no-new-privileges`; only its durable data volume and bounded, non-executable

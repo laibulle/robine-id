@@ -65,7 +65,8 @@ the shared durable store for protocol state and encrypted signing keys.
 - The canonical image MUST include idempotent signing-key rotation and elapsed-retained-key pruning
   commands plus transactional key re-encryption; startup and conventional maintenance MUST prune
   only persisted deadlines that elapsed.
-- The canonical container image MUST contain the Rust runtime and MUST NOT require BEAM, Erlang, Elixir, Node.js, or Phoenix.
+- The canonical container image MUST contain only the Rust runtime and its direct runtime
+  dependency closure.
 - Default browser assets MUST be embedded in that Rust runtime so both the conventional image and
   Vercel entrypoint work without a mutable or separately deployed static directory.
 - Container readiness MUST use the bounded native Rust healthcheck binary; the runtime image MUST
@@ -89,7 +90,7 @@ the shared durable store for protocol state and encrypted signing keys.
 
 ## Release procedure
 
-1. Validate Rust and legacy parity gates with `make preflight`.
+1. Validate the Rust quality and deployment gates with `make preflight`.
 2. Run the isolated canonical stack, two-instance OIDC journey, and recovery test with `make release-smoke`.
 3. Provision configuration, PostgreSQL, key-encryption secret, and client secrets.
 4. Start the stack and wait for `/health/ready` to report the intended semantic revision.
@@ -118,7 +119,7 @@ rotation. File-backed hot reload is a conventional-server feature; Vercel config
 - The canonical Docker/Compose stack starts without source-tree mutation.
 - Restart preserves signing identity, sessions, access grants, and unexpired authorization state.
 - Readiness remains false until configuration, migrations, and database connectivity succeed.
-- The canonical image runs as `robine-id` and contains no Phoenix runtime.
+- The canonical image runs as `robine-id` and contains only the Rust runtime dependency closure.
 - The canonical image contains and uses `robine-id-healthcheck` and does not contain `curl`.
 - Starting the bare image cannot expose the checked-in development credentials.
 - The release gate MUST prove that invalid database environment values stop initialization without

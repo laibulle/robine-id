@@ -115,4 +115,5 @@ Audit is append-only from the application's perspective. The MVP adapter writes 
 
 ## Non-Goals
 
-The MVP does not ship a metrics backend, tracing collector, dashboard, alert rules, long-term audit database, or SLA. Operators integrate Logger and Telemetry with their platform.
+The MVP does not ship a metrics backend, tracing collector, dashboard, alert rules, long-term audit
+database, or SLA. Operators integrate structured logs and metrics with their platform.
