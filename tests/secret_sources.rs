@@ -145,7 +145,10 @@ fn process_validates_metrics_file_tokens_without_disclosing_them() {
     let valid_token = "valid_metrics_token_abcdefghijklmnopqrstuvwxyz0123456789";
     fs::write(&valid_path, format!("{valid_token}\n")).expect("write valid metrics token");
     let valid_path_text = valid_path.to_string_lossy().into_owned();
-    let output = run_server(&[("METRICS_BEARER_TOKEN_FILE", &valid_path_text)]);
+    let output = run_server(&[
+        ("METRICS_BEARER_TOKEN_FILE", &valid_path_text),
+        ("DATABASE_URL", "not-a-database-url"),
+    ]);
     let valid_diagnostic = diagnostic(&output);
 
     assert!(!output.status.success());

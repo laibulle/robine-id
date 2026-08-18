@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "issuers": [
+    {
+      "id": "default",
+      "url": "https://id.base59.dev/default",
+      "scopes": ["openid", "profile", "email"]
+    }
+  ],
+  "users": [],
+  "claims": {
+    "name": {"source": "name", "scope": "profile"},
+    "email": {"source": "email", "scope": "email"}
+  },
+  "reconciliation": {"deletion_policy": "disable"},
+  "authentication": {
+    "methods": ["password"],
+    "session": {
+      "idle_timeout": 1800,
+      "absolute_timeout": 28800,
+      "max_concurrent": 5
+    },
+    "rate_limit": {"attempts": 5, "window_seconds": 60}
+  },
+  "telemetry": {"log_level": "info"}
+}

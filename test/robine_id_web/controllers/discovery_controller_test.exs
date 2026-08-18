@@ -5,7 +5,7 @@ defmodule RobineIdWeb.DiscoveryControllerTest do
     conn = get(conn, ~p"/default/.well-known/openid-configuration")
 
     assert %{
-             "issuer" => "https://id.base59.dev/default",
+             "issuer" => "http://127.0.0.1:4001/default",
              "response_types_supported" => ["code"]
            } = json_response(conn, 200)
 

@@ -9,6 +9,7 @@ COPY api api
 COPY assets assets
 COPY config config
 COPY deploy/config deploy/config
+COPY deploy/image-config deploy/image-config
 COPY migrations migrations
 COPY priv priv
 COPY src src
@@ -62,7 +63,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /out/ /usr/local/bin/
-COPY --from=builder /app/deploy/config /app/config
+COPY --from=builder /app/deploy/image-config /app/config
 
 USER robine-id
 

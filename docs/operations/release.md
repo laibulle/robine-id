@@ -3,7 +3,7 @@
 ## Deployment contract
 
 The supported self-hosted topology is the non-root Actix container behind Caddy plus PostgreSQL 17.
-Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4001`. The canonical
+Caddy terminates TLS for `id.base59.dev` and proxies to `127.0.0.1:4042`. The canonical
 `Dockerfile` contains only the Rust runtime and its operational commands; Phoenix is not present in
 the production image. Compose additionally makes the application root filesystem read-only, drops
 all Linux capabilities, and enables `no-new-privileges`; only a small temporary in-memory filesystem
@@ -58,15 +58,15 @@ Generate independent secrets:
 make deployment-secrets
 ```
 
-Copy both emitted assignments into `.env.release`. Each value contains an independent 384 bits of
-operating-system entropy and uses only environment-file-safe Base64URL characters.
+Copy the three emitted assignments into `.env.release`. Each value contains an independent 384
+bits of operating-system entropy and uses only environment-file-safe Base64URL characters.
 Optionally run `make metrics-token` and store its independent 384-bit assignment in the same
 secret manager. Once configured, every scrape must send
 `Authorization: Bearer $METRICS_BEARER_TOKEN`; missing, malformed, duplicate, and incorrect
 credentials receive a non-cacheable HTTP 401 challenge.
 
 To keep the database password and wrapping key out of the container environment, use the optional
-Compose secrets overlay instead. The canonical file generator creates both independent values,
+Compose secrets overlay instead. The canonical file generator creates all three independent values,
 tightens the directory to mode `0700`, creates each file with mode `0600`, synchronizes it, and
 refuses to replace either existing file:
 
@@ -78,7 +78,11 @@ cp .env.release.files.example .env.release.files
 Override `SECRET_DIRECTORY` only when the two paths in `.env.release.files` point to that same
 directory. A retry deliberately fails once either secret exists; move the complete old directory
 aside before intentionally provisioning a different deployment. No secret value is printed in
-file mode.
+file mode. Set `ROBINE_ID_SECRET_OWNER_UID` and `ROBINE_ID_SECRET_OWNER_GID` in
+`.env.release.files` to the numeric owner and group reported by
+`stat -c '%u %g' deploy/secrets/postgres_password`. The secrets overlay runs Robine ID as that
+unprivileged numeric identity, so Compose bind-mounted secrets remain readable without relaxing
+their `0600` permissions. Both values must be non-zero in production.
 
 Then add `-f compose.release.secrets.yml` and set `ROBINE_ID_ENV_FILE=.env.release.files` on every
 Compose invocation, for example:
@@ -114,9 +118,22 @@ find deploy/config/applications -type f -name '*.json' -exec chmod 644 {} +
 
 ```sh
 make preflight
+make rust-integration
 docker compose --env-file .env.release -f compose.release.yml config --quiet
 make release-smoke
+cargo build --locked --release --bin vercel
 ```
+
+With the development containers healthy, also exercise an independent relying party:
+
+```sh
+make rp-smoke
+```
+
+The RP smoke uses the pinned OAuth2 Proxy image documented in
+`docs/integrations/oauth2-proxy.md`. It completes discovery, Authorization Code + PKCE, confidential
+client authentication, ID-token/JWKS validation, and RP session establishment before removing the
+temporary proxy container.
 
 `make release-smoke` creates an isolated Compose project on port 4011, builds the canonical image,
 checks migrations, readiness, documentation, discovery, CLI utilities, the non-root user, and
@@ -140,7 +157,7 @@ and files.
 Confirm that:
 
 - `id.base59.dev` resolves to the deployment host;
-- Caddy proxies that hostname to `127.0.0.1:4001`;
+- Caddy proxies that hostname to `127.0.0.1:4042`;
 - `.env.release` contains every environment-backed client secret;
 - `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` are independent and stored outside Git;
 - no other process owns port 4001;
@@ -166,8 +183,8 @@ Run `make doctor` for the equivalent local check against the development databas
 Verify the local service and public proxy:
 
 ```sh
-curl --fail http://127.0.0.1:4001/health/ready
-curl --fail http://127.0.0.1:4001/metrics
+curl --fail http://127.0.0.1:4042/health/ready
+curl --fail http://127.0.0.1:4042/metrics
 curl --fail https://id.base59.dev/.well-known/openid-configuration/default
 curl --fail https://id.base59.dev/.well-known/oauth-authorization-server/default
 ```
@@ -210,6 +227,17 @@ deduplicated safe diagnostics as polling. It remains available when
 inline and Vercel configurations remain immutable until a new deployment.
 
 ## Backup and restore
+
+For a non-destructive verification of the currently running file-secret deployment, run:
+
+```sh
+make deployment-restore-check
+```
+
+The check takes a custom-format dump, restores it into an internal-network-only PostgreSQL
+container backed by tmpfs, and runs `robine-id-doctor` against the restored database with the
+deployment's matching encryption secret. It removes the dump, network, and temporary database on
+success or failure and never stops or writes to the production database.
 
 Create a consistent logical backup without stopping the application:
 

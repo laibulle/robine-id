@@ -7,13 +7,14 @@ IMAGE ?= $(DOCKERHUB_USER)/$(APP_NAME)
 PLATFORM ?= linux/amd64
 DATABASE_URL ?= postgres://robine_id:robine_id_dev@127.0.0.1:54329/robine_id
 KEY_ENCRYPTION_SECRET ?= development-only-key-encryption-secret-change-me
+OAUTH2_PROXY_DEVELOPMENT_CLIENT_SECRET ?= oauth2-proxy-development-only-secret
 
 VERSION_TAG := $(IMAGE):$(VERSION)
 LATEST_TAG := $(IMAGE):latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev dev-container dev-db dev-down compose-validate config-validate config-preview config-apply config-effective doctor deployment-secrets deployment-secret-files encryption-secret metrics-token user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
+.PHONY: help dev dev-container dev-db dev-down rp-smoke deployment-rp-smoke deployment-restore-check compose-validate config-validate config-preview config-apply config-effective doctor deployment-secrets deployment-secret-files encryption-secret metrics-token user-password totp-secret recovery-codes rust-preflight rust-integration release-smoke keys-rotate keys-prune keys-reencrypt check-variables preflight build login push publish
 
 help:
 	@echo "Robine ID development and container targets"
@@ -38,6 +39,9 @@ help:
 	@echo "  make rust-preflight   Run Rust formatting, lint, tests, and configuration validation"
 	@echo "  make rust-integration Run PostgreSQL-backed Rust integration tests"
 	@echo "  make release-smoke    Test production OIDC, multi-instance state, and PostgreSQL restore"
+	@echo "  make rp-smoke         Test a real OAuth2 Proxy relying party against the dev containers"
+	@echo "  make deployment-rp-smoke  Test OAuth2 Proxy through the public release proxy"
+	@echo "  make deployment-restore-check  Restore-test the running release database in isolation"
 	@echo "  make keys-rotate ROTATION_ID=<id> [ISSUER=default]"
 	@echo "  make keys-prune   Remove retained keys whose safe verification window elapsed"
 	@echo "  make keys-reencrypt NEW_KEY_ENCRYPTION_SECRET=<secret>  Re-encrypt signing keys"
@@ -50,6 +54,7 @@ help:
 
 dev: dev-db
 	DATABASE_URL="$(DATABASE_URL)" KEY_ENCRYPTION_SECRET="$(KEY_ENCRYPTION_SECRET)" \
+		OAUTH2_PROXY_DEVELOPMENT_CLIENT_SECRET="$(OAUTH2_PROXY_DEVELOPMENT_CLIENT_SECRET)" \
 		cargo run --bin robine-id
 
 dev-container:
@@ -68,10 +73,29 @@ dev-db:
 
 dev-down:
 	@if docker info >/dev/null 2>&1; then \
-		docker compose -f compose.dev.yml down; \
+		docker compose -f compose.dev.yml --profile runtime down; \
 	else \
-		sg docker -c "docker compose -f compose.dev.yml down"; \
+		sg docker -c "docker compose -f compose.dev.yml --profile runtime down"; \
 	fi
+
+rp-smoke:
+	./scripts/smoke-oauth2-proxy.sh
+
+DEPLOYMENT_URL ?= https://id.base59.dev
+DEPLOYMENT_RP_CLIENT_ID ?= oauth2-proxy
+DEPLOYMENT_IDENTIFIER ?= guillaume.bailleul@gmail.com
+DEPLOYMENT_RP_SECRET_FILE ?= deploy/secrets/oauth2_proxy_client_secret
+DEPLOYMENT_CREDENTIALS_FILE ?= deploy/secrets/initial_admin_credentials
+deployment-rp-smoke:
+	ROBINE_ID_URL="$(DEPLOYMENT_URL)" \
+		OAUTH2_PROXY_CLIENT_ID="$(DEPLOYMENT_RP_CLIENT_ID)" \
+		OAUTH2_PROXY_CLIENT_SECRET_FILE="$(DEPLOYMENT_RP_SECRET_FILE)" \
+		ROBINE_ID_IDENTIFIER="$(DEPLOYMENT_IDENTIFIER)" \
+		ROBINE_ID_GENERATED_CREDENTIALS_FILE="$(DEPLOYMENT_CREDENTIALS_FILE)" \
+		./scripts/smoke-oauth2-proxy.sh
+
+deployment-restore-check:
+	./scripts/verify-deployment-backup.sh
 
 compose-validate:
 	docker compose --profile runtime -f compose.dev.yml config --quiet
@@ -155,6 +179,9 @@ check-variables:
 
 preflight: check-variables compose-validate rust-preflight
 	mix precommit
+	ROBINE_ID_CONFIG="$(CURDIR)/deploy/image-config/robine_id.json" \
+		ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/image-config/applications" \
+		cargo run --bin validate_config
 	ROBINE_ID_CONFIG="$(CURDIR)/deploy/config/robine_id.json" \
 		ROBINE_ID_APPLICATIONS_DIR="$(CURDIR)/deploy/config/applications" \
 		cargo run --bin validate_config

@@ -19,7 +19,15 @@
       }
     }
   ],
-  "users": [],
+  "users": [
+    {
+      "id": "guillaume-bailleul",
+      "identifier": "guillaume.bailleul@gmail.com",
+      "password_hash": "$2b$12$hrUIGZzvoAtd04FQKd6cDusGwHEY3HEzVj33vIHSfUHvNgN16BRzG",
+      "name": "Guillaume Bailleul",
+      "email": "guillaume.bailleul@gmail.com"
+    }
+  ],
   "claims": {
     "name": {"source": "name", "scope": "profile"},
     "email": {"source": "email", "scope": "email"}

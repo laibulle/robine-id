@@ -24,8 +24,9 @@ the shared durable store for protocol state and encrypted signing keys.
 - One canonical command MUST emit independent environment-file-safe `POSTGRES_PASSWORD` and
   `KEY_ENCRYPTION_SECRET` assignments, each containing exactly 384 bits of operating-system
   entropy, without requiring OpenSSL or another host runtime.
-- A canonical file mode MUST create those same independent values as `postgres_password` and
-  `key_encryption_secret`, restrict their directory to Unix mode `0700` and files to `0600`, flush
+- A canonical file mode MUST create those same independent values plus the canonical relying-party
+  credential as `postgres_password`, `key_encryption_secret`, and `oauth2_proxy_client_secret`,
+  restrict their directory to Unix mode `0700` and files to `0600`, flush
   successful writes, remove a partially created pair after failure, never print secret values, and
   refuse to replace any existing path.
 - A staged encryption-secret rotation MUST support a distinct, equally strong

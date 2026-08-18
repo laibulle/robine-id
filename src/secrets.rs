@@ -13,6 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 const DEPLOYMENT_SECRET_BYTES: usize = 48;
 const DATABASE_PASSWORD_FILE: &str = "postgres_password";
 const KEY_ENCRYPTION_SECRET_FILE: &str = "key_encryption_secret";
+const OAUTH2_PROXY_CLIENT_SECRET_FILE: &str = "oauth2_proxy_client_secret";
 
 #[derive(Debug, Error)]
 pub enum SecretGenerationError {
@@ -38,6 +39,7 @@ pub enum DeploymentSecretFilesError {
 pub struct DeploymentSecretFiles {
     pub database_password: PathBuf,
     pub key_encryption_secret: PathBuf,
+    pub oauth2_proxy_client_secret: PathBuf,
 }
 
 /// Generates deployment-specific wrapping material suitable for
@@ -60,7 +62,12 @@ pub fn generate_metrics_bearer_token() -> Result<Zeroizing<String>, SecretGenera
     generate_deployment_secret()
 }
 
-/// Creates the two canonical Compose secret files without replacing existing
+/// Generates the confidential client credential for the canonical OAuth2 Proxy integration.
+pub fn generate_oauth2_proxy_client_secret() -> Result<Zeroizing<String>, SecretGenerationError> {
+    generate_deployment_secret()
+}
+
+/// Creates the canonical Compose secret files without replacing existing
 /// material. On Unix, the destination directory is restricted to mode `0700`
 /// and each newly created file to mode `0600`.
 pub fn create_deployment_secret_files(
@@ -68,12 +75,15 @@ pub fn create_deployment_secret_files(
 ) -> Result<DeploymentSecretFiles, DeploymentSecretFilesError> {
     let database_password = generate_database_password()?;
     let key_encryption_secret = generate_key_encryption_secret()?;
+    let oauth2_proxy_client_secret = generate_oauth2_proxy_client_secret()?;
     prepare_secret_directory(directory)?;
 
     let database_path = directory.join(DATABASE_PASSWORD_FILE);
     let encryption_path = directory.join(KEY_ENCRYPTION_SECRET_FILE);
+    let oauth2_proxy_path = directory.join(OAUTH2_PROXY_CLIENT_SECRET_FILE);
     ensure_secret_file_absent(&database_path, DATABASE_PASSWORD_FILE)?;
     ensure_secret_file_absent(&encryption_path, KEY_ENCRYPTION_SECRET_FILE)?;
+    ensure_secret_file_absent(&oauth2_proxy_path, OAUTH2_PROXY_CLIENT_SECRET_FILE)?;
 
     let mut database_file = create_secret_file(
         &database_path,
@@ -85,12 +95,19 @@ pub fn create_deployment_secret_files(
         KEY_ENCRYPTION_SECRET_FILE,
         key_encryption_secret.as_bytes(),
     )?;
+    let mut oauth2_proxy_file = create_secret_file(
+        &oauth2_proxy_path,
+        OAUTH2_PROXY_CLIENT_SECRET_FILE,
+        oauth2_proxy_client_secret.as_bytes(),
+    )?;
     database_file.commit();
     encryption_file.commit();
+    oauth2_proxy_file.commit();
 
     Ok(DeploymentSecretFiles {
         database_password: database_path,
         key_encryption_secret: encryption_path,
+        oauth2_proxy_client_secret: oauth2_proxy_path,
     })
 }
 
@@ -245,11 +262,20 @@ mod tests {
             fs::read_to_string(&files.database_password).expect("database file");
         let key_encryption_secret =
             fs::read_to_string(&files.key_encryption_secret).expect("encryption file");
+        let oauth2_proxy_client_secret = fs::read_to_string(&files.oauth2_proxy_client_secret)
+            .expect("OAuth2 Proxy client secret file");
 
         assert_eq!(database_password.len(), 64);
         assert_eq!(key_encryption_secret.len(), 64);
+        assert_eq!(oauth2_proxy_client_secret.len(), 64);
         assert_ne!(database_password, key_encryption_secret);
-        for secret in [&database_password, &key_encryption_secret] {
+        assert_ne!(database_password, oauth2_proxy_client_secret);
+        assert_ne!(key_encryption_secret, oauth2_proxy_client_secret);
+        for secret in [
+            &database_password,
+            &key_encryption_secret,
+            &oauth2_proxy_client_secret,
+        ] {
             assert_eq!(
                 URL_SAFE_NO_PAD
                     .decode(secret.as_bytes())
@@ -268,7 +294,11 @@ mod tests {
                     & 0o777,
                 0o700
             );
-            for path in [&files.database_password, &files.key_encryption_secret] {
+            for path in [
+                &files.database_password,
+                &files.key_encryption_secret,
+                &files.oauth2_proxy_client_secret,
+            ] {
                 assert_eq!(
                     fs::metadata(path)
                         .expect("secret file metadata")
@@ -301,6 +331,7 @@ mod tests {
             "existing-secret"
         );
         assert!(!directory.join(DATABASE_PASSWORD_FILE).exists());
+        assert!(!directory.join(OAUTH2_PROXY_CLIENT_SECRET_FILE).exists());
 
         fs::remove_dir_all(directory).expect("remove collision directory");
     }

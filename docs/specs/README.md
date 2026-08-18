@@ -136,13 +136,13 @@ the same database.
 | APPL-001 | Rust strict configuration, suspension, per-issuer isolation, Discovery/CORS/grant/logout, client-authentication, Vercel tests, and disabled/cross-issuer client rejection in `make release-smoke` |
 | CONF-001 | Rust configuration tests and `make config-*` delivery gates |
 | CONF-002 | Rust semantic fingerprint, preview, polling/SIGHUP reload, deduplication, and atomic snapshot tests |
-| UX-001 | Rust Askama/web tests and the manual browser/accessibility release checklist |
+| UX-001 | Rust Askama/web tests plus recorded Chromium login, error, consent, denial, approval, protocol-error, logout, focus, and 320-pixel responsive checks; keyboard-only and assistive-technology checks remain manual release gates |
 | UX-002 | Rust branding, escaping, locale-fallback, and rendered-login tests |
 | IDEN-001 | Rust configuration, credential-generation, suspension, per-issuer isolation, bcrypt authentication, claim mapping, and UserInfo tests plus disabled/cross-issuer login rejection in `make release-smoke` |
 | SECU-001 | Rust web/PostgreSQL tests, zeroizing deployment and submitted-credential lifecycles, and multi-instance session/replay checks in `make release-smoke` |
 | SECU-002 | RFC 6238 vectors, canonical secret/recovery generators, Rust configuration/Askama/token tests, PostgreSQL challenge/counter tests, and Authorization Code plus Device Flow journeys in `make release-smoke` |
 | OPS-001 | Rust health/metrics authentication and bounded-label tests, Vercel parity, native metrics-token generation, bounded read-only doctor unit/process/PostgreSQL checks, JSON operational events, and the real-server smoke gate |
-| OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), runtime-asserted internal PostgreSQL networking plus read-only-root/init/PID/tmpfs/log isolation, canonical independent assignment and no-overwrite `0600` file generators, bounded zeroizing direct/file credential initialization, Compose secrets-overlay validation, release build, readiness, and real-client manual gates |
+| OPS-002 | `make release-smoke` (two-instance OIDC and restore drill), `make rp-smoke` against digest-pinned OAuth2 Proxy, runtime-asserted internal PostgreSQL networking plus read-only-root/init/PID/tmpfs/log isolation, canonical independent assignment and no-overwrite `0600` file generators, bounded zeroizing direct/file credential initialization, Compose secrets-overlay validation, release build, readiness, and remaining deployment/manual gates |
 | OPS-003 | retained Phoenix compatibility only: clean SQLite migration, authentication-context trigger, `runtime_test.exs`, and embedded-host tests |
 
 Before a release, perform these documented manual checks against the built production assets:

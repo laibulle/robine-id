@@ -3,7 +3,7 @@
   "issuers": [
     {
       "id": "default",
-      "url": "https://id.base59.dev/default",
+      "url": "http://127.0.0.1:4001/default",
       "scopes": ["openid", "profile", "email"],
       "token_policy": {
         "authorization_code_lifetime": 60,

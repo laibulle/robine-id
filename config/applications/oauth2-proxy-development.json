@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "kind": "oidc_application",
+  "id": "oauth2-proxy-development",
+  "name": "OAuth2 Proxy Development",
+  "type": "confidential",
+  "redirect_uris": [
+    "http://127.0.0.1:4180/oauth2/callback"
+  ],
+  "scopes": [
+    "openid",
+    "profile",
+    "email"
+  ],
+  "grant_types": [
+    "authorization_code"
+  ],
+  "authentication_method": "client_secret_basic",
+  "pkce_required": true,
+  "nonce_required": false,
+  "secret_reference": {
+    "provider": "env",
+    "key": "OAUTH2_PROXY_DEVELOPMENT_CLIENT_SECRET"
+  },
+  "consent_required": false
+}

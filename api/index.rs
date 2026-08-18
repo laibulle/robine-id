@@ -1638,13 +1638,15 @@ mod tests {
             body["protected_resources"],
             serde_json::json!([userinfo_resource.clone()])
         );
-        assert_eq!(
-            body["check_session_iframe"],
-            format!(
-                "{}/check-session",
-                body["issuer"].as_str().expect("issuer URL")
-            )
-        );
+        let discovered_issuer = body["issuer"].as_str().expect("issuer URL");
+        if discovered_issuer.starts_with("https://") {
+            assert_eq!(
+                body["check_session_iframe"],
+                format!("{discovered_issuer}/check-session")
+            );
+        } else {
+            assert!(body["check_session_iframe"].is_null());
+        }
 
         let oauth_metadata = worker
             .dispatch(FunctionRequest {
@@ -1803,24 +1805,28 @@ mod tests {
             })
             .await
             .expect("Vercel check-session iframe");
-        assert_eq!(iframe.status(), 200);
-        assert!(!iframe.headers().contains_key("x-frame-options"));
-        assert_eq!(
-            iframe
-                .headers()
-                .get("cross-origin-resource-policy")
-                .and_then(|value| value.to_str().ok()),
-            Some("cross-origin")
-        );
-        let iframe_body = http_body_util::BodyExt::collect(iframe.into_body())
-            .await
-            .expect("check-session iframe body")
-            .to_bytes();
-        assert!(
-            std::str::from_utf8(&iframe_body)
-                .expect("UTF-8 iframe")
-                .contains("/assets/check-session.js")
-        );
+        if discovered_issuer.starts_with("https://") {
+            assert_eq!(iframe.status(), 200);
+            assert!(!iframe.headers().contains_key("x-frame-options"));
+            assert_eq!(
+                iframe
+                    .headers()
+                    .get("cross-origin-resource-policy")
+                    .and_then(|value| value.to_str().ok()),
+                Some("cross-origin")
+            );
+            let iframe_body = http_body_util::BodyExt::collect(iframe.into_body())
+                .await
+                .expect("check-session iframe body")
+                .to_bytes();
+            assert!(
+                std::str::from_utf8(&iframe_body)
+                    .expect("UTF-8 iframe")
+                    .contains("/assets/check-session.js")
+            );
+        } else {
+            assert_eq!(iframe.status(), 404);
+        }
 
         let origin = worker
             .dispatch(FunctionRequest {
@@ -1833,7 +1839,14 @@ mod tests {
             })
             .await
             .expect("Vercel session origin validation");
-        assert_eq!(origin.status(), 204);
+        assert_eq!(
+            origin.status(),
+            if discovered_issuer.starts_with("https://") {
+                204
+            } else {
+                400
+            }
+        );
 
         let response = worker
             .dispatch(FunctionRequest {

@@ -14,7 +14,7 @@ defmodule RobineIdWeb.LogoutControllerTest do
 
   test "validates post-logout redirects using a signed ID token", %{conn: conn} do
     claims = %{
-      "iss" => "https://id.base59.dev/default",
+      "iss" => "http://127.0.0.1:4001/default",
       "sub" => "development-user",
       "aud" => "development-client"
     }

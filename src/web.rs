@@ -2924,6 +2924,7 @@ async fn render_login(
         }
         .render(),
     );
+    allow_registered_form_redirect(&mut response, &authorization.redirect_uri);
     add_csrf_cookie(&mut response, request, &csrf_token);
     response
 }
@@ -3071,6 +3072,7 @@ async fn resume_authorization(
             }
             .render(),
         );
+        allow_registered_form_redirect(&mut response, &grant.redirect_uri);
         add_csrf_cookie(&mut response, request, &csrf_token);
         response
     } else {
@@ -3267,6 +3269,7 @@ async fn complete_authentication(
                 }
                 .render(),
             );
+            allow_registered_form_redirect(&mut response, &authorization.redirect_uri);
             if let Ok(value) = actix_web::http::header::HeaderValue::from_str(
                 &rate_limit.window_seconds.to_string(),
             ) {
@@ -3333,7 +3336,7 @@ async fn complete_authentication(
                 );
             }
         };
-        return html_response(
+        let mut response = html_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             LoginTemplate {
                 product_name: &branding.product_name,
@@ -3359,6 +3362,8 @@ async fn complete_authentication(
             }
             .render(),
         );
+        allow_registered_form_redirect(&mut response, &authorization.redirect_uri);
+        return response;
     };
     if authorization_requires_mfa(client, &authorization) && user.totp_secret_reference.is_none() {
         application.metrics().authentication(false);
@@ -3523,6 +3528,7 @@ fn render_totp_challenge(
         }
         .render(),
     );
+    allow_registered_form_redirect(&mut response, &authorization.redirect_uri);
     add_csrf_cookie(&mut response, request, csrf_token);
     response
 }
@@ -3993,6 +3999,7 @@ async fn finish_authenticated_authorization(
             }
             .render(),
         );
+        allow_registered_form_redirect(&mut response, &grant.redirect_uri);
         add_session_cookie(
             &mut response,
             request,
@@ -4511,6 +4518,9 @@ async fn logout_confirmation_response(
         }
         .render(),
     );
+    if let Some(redirect_uri) = query.post_logout_redirect_uri.as_deref() {
+        allow_registered_form_redirect(&mut response, redirect_uri);
+    }
     add_csrf_cookie(&mut response, request, &csrf_token);
     if clear_session {
         remove_session_cookie(&mut response, request);
@@ -10899,6 +10909,24 @@ fn html_response(status: StatusCode, body: askama::Result<String>) -> HttpRespon
     }
 }
 
+fn allow_registered_form_redirect(response: &mut HttpResponse, redirect_uri: &str) {
+    let Some(form_action) = url::Url::parse(redirect_uri)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+        .filter(|origin| origin != "null")
+    else {
+        return;
+    };
+    let policy = format!(
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; form-action 'self' {form_action}; base-uri 'none'; frame-ancestors 'none'"
+    );
+    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(&policy) {
+        response
+            .headers_mut()
+            .insert(actix_web::http::header::CONTENT_SECURITY_POLICY, value);
+    }
+}
+
 fn html_response_for_request(
     request: &HttpRequest,
     status: StatusCode,
@@ -13008,6 +13036,24 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn permits_only_the_registered_redirect_origin_for_browser_form_handoffs() {
+        let mut response = HttpResponse::Ok().finish();
+        allow_registered_form_redirect(
+            &mut response,
+            "https://client.example:8443/callback?code=sensitive",
+        );
+        secure(&mut response);
+        let policy = response
+            .headers()
+            .get(actix_web::http::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorization form CSP");
+        assert!(policy.contains("form-action 'self' https://client.example:8443"));
+        assert!(!policy.contains("/callback"));
+        assert!(!policy.contains("sensitive"));
+    }
+
+    #[actix_web::test]
     async fn renders_an_accessible_secret_free_totp_challenge() {
         let branding = Branding::default();
         let messages = branding.messages(None);
@@ -13247,7 +13293,7 @@ mod tests {
                 .expect("authorization error redirect");
             assert!(location.contains(&format!("error={expected_error}")));
             assert!(location.contains("state=unsupported-request"));
-            assert!(location.contains("iss=https%3A%2F%2Fid.base59.dev%2Fdefault"));
+            assert!(location.contains("iss=http%3A%2F%2F127.0.0.1%3A4001%2Fdefault"));
         }
     }
 

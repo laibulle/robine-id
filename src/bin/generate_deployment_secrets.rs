@@ -15,7 +15,7 @@ fn main() -> io::Result<()> {
             robine_id::secrets::create_deployment_secret_files(&directory)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             println!(
-                "Created postgres_password and key_encryption_secret without replacing existing files."
+                "Created postgres_password, key_encryption_secret, and oauth2_proxy_client_secret without replacing existing files."
             );
             Ok(())
         }
@@ -28,9 +28,15 @@ fn print_assignments() -> io::Result<()> {
         robine_id::secrets::generate_database_password().map_err(io::Error::other)?;
     let encryption_secret =
         robine_id::secrets::generate_key_encryption_secret().map_err(io::Error::other)?;
+    let oauth2_proxy_client_secret =
+        robine_id::secrets::generate_oauth2_proxy_client_secret().map_err(io::Error::other)?;
     println!("# Store these independent values once; do not commit this output.");
     println!("POSTGRES_PASSWORD={}", database_password.as_str());
     println!("KEY_ENCRYPTION_SECRET={}", encryption_secret.as_str());
+    println!(
+        "OAUTH2_PROXY_CLIENT_SECRET={}",
+        oauth2_proxy_client_secret.as_str()
+    );
     Ok(())
 }
 

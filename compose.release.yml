@@ -1,3 +1,5 @@
+name: robine-id-production
+
 services:
   robine-id:
     build:
@@ -31,7 +33,7 @@ services:
       ROBINE_ID_CONFIG: /config/robine_id.json
       ROBINE_ID_APPLICATIONS_DIR: /config/applications
     ports:
-      - "${ROBINE_ID_BIND_ADDRESS:-127.0.0.1}:${ROBINE_ID_BIND_PORT:-4001}:4001"
+      - "${ROBINE_ID_BIND_ADDRESS:-127.0.0.1}:${ROBINE_ID_BIND_PORT:-4042}:4001"
     volumes:
       - ${ROBINE_ID_CONFIG_PATH:-./deploy/config/robine_id.json}:/config/robine_id.json:ro
       - ${ROBINE_ID_APPLICATIONS_PATH:-./deploy/config/applications}:/config/applications:ro

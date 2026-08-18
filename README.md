@@ -34,8 +34,8 @@ openssl rand -base64 48
 openssl rand -base64 48
 ```
 
-Put independent generated values in `POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` inside
-`.env.release`. Keep both in the deployment secret store.
+Put independent generated values in `POSTGRES_PASSWORD`, `KEY_ENCRYPTION_SECRET`, and
+`OAUTH2_PROXY_CLIENT_SECRET` inside `.env.release`. Keep all three in the deployment secret store.
 
 The application container runs without root privileges. Make the read-only configuration mounts
 accessible, then start the Rust application and PostgreSQL:
@@ -57,13 +57,26 @@ curl --fail http://127.0.0.1:4001/health/ready
 - Provider discovery: <http://127.0.0.1:4001/default/.well-known/openid-configuration>
   (also available as `/.well-known/openid-configuration/default` for RFC 8414-shaped clients)
 
+Run the repeatable third-party relying-party journey after `make dev-container`:
+
+```sh
+make rp-smoke
+```
+
+This starts a pinned OAuth2 Proxy container on loopback, completes Authorization Code + PKCE using
+the development identity, proves that the RP exchanged the code and validated the resulting OIDC
+session, then removes the temporary RP container. No RP port remains published afterward.
+
+The development PostgreSQL port is likewise bound only to `127.0.0.1:54329`, which lets host-side
+Rust integration tests run while the Actix container remains healthy. The production Compose model
+does not publish PostgreSQL and keeps it on an internal-only Docker network.
+
 Production identities belong in `deploy/config/robine_id.json`, and relying applications belong in
-`deploy/config/applications/`, one JSON file per application. Both are intentionally empty by
-default; the identities and applications under `config/` are development material and are not
-mounted into the release container. Add production identities, applications, and the intended
-issuer URL before exposing the service publicly.
-The same empty production template is embedded in the canonical image, so running the image without
-configuration mounts never falls back to the checked-in development account.
+`deploy/config/applications/`, one JSON file per application. The identities and applications under
+`config/` are development material and are not mounted into the release container. The image itself
+contains only the neutral, credential-free fallback under `deploy/image-config`; Compose mounts the
+operator-owned `deploy/config` tree over it. Production identity metadata and password hashes
+therefore do not become image layers.
 
 Stop the stack without deleting the persistent PostgreSQL volume:
 
@@ -496,7 +509,8 @@ references, tokens, and private material.
 
 ## OpenID Connect endpoints
 
-For the configured issuer `https://id.base59.dev/default`:
+For the development issuer `http://127.0.0.1:4001/default` (replace it with the deployment's HTTPS
+issuer in production):
 
 | Capability | Endpoint |
 | --- | --- |
@@ -807,8 +821,8 @@ Generate the wrapping secret with `make encryption-secret`; it emits one environ
 `KEY_ENCRYPTION_SECRET` containing 384 bits of operating-system entropy. Store that value with the
 matching database backups and do not commit it.
 For a new release deployment, prefer `make deployment-secrets`: it emits independent 384-bit
-`POSTGRES_PASSWORD` and `KEY_ENCRYPTION_SECRET` assignments ready for `.env.release`, without a
-host OpenSSL dependency.
+`POSTGRES_PASSWORD`, `KEY_ENCRYPTION_SECRET`, and `OAUTH2_PROXY_CLIENT_SECRET` assignments ready
+for `.env.release`, without a host OpenSSL dependency.
 Generate the optional metrics credential with `make metrics-token`; it emits an independent,
 environment-file-safe `METRICS_BEARER_TOKEN` containing 384 bits of operating-system entropy.
 
@@ -826,8 +840,9 @@ docker compose --env-file .env.release -f compose.release.yml ps
 
 For file-mounted PostgreSQL and wrapping secrets, copy `.env.release.files.example` to
 `.env.release.files`, run `make deployment-secret-files`, and add the overlay to each Compose
-command. The generator restricts the directory and files, never overwrites existing material, and
-does not print the values:
+command. Set the two `ROBINE_ID_SECRET_OWNER_*` values to the numeric owner and group of the
+generated files. The generator restricts the directory and files, never overwrites existing
+material, and does not print the values:
 
 ```sh
 ROBINE_ID_ENV_FILE=.env.release.files docker compose --env-file .env.release.files \
@@ -839,7 +854,9 @@ file is mounted only into Robine ID. Do not retain the direct variables alongsid
 During wrapping-key rotation, the temporary `compose.release.secrets-rotation.yml` overlay mounts
 the former key separately and is removed after `reencrypt_keys` succeeds.
 
-The service binds only to `127.0.0.1:4001`; Caddy publishes `https://id.base59.dev`. PostgreSQL data,
+The release service binds only to `127.0.0.1:4042`; Caddy publishes `https://id.base59.dev`. The
+development stack remains independently available on port 4001 because the two Compose files use
+distinct project names. PostgreSQL data,
 including encrypted signing keys and short-lived protocol state, lives in the persistent
 `robine_id_postgres` volume. PostgreSQL has no published port and joins only an internal database
 network. Robine ID also joins a distinct non-internal application network for outbound OIDC logout

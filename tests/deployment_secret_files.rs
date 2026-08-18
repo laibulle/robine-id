@@ -34,16 +34,27 @@ fn cli_creates_protected_files_once_and_refuses_to_replace_them() {
 
     let database_path = directory.join("postgres_password");
     let encryption_path = directory.join("key_encryption_secret");
+    let oauth2_proxy_path = directory.join("oauth2_proxy_client_secret");
     let database_password = fs::read(&database_path).expect("database password file");
     let encryption_secret = fs::read(&encryption_path).expect("key encryption secret file");
+    let oauth2_proxy_secret = fs::read(&oauth2_proxy_path).expect("OAuth2 Proxy secret file");
     assert_eq!(database_password.len(), 64);
     assert_eq!(encryption_secret.len(), 64);
+    assert_eq!(oauth2_proxy_secret.len(), 64);
     assert_ne!(database_password, encryption_secret);
+    assert_ne!(database_password, oauth2_proxy_secret);
+    assert_ne!(encryption_secret, oauth2_proxy_secret);
     assert!(
         !first
             .stdout
             .windows(database_password.len())
             .any(|window| window == database_password)
+    );
+    assert!(
+        !first
+            .stdout
+            .windows(oauth2_proxy_secret.len())
+            .any(|window| window == oauth2_proxy_secret)
     );
     assert!(
         !first
@@ -61,7 +72,7 @@ fn cli_creates_protected_files_once_and_refuses_to_replace_them() {
                 & 0o777,
             0o700
         );
-        for path in [&database_path, &encryption_path] {
+        for path in [&database_path, &encryption_path, &oauth2_proxy_path] {
             assert_eq!(
                 fs::metadata(path)
                     .expect("file metadata")
@@ -86,6 +97,10 @@ fn cli_creates_protected_files_once_and_refuses_to_replace_them() {
     assert_eq!(
         fs::read(&encryption_path).expect("unchanged encryption secret"),
         encryption_secret
+    );
+    assert_eq!(
+        fs::read(&oauth2_proxy_path).expect("unchanged OAuth2 Proxy secret"),
+        oauth2_proxy_secret
     );
 
     fs::remove_dir_all(directory).expect("remove generated secret directory");

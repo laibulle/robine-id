@@ -1217,6 +1217,7 @@ async fn persists_and_atomically_consumes_security_state() {
         .await
         .expect("SSO session");
     let mut snapshot = Snapshot::load().expect("configuration");
+    snapshot.configuration.issuers[0].url = "https://id.integration.example/default".to_owned();
     snapshot.configuration.issuers[0]
         .token_policy
         .pushed_authorization_request_limit = 1;
