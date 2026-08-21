@@ -48,6 +48,7 @@ scope "/id", RobineIdWeb do
   get "/:issuer_id/jwks.json", JwksController, :show
   post "/:issuer_id/token", TokenController, :create
   get "/:issuer_id/userinfo", UserInfoController, :show
+  post "/:issuer_id/userinfo", UserInfoController, :show
 end
 
 get "/id/:issuer_id/authorize", ProductWeb.IdentityController, :new
@@ -70,6 +71,11 @@ Robine ID owns authorization codes, access-token grants, signing keys, rate limi
 and its authenticated-session registry. The host owns its product session. A host
 should consume Robine ID through Authorization Code with PKCE, even when embedded,
 so moving the provider to a separate service remains a configuration change.
+
+`RobineId.Authorization.authenticate/4` returns both `claims` for UserInfo and
+`id_token_claims` explicitly requested for the ID token, together with `auth_time`.
+Pass all three values to `RobineId.Authorization.approve/5`; the shorter approve
+forms remain available for hosts that do not support explicit ID-token claims.
 
 ## Production requirements
 

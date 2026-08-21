@@ -23,13 +23,14 @@ defmodule RobineId.Clients.UseCases.AuthenticateClient do
        do: {:ok, client}
 
   defp authenticate(
-         %{type: :confidential, authentication_method: method} = client,
+         %{type: :confidential, authentication_methods: methods} = client,
          method,
          presented,
          resolver
        )
        when method in ["client_secret_basic", "client_secret_post"] and is_binary(presented) do
-    with {:ok, expected} <- resolver.resolve(client.secret_reference),
+    with true <- method in methods,
+         {:ok, expected} <- resolver.resolve(client.secret_reference),
          true <- same_secret?(presented, expected) do
       {:ok, client}
     else

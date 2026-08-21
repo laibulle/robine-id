@@ -18,7 +18,8 @@ defmodule RobineId.Protocol.UseCases.ExchangeAuthorizationCode do
          :ok <- verify_pkce(grant.code_challenge, params["code_verifier"]),
          {:ok, id_token} <- issue_id_token(grant, key_store, now, id_token_lifetime),
          {:ok, access_token} <-
-           issue_access_token(grant, access_token_store, now, access_token_lifetime) do
+           issue_access_token(grant, access_token_store, now, access_token_lifetime),
+         :ok <- code_store.mark_exchanged(params["code"], access_token) do
       {:ok,
        %{
          "access_token" => access_token,
@@ -28,11 +29,25 @@ defmodule RobineId.Protocol.UseCases.ExchangeAuthorizationCode do
          "id_token" => id_token
        }}
     else
-      {:error, :invalid_grant} -> {:error, {:invalid_grant, "authorization code is invalid"}}
-      {:error, {:invalid_grant, _} = reason} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+      {:error, {:authorization_code_reused, access_token}} ->
+        revoke_reused_code_token(access_token, access_token_store)
+        {:error, {:invalid_grant, "authorization code is invalid"}}
+
+      {:error, :invalid_grant} ->
+        {:error, {:invalid_grant, "authorization code is invalid"}}
+
+      {:error, {:invalid_grant, _} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp revoke_reused_code_token(access_token, store) when is_binary(access_token),
+    do: store.revoke(access_token)
+
+  defp revoke_reused_code_token(_access_token, _store), do: :ok
 
   defp required(params) do
     fields = ~w(grant_type code client_id redirect_uri)
@@ -56,6 +71,9 @@ defmodule RobineId.Protocol.UseCases.ExchangeAuthorizationCode do
 
   defp verify_pkce(nil, verifier) when verifier in [nil, ""], do: :ok
 
+  defp verify_pkce(_challenge, verifier) when not is_binary(verifier) or verifier == "",
+    do: {:error, {:invalid_grant, "PKCE code_verifier is required"}}
+
   defp verify_pkce(challenge, verifier) do
     calculated = :crypto.hash(:sha256, verifier) |> Base.url_encode64(padding: false)
 
@@ -72,7 +90,8 @@ defmodule RobineId.Protocol.UseCases.ExchangeAuthorizationCode do
         "aud" => grant.client_id
       }
       |> maybe_put_nonce(grant.nonce)
-      |> Map.merge(grant.claims)
+      |> maybe_put_auth_time(grant.auth_time)
+      |> Map.merge(grant.id_token_claims)
 
     RobineId.Protocol.issue_id_token(claims, key_store,
       now: now,
@@ -84,6 +103,11 @@ defmodule RobineId.Protocol.UseCases.ExchangeAuthorizationCode do
     do: Map.put(claims, "nonce", nonce)
 
   defp maybe_put_nonce(claims, _nonce), do: claims
+
+  defp maybe_put_auth_time(claims, auth_time) when is_integer(auth_time),
+    do: Map.put(claims, "auth_time", auth_time)
+
+  defp maybe_put_auth_time(claims, _auth_time), do: claims
 
   defp issue_access_token(grant, store, now, lifetime) do
     store.issue(%AccessGrant{

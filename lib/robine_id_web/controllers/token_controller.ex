@@ -4,11 +4,20 @@ defmodule RobineIdWeb.TokenController do
   alias RobineId.Runtime
 
   def create(conn, %{"issuer_id" => _issuer_id} = params) do
-    {client_id, authentication_method, secret} = client_credentials(conn, params)
-    params = Map.put(params, "client_id", client_id || "")
+    credentials = client_credentials(conn, params)
+
+    {client_id, params} =
+      case credentials do
+        {:ok, {client_id, _authentication_method, _secret}} ->
+          {client_id, Map.put(params, "client_id", client_id || "")}
+
+        _ ->
+          {nil, Map.put(params, "client_id", "")}
+      end
 
     result =
-      with {:ok, metadata} <-
+      with {:ok, {^client_id, authentication_method, secret}} <- credentials,
+           {:ok, metadata} <-
              RobineId.Protocol.discovery(
                params["issuer_id"],
                adapter(:configuration_store)
@@ -29,6 +38,7 @@ defmodule RobineIdWeb.TokenController do
           token_options(params["issuer_id"])
         )
       else
+        {:error, {:invalid_request, _description} = error} -> {:error, error}
         {:error, :invalid_client} -> {:error, {:invalid_client, "client authentication failed"}}
         {:error, :unknown_issuer} -> {:error, {:invalid_request, "unknown issuer"}}
       end
@@ -86,17 +96,26 @@ defmodule RobineIdWeb.TokenController do
 
   defp client_credentials(conn, params) do
     case get_req_header(conn, "authorization") do
-      ["Basic " <> encoded] -> decode_basic(encoded)
-      _ -> {params["client_id"], body_authentication_method(params), params["client_secret"]}
+      ["Basic " <> _encoded] when is_map_key(params, "client_secret") ->
+        {:error, {:invalid_request, "multiple client authentication methods were used"}}
+
+      ["Basic " <> encoded] ->
+        decode_basic(encoded)
+
+      [] ->
+        {:ok, {params["client_id"], body_authentication_method(params), params["client_secret"]}}
+
+      _ ->
+        {:ok, {nil, "client_secret_basic", nil}}
     end
   end
 
   defp decode_basic(encoded) do
     with {:ok, decoded} <- Base.decode64(encoded),
          [client_id, secret] <- String.split(decoded, ":", parts: 2) do
-      {URI.decode_www_form(client_id), "client_secret_basic", URI.decode_www_form(secret)}
+      {:ok, {URI.decode_www_form(client_id), "client_secret_basic", URI.decode_www_form(secret)}}
     else
-      _ -> {nil, "client_secret_basic", nil}
+      _ -> {:ok, {nil, "client_secret_basic", nil}}
     end
   end
 

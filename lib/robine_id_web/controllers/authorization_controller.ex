@@ -5,32 +5,24 @@ defmodule RobineIdWeb.AuthorizationController do
 
   def new(conn, %{"issuer_id" => issuer_id} = params) do
     result =
-      with {:ok, _metadata} <-
-             RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)) do
-        RobineId.Protocol.validate_authorization_request(
-          issuer_id,
-          params,
-          adapter(:client_repository)
-        )
+      with {:ok, metadata} <-
+             RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)),
+           {:ok, request} <-
+             RobineId.Protocol.validate_authorization_request(
+               issuer_id,
+               params,
+               adapter(:client_repository)
+             ) do
+        {:ok, request, metadata}
       end
 
     case result do
-      {:ok, request} ->
+      {:ok, request, metadata} ->
         {:ok, client} = RobineId.Clients.get(request.client_id, adapter(:client_repository))
-        theme = theme(issuer_id, request.client_id)
-        {:ok, messages} = RobineId.Experience.messages(theme, request.locale)
 
         conn
         |> put_session(:authorization_request, request)
-        |> render(:new,
-          page_title: "Sign in",
-          issuer_id: issuer_id,
-          client_name: client.name,
-          theme: theme,
-          messages: messages,
-          error: nil,
-          correlation_id: nil
-        )
+        |> continue_authorization(request, client, metadata["issuer"])
 
       {:error, {error, description}} ->
         authorization_error(conn, params, error, description)
@@ -43,6 +35,7 @@ defmodule RobineIdWeb.AuthorizationController do
   end
 
   def create(conn, %{"issuer_id" => issuer_id, "login" => login}) do
+    conn = Plug.CSRFProtection.call(conn, Plug.CSRFProtection.init([]))
     request = get_session(conn, :authorization_request)
     identifier = login["identifier"] || ""
 
@@ -68,14 +61,17 @@ defmodule RobineIdWeb.AuthorizationController do
              session_policy()["max_concurrent"],
              adapter(:session_registry)
            ) do
-      identity_claims = configured_claims(user, request.scope)
+      {identity_claims, id_token_claims} = claim_sets(user, request)
+      auth_time = System.system_time(:second)
 
       authenticated_conn =
         conn
         |> configure_session(renew: true)
         |> put_session(:subject, user.id)
         |> put_session(:authenticated_session_id, session_id)
+        |> put_session(:authentication_time, auth_time)
         |> put_session(:identity_claims, identity_claims)
+        |> put_session(:id_token_claims, id_token_claims)
 
       audit(conn, :authentication, %{
         outcome: :success,
@@ -84,7 +80,7 @@ defmodule RobineIdWeb.AuthorizationController do
         subject_id: user.id
       })
 
-      if RobineId.Clients.consent_required?(client) do
+      if RobineId.Clients.consent_required?(client) or "consent" in request.prompt do
         render_consent(authenticated_conn, request, client)
       else
         complete_authorization(
@@ -92,7 +88,9 @@ defmodule RobineIdWeb.AuthorizationController do
           request,
           metadata["issuer"],
           user.id,
-          identity_claims
+          identity_claims,
+          id_token_claims,
+          auth_time
         )
       end
     else
@@ -120,21 +118,34 @@ defmodule RobineIdWeb.AuthorizationController do
     end
   end
 
-  def create(conn, _params),
-    do: protocol_error(conn, :invalid_request, "missing login parameters")
+  def create(conn, %{"issuer_id" => _issuer_id} = params), do: new(conn, params)
 
   def consent(conn, %{"issuer_id" => issuer_id, "decision" => decision}) do
     request = get_session(conn, :authorization_request)
     subject = get_session(conn, :subject)
     claims = get_session(conn, :identity_claims) || %{}
+    id_token_claims = get_session(conn, :id_token_claims) || %{}
 
     with %{issuer_id: ^issuer_id} <- request,
          true <- is_binary(subject),
          {:ok, metadata} <- RobineId.Protocol.discovery(issuer_id, adapter(:configuration_store)) do
       case decision do
-        "approve" -> complete_authorization(conn, request, metadata["issuer"], subject, claims)
-        "deny" -> deny_authorization(conn, request)
-        _ -> protocol_error(conn, :invalid_request, "invalid consent decision")
+        "approve" ->
+          complete_authorization(
+            conn,
+            request,
+            metadata["issuer"],
+            subject,
+            claims,
+            id_token_claims,
+            get_session(conn, :authentication_time)
+          )
+
+        "deny" ->
+          deny_authorization(conn, request)
+
+        _ ->
+          protocol_error(conn, :invalid_request, "invalid consent decision")
       end
     else
       _ -> protocol_error(conn, :invalid_request, "authorization session is invalid or expired")
@@ -160,7 +171,8 @@ defmodule RobineIdWeb.AuthorizationController do
       theme: theme(issuer_id, request && request.client_id),
       messages: messages(issuer_id, request),
       error: "The email or password is incorrect.",
-      correlation_id: correlation_id(conn)
+      correlation_id: correlation_id(conn),
+      login_hint: request && request.login_hint
     )
   end
 
@@ -181,7 +193,8 @@ defmodule RobineIdWeb.AuthorizationController do
       theme: theme(issuer_id, request && request.client_id),
       messages: messages(issuer_id, request),
       error: "Too many attempts. Please wait before trying again.",
-      correlation_id: correlation_id(conn)
+      correlation_id: correlation_id(conn),
+      login_hint: request && request.login_hint
     )
   end
 
@@ -196,13 +209,124 @@ defmodule RobineIdWeb.AuthorizationController do
     )
   end
 
-  defp complete_authorization(conn, request, issuer, subject, claims) do
+  defp continue_authorization(conn, request, client, issuer) do
+    subject = get_session(conn, :subject)
+    auth_time = get_session(conn, :authentication_time)
+
+    if reusable_authentication?(request, subject, auth_time, issuer) do
+      continue_with_authenticated_subject(conn, request, client, issuer, subject, auth_time)
+    else
+      if "none" in request.prompt do
+        authorization_request_error(conn, request, :login_required, "authentication is required")
+      else
+        render_sign_in(conn, request, client)
+      end
+    end
+  end
+
+  defp continue_with_authenticated_subject(conn, request, client, issuer, subject, auth_time) do
+    with {:ok, user} <- adapter(:user_repository).get_by_id(subject) do
+      {claims, id_token_claims} = claim_sets(user, request)
+
+      conn =
+        conn
+        |> put_session(:identity_claims, claims)
+        |> put_session(:id_token_claims, id_token_claims)
+
+      cond do
+        "none" in request.prompt and RobineId.Clients.consent_required?(client) ->
+          authorization_request_error(conn, request, :consent_required, "consent is required")
+
+        RobineId.Clients.consent_required?(client) or "consent" in request.prompt ->
+          render_consent(conn, request, client)
+
+        true ->
+          complete_authorization(
+            conn,
+            request,
+            issuer,
+            subject,
+            claims,
+            id_token_claims,
+            auth_time
+          )
+      end
+    else
+      _ -> render_sign_in(conn, request, client)
+    end
+  end
+
+  defp reusable_authentication?(request, subject, auth_time, issuer) do
+    is_binary(subject) and is_integer(auth_time) and
+      "login" not in request.prompt and "select_account" not in request.prompt and
+      within_max_age?(auth_time, request.max_age) and
+      id_token_hint_matches?(request.id_token_hint, subject, issuer)
+  end
+
+  defp within_max_age?(_auth_time, nil), do: true
+  defp within_max_age?(_auth_time, 0), do: false
+
+  defp within_max_age?(auth_time, max_age),
+    do: System.system_time(:second) - auth_time <= max_age
+
+  defp id_token_hint_matches?(nil, _subject, _issuer), do: true
+
+  defp id_token_hint_matches?(token, subject, issuer) do
+    case RobineId.Protocol.verify_id_token(token, issuer, adapter(:key_store), clock_skew: 30) do
+      {:ok, %{"sub" => ^subject}} -> true
+      _ -> false
+    end
+  end
+
+  defp render_sign_in(conn, request, client) do
+    resolved_theme = theme(request.issuer_id, request.client_id)
+    {:ok, resolved_messages} = RobineId.Experience.messages(resolved_theme, request.locale)
+
+    render(conn, :new,
+      page_title: "Sign in",
+      issuer_id: request.issuer_id,
+      client_name: client.name,
+      theme: resolved_theme,
+      messages: resolved_messages,
+      error: nil,
+      correlation_id: nil,
+      login_hint: request.login_hint
+    )
+  end
+
+  defp authorization_request_error(conn, request, error, description) do
+    location =
+      append_query(request.redirect_uri, %{
+        "error" => to_string(error),
+        "error_description" => description,
+        "state" => request.state
+      })
+
+    conn
+    |> delete_session(:authorization_request)
+    |> delete_session(:identity_claims)
+    |> delete_session(:id_token_claims)
+    |> redirect(external: location)
+  end
+
+  defp complete_authorization(
+         conn,
+         request,
+         issuer,
+         subject,
+         claims,
+         id_token_claims,
+         auth_time
+       ) do
     case RobineId.Protocol.issue_authorization_code(
            request,
            issuer,
            subject,
            adapter(:authorization_code_store),
-           Keyword.put(code_options(request.issuer_id), :claims, claims)
+           code_options(request.issuer_id)
+           |> Keyword.put(:claims, claims)
+           |> Keyword.put(:id_token_claims, id_token_claims)
+           |> Keyword.put(:auth_time, auth_time)
          ) do
       {:ok, code} ->
         location = append_query(request.redirect_uri, %{"code" => code, "state" => request.state})
@@ -210,6 +334,7 @@ defmodule RobineIdWeb.AuthorizationController do
         conn
         |> delete_session(:authorization_request)
         |> delete_session(:identity_claims)
+        |> delete_session(:id_token_claims)
         |> redirect(external: location)
 
       {:error, _reason} ->
@@ -228,6 +353,7 @@ defmodule RobineIdWeb.AuthorizationController do
     conn
     |> delete_session(:authorization_request)
     |> delete_session(:identity_claims)
+    |> delete_session(:id_token_claims)
     |> redirect(external: location)
   end
 
@@ -247,9 +373,35 @@ defmodule RobineIdWeb.AuthorizationController do
     [lifetime: policy["authorization_code_lifetime"] || 60]
   end
 
-  defp configured_claims(user, scopes) do
+  defp configured_claims(user, scopes, requested_claims) do
     {:ok, snapshot} = RobineId.Configuration.active(adapter(:configuration_store))
-    RobineId.Identity.map_claims(user, snapshot.data["claims"] || %{}, scopes)
+
+    RobineId.Identity.map_claims(
+      user,
+      snapshot.data["claims"] || %{},
+      scopes,
+      requested_claims
+    )
+  end
+
+  defp requested_userinfo_claims(request) do
+    request.claims
+    |> Map.get("userinfo", %{})
+    |> Map.keys()
+  end
+
+  defp requested_id_token_claims(request) do
+    request.claims
+    |> Map.get("id_token", %{})
+    |> Map.keys()
+  end
+
+  defp claim_sets(user, request) do
+    user_info_claims =
+      configured_claims(user, request.scope, requested_userinfo_claims(request))
+
+    id_token_claims = configured_claims(user, [], requested_id_token_claims(request))
+    {user_info_claims, id_token_claims}
   end
 
   defp session_policy do
@@ -280,6 +432,7 @@ defmodule RobineIdWeb.AuthorizationController do
 
   defp append_query(uri, values) do
     parsed = URI.parse(uri)
+    values = values |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
     query = (parsed.query || "") |> URI.decode_query() |> Map.merge(values)
     %{parsed | query: URI.encode_query(query)} |> URI.to_string()
   end
@@ -289,8 +442,9 @@ defmodule RobineIdWeb.AuthorizationController do
   end
 
   defp browser_error(conn, error, description) do
+    conn = if is_nil(conn.status), do: put_status(conn, :bad_request), else: conn
+
     conn
-    |> put_status(:bad_request)
     |> render(:protocol_error,
       page_title: "Unable to continue",
       error: to_string(error),

@@ -49,4 +49,34 @@ defmodule RobineIdWeb.UserInfoControllerTest do
 
     assert %{"error" => "invalid_token"} = json_response(conn, 401)
   end
+
+  test "supports POST with bearer tokens in either the header or form body", %{conn: conn} do
+    grant = %AccessGrant{
+      issuer: "https://id.base59.dev/default",
+      subject: "development-user",
+      client_id: "development-client",
+      scope: ["openid"],
+      expires_at: System.system_time(:second) + 60
+    }
+
+    {:ok, header_token} = MemoryAccessTokenStore.issue(grant)
+
+    header_response =
+      conn
+      |> put_req_header("authorization", "Bearer #{header_token}")
+      |> post(~p"/default/userinfo")
+      |> json_response(200)
+
+    assert header_response["sub"] == "development-user"
+
+    {:ok, body_token} = MemoryAccessTokenStore.issue(grant)
+
+    body_conn =
+      build_conn()
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> post(~p"/default/userinfo", %{"access_token" => body_token})
+
+    assert json_response(body_conn, 200)["sub"] == "development-user"
+    assert get_resp_header(body_conn, "cache-control") == ["no-store"]
+  end
 end

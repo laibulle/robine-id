@@ -15,16 +15,33 @@ defmodule RobineIdWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # OpenID Connect Core allows an Authorization Request to be submitted as an
+  # application/x-www-form-urlencoded POST. Interactive form submissions are
+  # protected explicitly in the controller so protocol POSTs need no CSRF token.
+  pipeline :authorization_endpoint do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug RobineIdWeb.Plugs.SessionPolicy
+    plug :fetch_live_flash
+    plug :put_root_layout, html: {RobineIdWeb.Layouts, :root}
+    plug :put_secure_browser_headers
+  end
+
   scope "/", RobineIdWeb do
     pipe_through :browser
 
     get "/", PageController, :home
     get "/docs", PageController, :docs
     get "/:issuer_id/authorize", AuthorizationController, :new
-    post "/:issuer_id/authorize", AuthorizationController, :create
     post "/:issuer_id/authorize/consent", AuthorizationController, :consent
     get "/:issuer_id/logout", LogoutController, :new
     post "/:issuer_id/logout", LogoutController, :create
+  end
+
+  scope "/", RobineIdWeb do
+    pipe_through :authorization_endpoint
+
+    post "/:issuer_id/authorize", AuthorizationController, :create
   end
 
   scope "/", RobineIdWeb do
@@ -36,6 +53,7 @@ defmodule RobineIdWeb.Router do
     get "/:issuer_id/jwks.json", JwksController, :show
     post "/:issuer_id/token", TokenController, :create
     get "/:issuer_id/userinfo", UserInfoController, :show
+    post "/:issuer_id/userinfo", UserInfoController, :show
   end
 
   # Other scopes may use custom stacks.

@@ -28,6 +28,27 @@ defmodule RobineIdWeb.AuthorizationControllerTest do
     assert html =~ ~s(data-password-toggle)
   end
 
+  test "accepts an authorization request submitted as a form POST", %{conn: conn} do
+    html =
+      conn
+      |> post(~p"/default/authorize", authorization_params())
+      |> html_response(200)
+
+    assert html =~ "Welcome back"
+    assert html =~ ~s(id="authorization-login-form")
+  end
+
+  test "prompt none redirects with login_required when no session exists", %{conn: conn} do
+    params = Map.put(authorization_params(), "prompt", "none")
+    response = get(conn, ~p"/default/authorize?#{params}")
+
+    query =
+      response |> redirected_to(302) |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+    assert query["error"] == "login_required"
+    assert query["state"] == "state-123"
+  end
+
   test "uses configured ui_locales with message-by-message fallback", %{conn: conn} do
     params = Map.put(authorization_params(), "ui_locales", "fr en")
     html = conn |> get(~p"/default/authorize?#{params}") |> html_response(200)
@@ -112,8 +133,19 @@ defmodule RobineIdWeb.AuthorizationControllerTest do
       |> json_response(200)
 
     assert {true, jwt, _jws} = JOSE.JWT.verify_strict(JOSE.JWK.from_map(key), ["RS256"], id_token)
-    assert jwt.fields["name"] == "Development Administrator"
-    assert jwt.fields["email"] == "admin@example.com"
+    assert jwt.fields["sub"] == "development-user"
+    assert is_integer(jwt.fields["auth_time"])
+    refute Map.has_key?(jwt.fields, "name")
+    refute Map.has_key?(jwt.fields, "email")
+
+    user_info =
+      build_conn()
+      |> put_req_header("authorization", "Bearer #{access_token}")
+      |> get(~p"/default/userinfo")
+      |> json_response(200)
+
+    assert user_info["name"] == "Development Administrator"
+    assert user_info["email"] == "admin@example.com"
   end
 
   test "denying consent returns a standards error and preserves state", %{conn: conn} do
@@ -193,5 +225,52 @@ defmodule RobineIdWeb.AuthorizationControllerTest do
 
     assert %{"token_type" => "Bearer", "id_token" => _, "access_token" => _} =
              json_response(token_conn, 200)
+  end
+
+  test "reuses an authenticated session for prompt none and honors max_age zero", %{conn: conn} do
+    previous_secret = System.get_env("PENPOT_OIDC_CLIENT_SECRET")
+    System.put_env("PENPOT_OIDC_CLIENT_SECRET", "penpot-test-secret")
+
+    on_exit(fn ->
+      if previous_secret,
+        do: System.put_env("PENPOT_OIDC_CLIENT_SECRET", previous_secret),
+        else: System.delete_env("PENPOT_OIDC_CLIENT_SECRET")
+    end)
+
+    params = %{
+      "client_id" => "penpot",
+      "redirect_uri" => "https://penpot.base59.dev/api/auth/oidc/callback",
+      "response_type" => "code",
+      "scope" => "openid",
+      "state" => "first"
+    }
+
+    conn = get(conn, ~p"/default/authorize?#{params}")
+
+    conn =
+      post(conn, ~p"/default/authorize", %{
+        "login" => %{"identifier" => "admin@example.com", "password" => "change-me"}
+      })
+
+    assert redirected_to(conn, 302) =~ "code="
+
+    silent_params = %{params | "state" => "silent"} |> Map.put("prompt", "none")
+    silent_conn = conn |> recycle() |> get(~p"/default/authorize?#{silent_params}")
+
+    silent_query =
+      silent_conn |> redirected_to(302) |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+    assert silent_query["state"] == "silent"
+    assert is_binary(silent_query["code"])
+
+    reauth_params = %{params | "state" => "reauth"} |> Map.put("max_age", "0")
+
+    html =
+      silent_conn
+      |> recycle()
+      |> get(~p"/default/authorize?#{reauth_params}")
+      |> html_response(200)
+
+    assert html =~ "Welcome back"
   end
 end

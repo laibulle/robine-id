@@ -19,6 +19,7 @@
       for={%{}}
       as={:consent}
       action={RobineId.Runtime.path("/#{@issuer_id}/authorize/consent")}
+      id="authorization-consent-form"
       class="consent-actions"
     >
       <button type="submit" name="decision" value="approve" class="primary-action">

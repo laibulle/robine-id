@@ -4,7 +4,7 @@
     {
       "id": "default",
       "url": "https://id.base59.dev/default",
-      "scopes": ["openid", "profile", "email"],
+      "scopes": ["openid", "profile", "email", "address", "phone"],
       "token_policy": {
         "authorization_code_lifetime": 60,
         "id_token_lifetime": 300,
@@ -19,12 +19,32 @@
       "identifier": "admin@example.com",
       "password_hash": "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
       "name": "Development Administrator",
-      "email": "admin@example.com"
+      "email": "admin@example.com",
+      "claims": {
+        "preferred_username": "admin",
+        "given_name": "Development",
+        "family_name": "Administrator",
+        "email_verified": true,
+        "phone_number": "+33100000000",
+        "phone_number_verified": true,
+        "address": {"country": "FR"},
+        "locale": "en",
+        "updated_at": 1787270400
+      }
     }
   ],
   "claims": {
     "name": {"source": "name", "scope": "profile"},
-    "email": {"source": "email", "scope": "email"}
+    "given_name": {"source": "given_name", "scope": "profile"},
+    "family_name": {"source": "family_name", "scope": "profile"},
+    "preferred_username": {"source": "preferred_username", "scope": "profile"},
+    "locale": {"source": "locale", "scope": "profile"},
+    "updated_at": {"source": "updated_at", "scope": "profile"},
+    "email": {"source": "email", "scope": "email"},
+    "email_verified": {"source": "email_verified", "scope": "email"},
+    "address": {"source": "address", "scope": "address"},
+    "phone_number": {"source": "phone_number", "scope": "phone"},
+    "phone_number_verified": {"source": "phone_number_verified", "scope": "phone"}
   },
   "branding": {
     "product_name": "Robine ID",

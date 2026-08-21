@@ -2,7 +2,7 @@
 
 ## Status
 
-MVP target
+Basic OP certification target
 
 ## Summary
 
@@ -10,14 +10,14 @@ Robine ID supports the OpenID Connect Authorization Code Flow, with PKCE, as the
 
 ## Requirements
 
-- The authorization endpoint MUST validate `client_id`, `redirect_uri`, `response_type`, `scope`, `state`, `nonce`, and PKCE parameters before authentication begins.
+- The authorization endpoint MUST validate `client_id`, `redirect_uri`, `response_type`, `scope`, optional `state`, optional `nonce`, `prompt`, `max_age`, `display`, claims, and PKCE parameters before authentication begins.
 - `redirect_uri` MUST exactly match a URI registered for the client.
 - Public clients MUST use PKCE with `S256`. Confidential clients MUST use it by default and MAY opt out only through explicit client policy.
 - Authorization codes MUST be short-lived, single-use, bound to the client, redirect URI, subject, nonce, and PKCE challenge.
 - The token endpoint MUST authenticate confidential clients using an explicitly configured method.
 - Successful exchanges MUST return a signed ID token and an opaque access token. The MVP MUST NOT issue refresh tokens.
 - Protocol errors MUST use standards-compliant error codes and MUST NOT expose secrets or stack traces.
-- `state` MUST be non-empty. `nonce` and PKCE MUST be non-empty when required by client policy. A challenge MUST contain 43–128 URL-safe, unpadded base64 characters.
+- `state` and `nonce` MUST be non-empty when supplied. `nonce` and PKCE MUST be present when required by client policy. A challenge MUST contain 43–128 URL-safe, unpadded base64 characters.
 - Requested scopes MUST contain `openid` and MUST be a subset of the client's allowed scopes.
 - A client MUST allow the `authorization_code` grant.
 - Login MUST authenticate a configured local identity without disclosing whether the identifier exists.
@@ -38,9 +38,9 @@ Supported protocol error codes are `invalid_request`, `unsupported_response_type
 - A valid authorization request can complete login and exchange its code exactly once.
 - Reusing a code, changing the redirect URI, or providing an invalid PKCE verifier fails safely.
 - A rejected request preserves a valid `state` value when redirecting back to a trusted redirect URI.
-- A code is unusable after the first exchange attempt, including an attempt with a wrong binding.
+- A code is unusable after the first exchange attempt, including an attempt with a wrong binding. Detecting reuse MUST revoke the access token issued by the original successful exchange.
 - Confidential-client secrets are never accepted from the declarative file as clear text and never returned in an error.
 
 ## Non-Goals
 
-Refresh tokens, `plain` PKCE, response modes, prompt handling, silent authentication, dynamic registration, and non-code response types are outside the MVP. Disabling PKCE is a per-client compatibility exception, not a server-wide mode.
+Refresh tokens, `plain` PKCE, response modes other than query, dynamic registration, and non-code response types are outside this certification target. Disabling PKCE is a per-client compatibility exception, not a server-wide mode.

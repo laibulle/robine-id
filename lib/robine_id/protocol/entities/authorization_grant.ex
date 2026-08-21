@@ -11,7 +11,7 @@ defmodule RobineId.Protocol.Entities.AuthorizationGrant do
     :code_challenge,
     :expires_at
   ]
-  defstruct @enforce_keys ++ [claims: %{}]
+  defstruct @enforce_keys ++ [:auth_time, claims: %{}, id_token_claims: %{}]
 
   @type t :: %__MODULE__{}
 end

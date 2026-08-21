@@ -87,4 +87,79 @@ defmodule RobineId.Protocol.ValidateAuthorizationRequestTest do
     assert {:ok, %AuthorizationRequest{code_challenge: nil, nonce: nil}} =
              RobineId.Protocol.validate_authorization_request("main", params, MemoryRepository)
   end
+
+  test "accepts optional code-flow parameters and validates interaction controls" do
+    {:ok, client} =
+      Client.from_config(%{
+        "id" => "conformance",
+        "type" => "confidential",
+        "authentication_method" => "client_secret_basic",
+        "pkce_required" => false,
+        "nonce_required" => false,
+        "secret_reference" => "secret",
+        "redirect_uris" => ["https://suite.example.test/callback"],
+        "scopes" => ["openid", "profile"]
+      })
+
+    MemoryRepository.put(client)
+
+    params = %{
+      "client_id" => "conformance",
+      "redirect_uri" => "https://suite.example.test/callback",
+      "response_type" => "code",
+      "scope" => "openid",
+      "prompt" => "login consent",
+      "max_age" => "30",
+      "display" => "popup",
+      "claims" => ~s({"userinfo":{"name":{"essential":true}}})
+    }
+
+    assert {:ok, request} =
+             RobineId.Protocol.validate_authorization_request("main", params, MemoryRepository)
+
+    assert request.state == nil
+    assert request.nonce == nil
+    assert request.prompt == ["login", "consent"]
+    assert request.max_age == 30
+    assert get_in(request.claims, ["userinfo", "name", "essential"])
+  end
+
+  test "rejects unsupported request objects with the standard error" do
+    params = Map.put(@params, "request", "unsigned.jwt.value")
+
+    assert {:error, {:request_not_supported, _}} =
+             RobineId.Protocol.validate_authorization_request("main", params, MemoryRepository)
+  end
+
+  test "processes an unsecured request object by value" do
+    header = Jason.encode!(%{"alg" => "none"}) |> Base.url_encode64(padding: false)
+    payload = Jason.encode!(@params) |> Base.url_encode64(padding: false)
+
+    params = %{
+      "client_id" => @params["client_id"],
+      "request" => header <> "." <> payload <> "."
+    }
+
+    assert {:ok, request} =
+             RobineId.Protocol.validate_authorization_request("main", params, MemoryRepository)
+
+    assert request.redirect_uri == @params["redirect_uri"]
+    assert request.state == @params["state"]
+  end
+
+  test "rejects invalid prompt and max_age values" do
+    assert {:error, {:invalid_request, _}} =
+             RobineId.Protocol.validate_authorization_request(
+               "main",
+               Map.put(@params, "prompt", "none login"),
+               MemoryRepository
+             )
+
+    assert {:error, {:invalid_request, _}} =
+             RobineId.Protocol.validate_authorization_request(
+               "main",
+               Map.put(@params, "max_age", "soon"),
+               MemoryRepository
+             )
+  end
 end

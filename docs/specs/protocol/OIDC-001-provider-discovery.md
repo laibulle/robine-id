@@ -25,7 +25,7 @@ Robine ID exposes standards-compliant OpenID Connect discovery metadata so clien
 
 ## Response Contract
 
-The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, `jwks_uri`, `end_session_endpoint`, `response_types_supported`, `grant_types_supported`, `subject_types_supported`, `id_token_signing_alg_values_supported`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`, `scopes_supported`, and `claims_supported`.
+The JSON object contains `issuer`, `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, `jwks_uri`, `end_session_endpoint`, `response_types_supported`, `response_modes_supported`, `grant_types_supported`, `subject_types_supported`, `id_token_signing_alg_values_supported`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`, `scopes_supported`, `claims_supported`, claims-parameter support, request-object support, and supported UI locales.
 
 Discovery metadata is generated from the active configuration on each request. Applying a new active revision therefore changes subsequent discovery responses without recompiling the application.
 

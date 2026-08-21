@@ -8,7 +8,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
 
   @root_fields ~w(schema_version issuers clients users claims branding reconciliation authentication storage telemetry)
   @issuer_fields ~w(id url scopes token_policy claim_mappings branding)
-  @client_fields ~w(id name type redirect_uris post_logout_redirect_uris scopes grant_types authentication_method pkce_required nonce_required secret_reference consent_required branding)
+  @client_fields ~w(id name type redirect_uris post_logout_redirect_uris scopes grant_types authentication_method authentication_methods pkce_required nonce_required secret_reference consent_required branding)
   @user_fields ~w(id identifier password_hash name email claims)
   @branding_fields ~w(product_name logo favicon primary_color font_family support_url privacy_url terms_url default_locale locales messages)
 
@@ -195,7 +195,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
   defp validate_claim_mappings(errors, %{"claims" => mappings}) when is_map(mappings) do
     Enum.reduce(mappings, errors, fn {claim, mapping}, acc ->
       case {claim, mapping} do
-        {reserved, _mapping} when reserved in ~w(iss sub aud iat exp nonce) ->
+        {reserved, _mapping} when reserved in ~w(iss sub aud iat exp auth_time nonce) ->
           ["claim #{inspect(claim)} is reserved by OpenID Connect" | acc]
 
         {_claim, %{"source" => source, "scope" => scope}}

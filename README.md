@@ -4,7 +4,7 @@
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-id/coverage.svg)](https://ci.base59.dev/repositories)
 [![release](https://img.shields.io/github/v/release/laibulle/robine-id?display_name=tag&sort=semver)](https://github.com/laibulle/robine-id/releases)
 
-Robine ID is a file-configured OpenID Connect provider built with Elixir and Phoenix. It implements the Authorization Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated logout.
+Robine ID is a file-configured OpenID Connect provider built with Elixir and Phoenix. It implements the Authorization Code Flow with PKCE, signed ID tokens, JWKS, UserInfo, consent, secure sessions, and RP-initiated logout. Its certification target is the OpenID Foundation Basic OP and Config OP profiles; see [`docs/operations/openid-certification.md`](docs/operations/openid-certification.md).
 
 It can run as a standalone service or as an embedded OTP dependency mounted inside another Phoenix application. Both modes use the same protocol implementation and configuration model. See [`docs/embedding.md`](docs/embedding.md) for the host contract.
 
@@ -152,6 +152,7 @@ mix robine_id.config.preview path/to/robine_id.json
 mix robine_id.config.apply path/to/robine_id.json
 mix robine_id.config.effective
 mix robine_id.keys.rotate default deployment-2026-08
+mix robine_id.oidc.conformance.configure --alias your-unique-alias
 ```
 
 `preview` does not mutate state. `apply` validates the complete revision before atomically activating it. Applying an equivalent revision is a no-op. The effective command redacts passwords, hashes, secret references, tokens, and private material.
@@ -164,12 +165,13 @@ For the configured issuer `https://id.base59.dev/default`:
 | --- | --- |
 | Discovery | `GET /default/.well-known/openid-configuration` |
 | Authorization | `GET /default/authorize` |
+| Authorization by form POST | `POST /default/authorize` |
 | Token | `POST /default/token` |
-| UserInfo | `GET /default/userinfo` |
+| UserInfo | `GET`, `POST /default/userinfo` |
 | JWKS | `GET /default/jwks.json` |
 | Logout | `GET`, `POST /default/logout` |
 
-Authorization requests require `response_type=code`, `openid` scope, `state`, and `nonce`. PKCE using `S256` is mandatory by default and always required for public clients; a confidential integration that cannot send PKCE may opt out explicitly. Redirect URIs match registered values exactly. Authorization codes are short-lived, stored only by hash, bound to issuer/client/redirect/subject/nonce and the PKCE challenge when present, and consumed atomically once.
+Authorization requests require `response_type=code` and the `openid` scope. `state` and `nonce` are supported and strongly recommended; an individual client may require a nonce. PKCE using `S256` is mandatory by default and always required for public clients; a confidential integration that cannot send PKCE may opt out explicitly. Redirect URIs match registered values exactly. Authorization codes are short-lived, stored only by hash, bound to issuer/client/redirect/subject/nonce and the PKCE challenge when present, and consumed atomically once. Reuse also revokes the access token obtained from the original exchange.
 
 ID tokens use RS256. JWKS publishes public material only. Private and retained signing keys are persisted through an atomically replaced AES-256-GCM envelope with filesystem mode `0600`, derived from the deployment `SECRET_KEY_BASE`. Key rotation takes a stable rotation identifier; repeating the same identifier is a no-op, while retained keys continue validating tokens issued before rotation and across restarts.
 

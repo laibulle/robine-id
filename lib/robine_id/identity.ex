@@ -8,4 +8,8 @@ defmodule RobineId.Identity do
   defdelegate map_claims(user, mappings, scopes),
     to: RobineId.Identity.UseCases.MapClaims,
     as: :execute
+
+  defdelegate map_claims(user, mappings, scopes, requested_claims),
+    to: RobineId.Identity.UseCases.MapClaims,
+    as: :execute
 end

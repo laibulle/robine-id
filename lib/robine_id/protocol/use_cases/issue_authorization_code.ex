@@ -17,7 +17,9 @@ defmodule RobineId.Protocol.UseCases.IssueAuthorizationCode do
       nonce: request.nonce,
       code_challenge: request.code_challenge,
       expires_at: now + lifetime,
-      claims: Keyword.get(options, :claims, %{})
+      auth_time: Keyword.get(options, :auth_time),
+      claims: Keyword.get(options, :claims, %{}),
+      id_token_claims: Keyword.get(options, :id_token_claims, %{})
     }
 
     store.issue(grant)

@@ -35,7 +35,9 @@ defmodule RobineId.Protocol.AuthorizationCodeFlowTest do
                "user-123",
                MemoryAuthorizationCodeStore,
                now: 100,
-               lifetime: 60
+               lifetime: 60,
+               auth_time: 99,
+               id_token_claims: %{"name" => "Requested Name"}
              )
 
     params = %{
@@ -59,6 +61,17 @@ defmodule RobineId.Protocol.AuthorizationCodeFlowTest do
     assert tokens["token_type"] == "Bearer"
     assert tokens["scope"] == "openid profile"
 
+    assert {:ok, id_token_claims} =
+             RobineId.Protocol.verify_id_token(
+               tokens["id_token"],
+               issuer,
+               MemoryKeyStore,
+               now: 120
+             )
+
+    assert id_token_claims["name"] == "Requested Name"
+    assert id_token_claims["auth_time"] == 99
+
     assert {:error, {:invalid_grant, _}} =
              RobineId.Protocol.exchange_authorization_code(
                params,
@@ -67,6 +80,8 @@ defmodule RobineId.Protocol.AuthorizationCodeFlowTest do
                MemoryAccessTokenStore,
                now: 120
              )
+
+    assert {:error, :invalid_token} = MemoryAccessTokenStore.get(tokens["access_token"])
   end
 
   test "a wrong verifier consumes and invalidates the code" do

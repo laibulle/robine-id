@@ -6,7 +6,11 @@ defmodule RobineIdWeb.DiscoveryControllerTest do
 
     assert %{
              "issuer" => "https://id.base59.dev/default",
-             "response_types_supported" => ["code"]
+             "response_types_supported" => ["code"],
+             "response_modes_supported" => ["query"],
+             "claims_parameter_supported" => true,
+             "request_parameter_supported" => true,
+             "request_object_signing_alg_values_supported" => ["none"]
            } = json_response(conn, 200)
 
     assert get_resp_header(conn, "cache-control") == ["public, max-age=300"]

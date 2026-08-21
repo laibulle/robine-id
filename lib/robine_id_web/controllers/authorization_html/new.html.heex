@@ -21,13 +21,16 @@
       for={%{}}
       as={:login}
       action={RobineId.Runtime.path("/#{@issuer_id}/authorize")}
+      id="authorization-login-form"
       class="auth-form"
     >
-      <label for="login_identifier">{@messages["sign_in.identifier"]}</label>
-      <input
+      <.input
         id="login_identifier"
         name="login[identifier]"
         type="email"
+        label={@messages["sign_in.identifier"]}
+        value={@login_hint || ""}
+        class="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-950 outline-none transition focus:border-[var(--auth-primary)] focus:ring-4 focus:ring-teal-700/10"
         autocomplete="username"
         inputmode="email"
         required
@@ -35,12 +38,14 @@
         aria-describedby={if @error, do: "form-errors"}
       />
 
-      <label for="login_password">{@messages["sign_in.password"]}</label>
       <div class="password-field">
-        <input
+        <.input
           id="login_password"
           name="login[password]"
           type="password"
+          label={@messages["sign_in.password"]}
+          value=""
+          class="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 pr-20 text-slate-950 outline-none transition focus:border-[var(--auth-primary)] focus:ring-4 focus:ring-teal-700/10"
           autocomplete="current-password"
           required
           aria-describedby={if @error, do: "form-errors"}

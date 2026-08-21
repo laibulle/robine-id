@@ -3,5 +3,8 @@ defmodule RobineId.Protocol.Ports.AuthorizationCodeStore do
   alias RobineId.Protocol.Entities.AuthorizationGrant
 
   @callback issue(AuthorizationGrant.t()) :: {:ok, String.t()}
-  @callback consume(String.t()) :: {:ok, AuthorizationGrant.t()} | {:error, :invalid_grant}
+  @callback consume(String.t()) ::
+              {:ok, AuthorizationGrant.t()}
+              | {:error, :invalid_grant | {:authorization_code_reused, String.t() | nil}}
+  @callback mark_exchanged(String.t(), String.t()) :: :ok
 end

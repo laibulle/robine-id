@@ -37,18 +37,29 @@ defmodule RobineId.Authorization do
              session_policy()["max_concurrent"],
              adapter(:session_registry)
            ) do
+      auth_time = System.system_time(:second)
+      {claims, id_token_claims} = claim_sets(user, request)
+
       {:ok,
        %{
          user: user,
          session_id: session_id,
-         claims: configured_claims(user, request.scope),
+         auth_time: auth_time,
+         claims: claims,
+         id_token_claims: id_token_claims,
          consent_required?: RobineId.Clients.consent_required?(client),
          client: client
        }}
     end
   end
 
-  def approve(request, subject, claims) do
+  def approve(request, subject, claims),
+    do: approve(request, subject, claims, %{}, System.system_time(:second))
+
+  def approve(request, subject, claims, auth_time),
+    do: approve(request, subject, claims, %{}, auth_time)
+
+  def approve(request, subject, claims, id_token_claims, auth_time) do
     with {:ok, metadata} <-
            RobineId.Protocol.discovery(request.issuer_id, adapter(:configuration_store)),
          {:ok, code} <-
@@ -57,7 +68,10 @@ defmodule RobineId.Authorization do
              metadata["issuer"],
              subject,
              adapter(:authorization_code_store),
-             Keyword.put(code_options(request.issuer_id), :claims, claims)
+             code_options(request.issuer_id)
+             |> Keyword.put(:claims, claims)
+             |> Keyword.put(:id_token_claims, id_token_claims)
+             |> Keyword.put(:auth_time, auth_time)
            ) do
       {:ok, append_query(request.redirect_uri, %{"code" => code, "state" => request.state})}
     end
@@ -76,9 +90,24 @@ defmodule RobineId.Authorization do
     RobineId.Security.end_session(subject, session_id, adapter(:session_registry))
   end
 
-  defp configured_claims(user, scopes) do
+  defp claim_sets(user, request) do
     {:ok, snapshot} = RobineId.Configuration.active(adapter(:configuration_store))
-    RobineId.Identity.map_claims(user, snapshot.data["claims"] || %{}, scopes)
+    mappings = snapshot.data["claims"] || %{}
+
+    requested_userinfo_claims =
+      request.claims
+      |> Map.get("userinfo", %{})
+      |> Map.keys()
+
+    requested_id_token_claims =
+      request.claims
+      |> Map.get("id_token", %{})
+      |> Map.keys()
+
+    {
+      RobineId.Identity.map_claims(user, mappings, request.scope, requested_userinfo_claims),
+      RobineId.Identity.map_claims(user, mappings, [], requested_id_token_claims)
+    }
   end
 
   defp session_policy do
@@ -99,6 +128,7 @@ defmodule RobineId.Authorization do
 
   defp append_query(uri, values) do
     parsed = URI.parse(uri)
+    values = values |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
     query = (parsed.query || "") |> URI.decode_query() |> Map.merge(values)
     %{parsed | query: URI.encode_query(query)} |> URI.to_string()
   end
