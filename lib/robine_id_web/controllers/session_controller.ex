@@ -7,7 +7,7 @@ defmodule RobineIdWeb.SessionController do
     if is_binary(get_session(conn, :subject)) do
       redirect(conn, to: Runtime.path("/account"))
     else
-      render_sign_in(conn, %{})
+      render_sign_in(conn, development_login_prefill())
     end
   end
 
@@ -111,6 +111,10 @@ defmodule RobineIdWeb.SessionController do
   end
 
   defp safe_destination(_path), do: Runtime.path("/account")
+
+  defp development_login_prefill do
+    Application.get_env(:robine_id, :development_login_prefill, %{})
+  end
 
   defp session_policy do
     with {:ok, snapshot} <-

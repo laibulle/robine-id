@@ -90,7 +90,11 @@ defmodule RobineIdWeb.Layouts do
 
   def portal(assigns) do
     ~H"""
-    <div class="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(13,148,136,0.12),transparent_30rem),linear-gradient(to_bottom,#f8fafc,#f1f5f9)] text-slate-800">
+    <div
+      id="account-portal"
+      data-theme="light"
+      class="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(13,148,136,0.12),transparent_30rem),linear-gradient(to_bottom,#f8fafc,#f1f5f9)] text-slate-800"
+    >
       <header class="border-b border-slate-200/80 bg-white/85 backdrop-blur-xl">
         <nav
           class="mx-auto flex max-w-7xl items-center justify-between gap-5 px-5 py-4 sm:px-8"

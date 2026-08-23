@@ -27,6 +27,27 @@ defmodule RobineIdWeb.AccountPortalTest do
     assert html =~ "hero-eye-slash"
     assert html =~ "Welcome back"
     assert html =~ "Sign in to manage your account"
+    refute html =~ ~s(value="change-me")
+  end
+
+  test "prefills the configured development credentials", %{conn: conn} do
+    previous = Application.get_env(:robine_id, :development_login_prefill)
+
+    Application.put_env(:robine_id, :development_login_prefill, %{
+      "identifier" => "admin@example.com",
+      "password" => "change-me"
+    })
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:robine_id, :development_login_prefill, previous),
+        else: Application.delete_env(:robine_id, :development_login_prefill)
+    end)
+
+    html = conn |> get(~p"/login") |> html_response(200)
+
+    assert html =~ ~s(value="admin@example.com")
+    assert html =~ ~s(value="change-me")
   end
 
   test "signs in and grants the configured administrator access", %{conn: conn} do
@@ -38,6 +59,8 @@ defmodule RobineIdWeb.AccountPortalTest do
     account_html = conn |> recycle() |> get(~p"/account") |> html_response(200)
     assert account_html =~ "Your account"
     assert account_html =~ "admin@example.com"
+    assert account_html =~ ~s(id="account-portal")
+    assert account_html =~ ~s(data-theme="light")
 
     admin_html = conn |> recycle() |> get(~p"/admin") |> html_response(200)
     assert admin_html =~ "Configured users"

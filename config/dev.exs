@@ -52,6 +52,13 @@ config :robine_id, RobineIdWeb.Endpoint,
 # Enable dev routes for dashboard and mailbox
 config :robine_id, dev_routes: true
 
+# Convenience credentials for the standalone account portal. This setting is
+# loaded only in Mix.env() == :dev and is never present in test or production.
+config :robine_id, :development_login_prefill, %{
+  "identifier" => "admin@example.com",
+  "password" => "change-me"
+}
+
 # Development-only fallback for the local Penpot integration. Environment
 # variables still take precedence, and production does not load this value.
 config :robine_id, :configured_secrets, %{
