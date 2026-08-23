@@ -26,6 +26,8 @@ defmodule RobineIdWeb.AuthorizationControllerTest do
     assert html =~ ~s(autocomplete="username")
     assert html =~ ~s(autocomplete="current-password")
     assert html =~ ~s(data-password-toggle)
+    assert html =~ "hero-eye"
+    assert html =~ "hero-eye-slash"
   end
 
   test "accepts an authorization request submitted as a form POST", %{conn: conn} do

@@ -211,20 +211,22 @@ body {
 }
 
 .auth-form input:focus { border-color: var(--auth-primary); box-shadow: 0 0 0 3px rgba(40, 85, 217, 0.1); }
-.password-field { position: relative; }
-.password-field input { padding-right: 4.5rem; }
-
 .reveal-password {
-  position: absolute;
-  top: 50%;
-  right: 0.65rem;
+  display: inline-grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
   border: 0;
+  border-radius: 0.65rem;
   color: var(--auth-primary);
   background: transparent;
-  font-weight: 700;
-  transform: translateY(-50%);
   cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
 }
+
+.reveal-password:hover { color: var(--auth-primary-dark); background: rgba(35, 137, 143, 0.1); }
+.reveal-password > span { display: grid; place-items: center; }
+.reveal-password > span[hidden] { display: none; }
 
 .primary-action {
   min-height: 3.1rem;

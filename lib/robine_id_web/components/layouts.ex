@@ -73,6 +73,16 @@ defmodule RobineIdWeb.Layouts do
   end
 
   attr :flash, :map, required: true
+  slot :inner_block, required: true
+
+  def authentication(assigns) do
+    ~H"""
+    {render_slot(@inner_block)}
+    <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :flash, :map, required: true
   attr :current_user, :any, default: nil
   attr :theme, :any, required: true
   attr :title, :string, required: true

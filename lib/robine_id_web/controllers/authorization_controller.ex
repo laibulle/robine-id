@@ -172,7 +172,7 @@ defmodule RobineIdWeb.AuthorizationController do
       messages: messages(issuer_id, request),
       error: "The email or password is incorrect.",
       correlation_id: correlation_id(conn),
-      login_hint: request && request.login_hint
+      form: sign_in_form(request && request.login_hint)
     )
   end
 
@@ -194,7 +194,7 @@ defmodule RobineIdWeb.AuthorizationController do
       messages: messages(issuer_id, request),
       error: "Too many attempts. Please wait before trying again.",
       correlation_id: correlation_id(conn),
-      login_hint: request && request.login_hint
+      form: sign_in_form(request && request.login_hint)
     )
   end
 
@@ -290,7 +290,7 @@ defmodule RobineIdWeb.AuthorizationController do
       messages: resolved_messages,
       error: nil,
       correlation_id: nil,
-      login_hint: request.login_hint
+      form: sign_in_form(request.login_hint)
     )
   end
 
@@ -476,4 +476,8 @@ defmodule RobineIdWeb.AuthorizationController do
 
   defp adapter(name), do: Runtime.adapter(name)
   defp correlation_id(conn), do: List.first(get_resp_header(conn, "x-request-id"))
+
+  defp sign_in_form(identifier) do
+    Phoenix.Component.to_form(%{"identifier" => identifier || "", "password" => ""}, as: :login)
+  end
 end

@@ -186,6 +186,8 @@ defmodule RobineIdWeb.CoreComponents do
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
                 multiple pattern placeholder readonly required rows size step)
 
+  slot :suffix, doc: "content positioned inside the trailing edge of a text input"
+
   def input(%{field: %Phoenix.HTML.FormField{} = field} = assigns) do
     errors = if Phoenix.Component.used_input?(field), do: field.errors, else: []
 
@@ -283,17 +285,22 @@ defmodule RobineIdWeb.CoreComponents do
     <div class="fieldset mb-2">
       <label for={@id}>
         <span :if={@label} class="label mb-1">{@label}</span>
-        <input
-          type={@type}
-          name={@name}
-          id={@id}
-          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
-          class={[
-            @class || "w-full input",
-            @errors != [] && (@error_class || "input-error")
-          ]}
-          {@rest}
-        />
+        <div class="relative" data-input-wrapper>
+          <input
+            type={@type}
+            name={@name}
+            id={@id}
+            value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+            class={[
+              @class || "w-full input",
+              @errors != [] && (@error_class || "input-error")
+            ]}
+            {@rest}
+          />
+          <div :if={@suffix != []} class="absolute inset-y-0 right-2 flex items-center">
+            {render_slot(@suffix)}
+          </div>
+        </div>
       </label>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>

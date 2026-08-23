@@ -24,10 +24,13 @@ document.addEventListener("click", event => {
   const toggle = event.target.closest("[data-password-toggle]")
   if (!toggle) return
 
-  const input = toggle.parentElement.querySelector("input")
+  const input = toggle.closest("[data-input-wrapper]").querySelector("input")
+  const showIcon = toggle.querySelector("[data-password-show-icon]")
+  const hideIcon = toggle.querySelector("[data-password-hide-icon]")
   const revealing = input.type === "password"
   input.type = revealing ? "text" : "password"
-  toggle.textContent = revealing ? "Hide" : "Show"
+  showIcon.hidden = revealing
+  hideIcon.hidden = !revealing
   toggle.setAttribute("aria-label", revealing ? "Hide password" : "Show password")
 })
 // Establish Phoenix Socket and LiveView configuration.

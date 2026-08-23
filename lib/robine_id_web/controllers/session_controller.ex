@@ -89,12 +89,16 @@ defmodule RobineIdWeb.SessionController do
   end
 
   defp render_sign_in(conn, values, error \\ nil) do
+    theme = RobineIdWeb.Portal.theme()
+    {:ok, messages} = RobineId.Experience.messages(theme, nil)
+
     render(conn, :new,
       page_title: "Account sign in",
-      theme: RobineIdWeb.Portal.theme(),
-      current_user: nil,
-      form: Phoenix.Component.to_form(values, as: :login),
-      error: error
+      theme: theme,
+      messages: messages,
+      form: Phoenix.Component.to_form(Map.put_new(values, "password", ""), as: :login),
+      error: error,
+      correlation_id: List.first(get_resp_header(conn, "x-request-id"))
     )
   end
 
