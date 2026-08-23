@@ -2,7 +2,7 @@ defmodule RobineId.Identity.Entities.User do
   @moduledoc "A local identity that can authenticate with Robine ID."
 
   @enforce_keys [:id, :identifier, :password_hash]
-  defstruct [:id, :identifier, :password_hash, :name, :email, :claims]
+  defstruct [:id, :identifier, :password_hash, :name, :email, :claims, roles: [], enabled: true]
 
   @type t :: %__MODULE__{}
 
@@ -17,7 +17,9 @@ defmodule RobineId.Identity.Entities.User do
        password_hash: password_hash,
        name: data["name"],
        email: data["email"],
-       claims: data["claims"] || %{}
+       claims: data["claims"] || %{},
+       roles: data["roles"] || [],
+       enabled: true
      }}
   end
 

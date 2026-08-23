@@ -15,6 +15,14 @@ defmodule RobineIdWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :authenticated do
+    plug RobineIdWeb.Plugs.RequireAuthenticated
+  end
+
+  pipeline :admin do
+    plug RobineIdWeb.Plugs.RequireAdmin
+  end
+
   # OpenID Connect Core allows an Authorization Request to be submitted as an
   # application/x-www-form-urlencoded POST. Interactive form submissions are
   # protected explicitly in the controller so protocol POSTs need no CSRF token.
@@ -32,10 +40,29 @@ defmodule RobineIdWeb.Router do
 
     get "/", PageController, :home
     get "/docs", PageController, :docs
+    get "/login", SessionController, :new
+    post "/login", SessionController, :create
+    post "/logout", SessionController, :delete
     get "/:issuer_id/authorize", AuthorizationController, :new
     post "/:issuer_id/authorize/consent", AuthorizationController, :consent
     get "/:issuer_id/logout", LogoutController, :new
     post "/:issuer_id/logout", LogoutController, :create
+  end
+
+  scope "/", RobineIdWeb do
+    pipe_through [:browser, :authenticated]
+
+    get "/account", AccountController, :show
+    put "/account", AccountController, :update
+  end
+
+  scope "/admin", RobineIdWeb.Admin do
+    pipe_through [:browser, :authenticated, :admin]
+
+    get "/", UserController, :index
+    get "/users", UserController, :index
+    get "/users/:id/edit", UserController, :edit
+    put "/users/:id", UserController, :update
   end
 
   scope "/", RobineIdWeb do

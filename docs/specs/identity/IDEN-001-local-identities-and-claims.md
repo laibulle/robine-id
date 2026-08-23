@@ -14,6 +14,7 @@ Operators declare local password identities and scope-constrained OIDC claim map
 - Bcrypt hashes MUST use a supported `$2a$`, `$2b$`, or `$2y$` form with cost from 10 through 16.
 - Optional standard sources are `name` and `email`; arbitrary additional sources MAY be stored in the user's `claims` map.
 - Clear-text passwords MUST NOT be accepted in configuration.
+- A configured identity MAY declare unique lowercase role identifiers. The `admin` role MUST grant access to the protected administration surface.
 - Authentication MUST trim the submitted identifier and perform a bcrypt verification.
 - Missing users MUST trigger a dummy bcrypt verification so the public response and dominant work factor do not disclose account existence.
 - Failed authentication MUST return one generic invalid-credentials outcome.
@@ -30,7 +31,11 @@ Operators declare local password identities and scope-constrained OIDC claim map
 - Mapped `name`, `email`, and custom claims appear only when their configured scope is present.
 - Attempting to map a reserved protocol claim is rejected during configuration validation.
 - No effective-configuration or audit output contains password hashes.
+- In standalone mode, authenticated users MAY change their display name, email address, and password. These changes MUST be persisted outside the read-only configuration and MUST be used by subsequent OIDC authentication and claim mapping.
+- Administrative profile, role, and enabled-state changes MUST be persisted outside the read-only configuration. A disabled account MUST fail new authentication and authenticated-route resolution.
+- The administrator MUST NOT be able to disable their own account or remove their own `admin` role through the administration surface.
+- Persistent account changes MUST NOT create identities absent from the active configuration or change their stable subject or sign-in identifier.
 
 ## Lifecycle and Limitations
 
-Users are managed only by editing and applying configuration. Password reset, account recovery, enrollment, email verification, lockout state, groups, roles, external directories, and identity federation are outside the MVP. Removing a user makes subsequent login and UserInfo lookup fail after the revision activates; existing in-memory tokens are not proactively enumerated or revoked.
+Users are provisioned only by editing and applying configuration. Standalone deployments merge each configured identity with an optional SQLite account override. Self-service account recovery, enrollment, email verification, groups, external directories, and identity federation remain outside the MVP. Removing a user makes subsequent login and UserInfo lookup fail after the revision activates; existing bearer tokens are not proactively enumerated or revoked.

@@ -12,6 +12,7 @@
     </a>
     <div class="landing-nav-actions">
       <a href={RobineId.Runtime.path("/docs")} class="nav-text-link">Documentation</a>
+      <a href={RobineId.Runtime.path("/account")} class="nav-text-link">Manage account</a>
       <span class={["status-pill", @ready? && "is-ready"]}>
         <span aria-hidden="true"></span>{if @ready?, do: "All systems ready", else: "Starting"}
       </span>

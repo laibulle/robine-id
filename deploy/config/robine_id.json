@@ -20,6 +20,7 @@
       "password_hash": "$2b$12$.JtidA6ZMWny4XaLMozDSOupYHbVNQurj8NkCdM9D3m/g3v3fyXXa",
       "name": "Development Administrator",
       "email": "admin@example.com",
+      "roles": ["admin"],
       "claims": {
         "preferred_username": "admin",
         "given_name": "Development",

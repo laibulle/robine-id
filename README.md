@@ -51,6 +51,8 @@ curl --fail http://127.0.0.1:4001/health/ready
 ```
 
 - Home: <http://127.0.0.1:4001>
+- Account portal: <http://127.0.0.1:4001/account>
+- User administration: <http://127.0.0.1:4001/admin>
 - Documentation: <http://127.0.0.1:4001/docs>
 - Provider discovery: <http://127.0.0.1:4001/default/.well-known/openid-configuration>
 
@@ -108,7 +110,7 @@ Every document declares `schema_version: 1`. The root supports these sections:
 
 - `issuers`: issuer URLs, supported scopes, token policy, claim mappings, and issuer branding;
 - `applications/*.json`: exact redirect URIs, post-logout redirect URIs, scopes, grants, authentication, consent, and application branding;
-- `users`: local identities with bcrypt password hashes and source claims;
+- `users`: local identities with bcrypt password hashes, source claims, and optional roles;
 - `claims`: mapping from OIDC claim names to identity sources and required scopes;
 - `branding`: product name, assets, accessible theme tokens, locales, message overrides, and legal/support links;
 - `reconciliation`: explicit removal policy;
@@ -144,6 +146,25 @@ HTTP issuer and redirect URLs are accepted only for loopback development hosts. 
 
 Every application document declares `schema_version: 1` and `kind: "oidc_application"`. The application watches the complete composed configuration and reloads it every second by default; `ROBINE_ID_RELOAD_INTERVAL` overrides that interval in milliseconds. A valid change activates atomically; an unchanged revision is ignored; an invalid or partially written file is recorded as a failed attempt while the last valid revision remains active.
 
+### Account and administration portal
+
+The root configuration remains the read-only provisioning authority for identities: it creates the available user IDs and sign-in identifiers, and removing a user removes access. In standalone mode, `/account` stores user-managed display name, email, and password changes as durable SQLite overrides. The immutable sign-in identifier is never rewritten.
+
+Add the `admin` role to a configured user to grant access to `/admin`:
+
+```json
+{
+  "id": "operator",
+  "identifier": "operator@example.com",
+  "password_hash": "$2b$12$...",
+  "name": "Identity Operator",
+  "email": "operator@example.com",
+  "roles": ["admin"]
+}
+```
+
+Administrators can update configured users, assign comma-separated roles, and enable or disable accounts. They cannot disable their own account or remove their own `admin` role. Overrides live in the same persistent SQLite database as the service, so database backups include account changes while configuration mounts can remain read-only.
+
 ### Configuration commands
 
 ```sh
@@ -170,6 +191,9 @@ For the configured issuer `https://id.base59.dev/default`:
 | UserInfo | `GET`, `POST /default/userinfo` |
 | JWKS | `GET /default/jwks.json` |
 | Logout | `GET`, `POST /default/logout` |
+| Account sign-in | `GET`, `POST /login` |
+| Account management | `GET`, `PUT /account` |
+| User administration | `GET /admin`, `GET`, `PUT /admin/users/*` |
 
 Authorization requests require `response_type=code` and the `openid` scope. `state` and `nonce` are supported and strongly recommended; an individual client may require a nonce. PKCE using `S256` is mandatory by default and always required for public clients; a confidential integration that cannot send PKCE may opt out explicitly. Redirect URIs match registered values exactly. Authorization codes are short-lived, stored only by hash, bound to issuer/client/redirect/subject/nonce and the PKCE challenge when present, and consumed atomically once. Reuse also revokes the access token obtained from the original exchange.
 

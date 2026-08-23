@@ -27,7 +27,11 @@ defmodule RobineId.Runtime do
 
   def adapter(name) when is_atom(name) do
     overrides = Application.get_env(:robine_id, :adapters, %{})
-    Map.get(overrides, name, Map.fetch!(@defaults, name))
+
+    case Map.fetch(overrides, name) do
+      {:ok, adapter} -> adapter
+      :error -> default_adapter(name)
+    end
   end
 
   def base_path do
@@ -42,4 +46,12 @@ defmodule RobineId.Runtime do
   defp normalize_base_path(""), do: ""
   defp normalize_base_path("/"), do: ""
   defp normalize_base_path(path), do: "/" <> (path |> String.trim() |> String.trim("/"))
+
+  defp default_adapter(:user_repository) do
+    if standalone?(),
+      do: RobineId.Identity.Adapters.ManagedUserRepository,
+      else: RobineId.Identity.Adapters.ConfigurationUserRepository
+  end
+
+  defp default_adapter(name), do: Map.fetch!(@defaults, name)
 end

@@ -72,6 +72,64 @@ defmodule RobineIdWeb.Layouts do
     """
   end
 
+  attr :flash, :map, required: true
+  attr :current_user, :any, default: nil
+  attr :theme, :any, required: true
+  attr :title, :string, required: true
+  slot :inner_block, required: true
+
+  def portal(assigns) do
+    ~H"""
+    <div class="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(13,148,136,0.12),transparent_30rem),linear-gradient(to_bottom,#f8fafc,#f1f5f9)] text-slate-800">
+      <header class="border-b border-slate-200/80 bg-white/85 backdrop-blur-xl">
+        <nav
+          class="mx-auto flex max-w-7xl items-center justify-between gap-5 px-5 py-4 sm:px-8"
+          aria-label="Account navigation"
+        >
+          <a
+            href={RobineId.Runtime.path("/")}
+            class="flex items-center gap-3 font-bold tracking-tight text-slate-900 transition hover:text-teal-800"
+          >
+            <img :if={@theme.logo} src={@theme.logo} alt="" class="h-9 w-9 rounded-xl object-contain" />
+            <img
+              :if={!@theme.logo}
+              src={RobineId.Runtime.path("/images/brand/robine-mark.png")}
+              alt=""
+              class="h-9 w-9 object-contain"
+            />
+            <span>{@theme.product_name}</span>
+          </a>
+          <div class="flex items-center gap-2 sm:gap-3">
+            <a
+              :if={@current_user}
+              href={RobineId.Runtime.path("/account")}
+              class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >Account</a>
+            <a
+              :if={@current_user && RobineId.Identity.Accounts.admin?(@current_user)}
+              href={RobineId.Runtime.path("/admin")}
+              class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >Admin</a>
+            <.link
+              :if={@current_user}
+              href={RobineId.Runtime.path("/logout")}
+              method="post"
+              id="portal-sign-out"
+              class="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-white"
+            >Sign out</.link>
+          </div>
+        </nav>
+      </header>
+
+      <main class="mx-auto max-w-7xl px-5 py-10 sm:px-8 sm:py-14">
+        {render_slot(@inner_block)}
+      </main>
+
+      <.flash_group flash={@flash} />
+    </div>
+    """
+  end
+
   @doc """
   Shows the flash group with standard titles and content.
 

@@ -9,7 +9,7 @@ defmodule RobineId.Configuration.Entities.Snapshot do
   @root_fields ~w(schema_version issuers clients users claims branding reconciliation authentication storage telemetry)
   @issuer_fields ~w(id url scopes token_policy claim_mappings branding)
   @client_fields ~w(id name type redirect_uris post_logout_redirect_uris scopes grant_types authentication_method authentication_methods pkce_required nonce_required secret_reference consent_required branding)
-  @user_fields ~w(id identifier password_hash name email claims)
+  @user_fields ~w(id identifier password_hash name email claims roles)
   @branding_fields ~w(product_name logo favicon primary_color font_family support_url privacy_url terms_url default_locale locales messages)
 
   @spec new(map()) :: {:ok, t()} | {:error, [String.t()]}
@@ -139,6 +139,8 @@ defmodule RobineId.Configuration.Entities.Snapshot do
        when is_binary(id) and is_binary(identifier) and is_binary(hash) do
     errors = unknown_field_errors(data, @user_fields, "user #{inspect(id)}")
 
+    errors = validate_roles(errors, data["roles"], id)
+
     case Regex.run(~r/^\$2[aby]\$(\d{2})\$[.\/A-Za-z0-9]{53}$/, hash) do
       [_, cost] when cost >= "10" and cost <= "16" ->
         errors
@@ -150,6 +152,21 @@ defmodule RobineId.Configuration.Entities.Snapshot do
 
   defp validate_user(_),
     do: ["every user requires string id, identifier, and password_hash fields"]
+
+  defp validate_roles(errors, nil, _id), do: errors
+
+  defp validate_roles(errors, roles, id) when is_list(roles) do
+    valid? =
+      roles == Enum.uniq(roles) and
+        Enum.all?(roles, &(is_binary(&1) and Regex.match?(~r/^[a-z][a-z0-9:_-]{0,63}$/, &1)))
+
+    if valid?,
+      do: errors,
+      else: ["user #{inspect(id)} roles must be unique role identifiers" | errors]
+  end
+
+  defp validate_roles(errors, _roles, id),
+    do: ["user #{inspect(id)} roles must be a list" | errors]
 
   defp validate_branding(errors, %{"branding" => branding}) when is_map(branding) do
     validate_nested_branding(errors, branding, "branding")

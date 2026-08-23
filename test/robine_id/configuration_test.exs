@@ -65,6 +65,21 @@ defmodule RobineId.ConfigurationTest do
     assert Enum.any?(errors, &String.contains?(&1, "reserved by OpenID Connect"))
   end
 
+  test "validates declarative user roles" do
+    user = %{
+      "id" => "admin",
+      "identifier" => "admin@example.test",
+      "password_hash" => Bcrypt.hash_pwd_salt("password", log_rounds: 10),
+      "roles" => ["admin", "support:read"]
+    }
+
+    assert {:ok, _snapshot} = Snapshot.new(Map.put(@valid, "users", [user]))
+
+    invalid_user = %{user | "roles" => ["Admin", "Admin"]}
+    assert {:error, errors} = Snapshot.new(Map.put(@valid, "users", [invalid_user]))
+    assert Enum.any?(errors, &String.contains?(&1, "roles must be unique role identifiers"))
+  end
+
   test "preview classifies stable resource operations without mutating state" do
     assert {:ok, current} = Snapshot.new(@valid)
     assert {:ok, :activated} = MemoryStore.activate(current)

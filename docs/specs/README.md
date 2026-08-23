@@ -32,7 +32,7 @@ Robine ID is a configurable, idempotent OpenID Connect provider built with Elixi
 
 The MVP is a single-instance, file-configured OpenID Provider for trusted operators. It supports local password identities, Authorization Code Flow with mandatory PKCE S256, public and `client_secret_basic` confidential clients, signed ID tokens, opaque bearer access tokens, UserInfo, consent, and RP-initiated logout.
 
-The following are explicitly outside the MVP: dynamic client registration, refresh tokens, implicit and hybrid flows, device authorization, resource-owner password grants, federation, social login, MFA, account recovery, self-service enrollment, an administration UI, token introspection, token revocation, distributed runtime stores, and high availability.
+The following are explicitly outside the MVP: dynamic client registration, refresh tokens, implicit and hybrid flows, device authorization, resource-owner password grants, federation, social login, MFA, account recovery, self-service enrollment, token introspection, token revocation, distributed runtime stores, and high availability.
 
 Authorization codes, access-token grants, rate-limit counters, and authenticated-session registrations are node-local and held in memory. Restarting the node invalidates those values. Signing keys are persisted when `storage.signing_key_path` is configured. This limitation MUST be understood before operating the MVP.
 
