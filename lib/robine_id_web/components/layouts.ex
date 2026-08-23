@@ -130,6 +130,34 @@ defmodule RobineIdWeb.Layouts do
     """
   end
 
+  attr :theme, :any, required: true
+  attr :labelledby, :string, required: true
+  attr :eyebrow, :string, required: true
+  slot :inner_block, required: true
+
+  def auth(assigns) do
+    ~H"""
+    <main class="auth-shell" style={"--auth-primary: #{@theme.primary_color}"}>
+      <section class="auth-card" aria-labelledby={@labelledby}>
+        <img
+          :if={@theme.logo}
+          src={@theme.logo}
+          alt={@theme.product_name}
+          class="configured-logo"
+        />
+        <img
+          :if={!@theme.logo}
+          src={RobineId.Runtime.path("/images/brand/robine-mark.png")}
+          alt=""
+          class="auth-brand-logo"
+        />
+        <p class="eyebrow">{@eyebrow}</p>
+        {render_slot(@inner_block)}
+      </section>
+    </main>
+    """
+  end
+
   @doc """
   Shows the flash group with standard titles and content.
 

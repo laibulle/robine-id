@@ -16,6 +16,17 @@ defmodule RobineIdWeb.AccountPortalTest do
     assert get_session(conn, :return_to) == "/account"
   end
 
+  test "local sign-in uses the same authorization shell", %{conn: conn} do
+    html = conn |> get(~p"/login") |> html_response(200)
+
+    assert html =~ "auth-shell"
+    assert html =~ "auth-card"
+    assert html =~ "auth-form"
+    assert html =~ "bg-white"
+    assert html =~ "data-password-toggle"
+    refute html =~ "Account navigation"
+  end
+
   test "signs in and grants the configured administrator access", %{conn: conn} do
     conn = sign_in(conn)
 
