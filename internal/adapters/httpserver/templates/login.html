@@ -1,0 +1,17 @@
+{{define "body"}}<main class="auth-shell">{{template "card" .}}</main>{{end}}
+{{define "card"}}<section id="auth-card" class="auth-card" aria-labelledby="sign-in-title">
+  {{template "brand-icon" .}}
+  <p class="eyebrow">{{.ProductName}}</p>
+  <h1 id="sign-in-title">Welcome back</h1>
+  <p class="auth-intro">Sign in securely to continue.</p>
+  {{if .Error}}<div id="login-error" class="error-summary" role="alert" tabindex="-1">{{.Error}}</div>{{end}}
+  <form id="account-login-form" class="auth-form" method="post" action="/login" hx-post="/login" hx-target="#auth-card" hx-swap="outerHTML">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label for="login-identifier">Email address</label>
+    <input id="login-identifier" name="identifier" type="email" autocomplete="username" value="{{.Identifier}}" required autofocus>
+    <label for="login-password">Password</label>
+    <div class="password-input"><input id="login-password" name="password" type="password" autocomplete="current-password" required><button class="reveal-password" type="button" data-password-toggle aria-label="Show password">Show</button></div>
+    <button id="login-submit" class="primary-action" type="submit"><span>Continue</span><span class="htmx-indicator" aria-hidden="true">···</span></button>
+  </form>
+  <p class="privacy-note">Your credentials are never written to logs.</p>
+</section>{{end}}

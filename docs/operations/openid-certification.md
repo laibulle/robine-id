@@ -36,13 +36,7 @@ Every advertised endpoint must use HTTPS, the metadata `issuer` must equal `$iss
 
 Choose a unique, URL-safe suite alias. The Foundation uses it to form the single callback URI `https://www.certification.openid.net/test/a/<ALIAS>/callback`.
 
-Generate the three required application files:
-
-```sh
-mix robine_id.oidc.conformance.configure \
-  --alias your-unique-alias \
-  --applications-dir deploy/config/applications
-```
+Create the three required application files under `deploy/config/applications`, using your unique alias in every exact callback URI.
 
 The task creates:
 
@@ -52,12 +46,11 @@ The task creates:
 | `client2` | `robine-id-conformance-basic-2` | `client_secret_basic` | `ROBINE_ID_CONFORMANCE_BASIC_2_SECRET` |
 | `client_secret_post` | `robine-id-conformance-post` | `client_secret_post` | `ROBINE_ID_CONFORMANCE_POST_SECRET` |
 
-Generate three independent high-entropy secrets, place them in the deployment secret store under those names, validate the composed configuration, and restart the release so the new environment variables are available:
+Generate three independent high-entropy secrets, place them in the deployment secret store under those names, run the quality gate, and restart the release so the new environment variables are available:
 
 ```sh
 openssl rand -base64 48
-ROBINE_ID_APPLICATIONS_DIR="$PWD/deploy/config/applications" \
-  mix robine_id.config.validate deploy/config/robine_id.json
+make check
 ```
 
 The generated clients intentionally disable mandatory nonce and PKCE policy because nonce is optional for code flow and the Basic plan includes requests without PKCE. The provider still accepts S256 when the PKCE module supplies it. The clients also disable interactive consent so `prompt=none` can complete silently after the first authentication.
@@ -100,7 +93,7 @@ The external hosted run, fee, legal declaration, and Foundation acceptance requi
 
 ## Release Evidence Checklist
 
-- `mix precommit` passes on the exact release commit.
+- `make check` passes on the exact release commit.
 - The dependency audit contains no known vulnerable locked packages.
 - The public discovery document and JWKS pass the Config OP plan.
 - All Basic OP modules have an acceptable terminal result.

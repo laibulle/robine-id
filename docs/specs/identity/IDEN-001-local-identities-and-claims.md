@@ -38,4 +38,4 @@ Operators declare local password identities and scope-constrained OIDC claim map
 
 ## Lifecycle and Limitations
 
-Users are provisioned only by editing and applying configuration. Standalone deployments merge each configured identity with an optional SQLite account override. Self-service account recovery, enrollment, email verification, groups, external directories, and identity federation remain outside the MVP. Removing a user makes subsequent login and UserInfo lookup fail after the revision activates; existing bearer tokens are not proactively enumerated or revoked.
+Users are provisioned only by editing and applying configuration. Deployments merge each configured identity with an optional account override stored through the configured local or S3-compatible blob adapter. Self-service account recovery, enrollment, email verification, groups, external directories, and identity federation remain outside the MVP. Removing a user makes subsequent login and UserInfo lookup fail after the revision activates; existing bearer tokens are rejected by UserInfo once the subject no longer resolves.

@@ -1,0 +1,29 @@
+.brand-logo {
+  display: block;
+  width: 2.65rem;
+  height: 2.65rem;
+  flex: none;
+  object-fit: contain;
+}
+
+.auth-brand-logo {
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
+  object-fit: contain;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+@media (max-width: 380px) {
+  .wordmark .product-name {
+    max-width: 8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

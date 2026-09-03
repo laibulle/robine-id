@@ -1,118 +1,38 @@
-# This file is based on these images:
-#
-#   - https://hub.docker.com/r/hexpm/elixir/tags - for the builder image
-#     E.g.: docker.io/hexpm/elixir:1.20.3-erlang-29.0.5-debian-trixie-20260803-slim
-#   - https://hub.docker.com/_/debian/tags?name=trixie-20260803-slim - for the runner image
-#     E.g.: docker.io/debian:trixie-20260803-slim
-#
-# Find builder and runner images on Docker Hub or on Hex's Build Server (Bob).
-# We recommend using Bob's Web UI to find recent tags:
-#
-#   - https://bob.hex.pm/docker
-#
-# We suggest using the same Debian version for both the builder and runner images.
-#
-# We suggest Debian/Ubuntu instead of Alpine to avoid production compatibility issues
-# (such as DNS resolution failures, and dynamically linked NIFs/precompiled binaries).
-#
-# For finding packages in Debian, search on https://packages.debian.org/.
+FROM golang:1.27.1-alpine AS builder
 
-ARG ELIXIR_VERSION=1.20.3
-ARG OTP_VERSION=29.0.5
-ARG DEBIAN_VERSION=trixie-20260803-slim
+RUN apk add --no-cache ca-certificates git
+WORKDIR /src
 
-ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
-ARG RUNNER_IMAGE="docker.io/debian:${DEBIAN_VERSION}"
+COPY go.mod go.sum ./
+RUN go mod download
 
-FROM ${BUILDER_IMAGE} AS builder
+COPY cmd cmd
+COPY internal internal
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/robine-id ./cmd/robine-id
 
-# install build dependencies
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends build-essential git \
-  && rm -rf /var/lib/apt/lists/*
+FROM alpine:3.22 AS final
 
-# prepare build dir
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S robine-id \
+    && adduser -S -G robine-id -h /app robine-id \
+    && mkdir -p /app/config /data \
+    && chown -R robine-id:robine-id /app /data
+
 WORKDIR /app
+COPY --from=builder --chown=robine-id:robine-id /out/robine-id /app/robine-id
 
-# install hex + rebar
-RUN mix local.hex --force \
-  && mix local.rebar --force
+USER robine-id
+ENV PORT=8080 \
+    ROBINE_ID_BLOB_STORE=local \
+    ROBINE_ID_STORAGE_ROOT=/config \
+    ROBINE_ID_CONFIG_KEY=robine_id.json \
+    ROBINE_ID_APPLICATIONS_PREFIX=applications \
+    ROBINE_ID_STATE_ROOT=/data \
+    ROBINE_ID_SIGNING_KEY=signing_keys.json.enc \
+    ROBINE_ID_ACCOUNTS_KEY=accounts.json
 
-# set build ENV
-ENV MIX_ENV="prod"
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=3s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/health/ready || exit 1
 
-# install mix dependencies
-COPY mix.exs mix.lock ./
-RUN mix deps.get --only $MIX_ENV
-RUN mkdir config
-
-# copy compile-time config files before we compile dependencies
-# to ensure any relevant config change will trigger the dependencies
-# to be re-compiled.
-COPY config/config.exs config/${MIX_ENV}.exs config/
-RUN mix deps.compile
-
-RUN mix assets.setup
-
-COPY priv priv
-
-COPY lib lib
-
-# Compile the release
-RUN mix compile
-
-COPY assets assets
-
-# compile assets
-RUN mix assets.deploy
-
-# Changes to config/runtime.exs don't require recompiling the code
-COPY config/runtime.exs config/
-
-COPY rel rel
-RUN mix release
-
-# start a new build stage so that the final image will only contain
-# the compiled release and other runtime necessities
-FROM ${RUNNER_IMAGE} AS final
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/*
-
-# Set the locale
-RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
-  && locale-gen
-
-ENV LANG=en_US.UTF-8
-ENV LANGUAGE=en_US:en
-ENV LC_ALL=en_US.UTF-8
-
-WORKDIR "/app"
-RUN mkdir -p /app/config /data \
-  && chown -R nobody:root /app /data
-
-# set runner ENV
-ENV MIX_ENV="prod"
-ENV PHX_SERVER="true"
-ENV PORT="4001"
-ENV ROBINE_ID_CONFIG="/config/robine_id.json"
-ENV ROBINE_ID_APPLICATIONS_DIR="/config/applications"
-
-# Only copy the final release from the build stage
-COPY --from=builder --chown=nobody:root /app/_build/${MIX_ENV}/rel/robine_id ./
-
-USER nobody
-
-EXPOSE 4001
-VOLUME ["/data"]
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl --fail --silent --show-error http://127.0.0.1:4001/health/ready >/dev/null || exit 1
-
-# If using an environment that doesn't automatically reap zombie processes, it is
-# advised to add an init process such as tini via `apt-get install`
-# above and adding an entrypoint. See https://github.com/krallin/tini for details
-# ENTRYPOINT ["/tini", "--"]
-
-CMD ["/app/bin/server"]
+ENTRYPOINT ["/app/robine-id"]

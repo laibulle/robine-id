@@ -1,0 +1,2 @@
+{{define "body"}}<main class="auth-shell">{{template "card" .}}</main>{{end}}
+{{define "card"}}<section id="auth-card" class="auth-card" aria-labelledby="signed-out-title"><div class="success-mark" aria-hidden="true">✓</div><p class="eyebrow">{{.ProductName}}</p><h1 id="signed-out-title">You’re signed out</h1><p class="auth-intro">Your browser session has ended securely.</p><a class="primary-link" href="/login">Sign in again</a></section>{{end}}

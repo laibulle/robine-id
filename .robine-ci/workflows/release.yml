@@ -7,7 +7,7 @@ on:
 
 jobs:
   package:
-    image: hexpm/elixir@sha256:ae38be7cb19bffa78adedb04732d9e6ba83a507b4cfb06983cbe711edb49da54
+    image: golang:1.27.1
     shell: /bin/bash
     timeout: 30m
     env:

@@ -9,64 +9,32 @@ on:
 
 jobs:
   verify:
-    image: hexpm/elixir@sha256:ae38be7cb19bffa78adedb04732d9e6ba83a507b4cfb06983cbe711edb49da54
+    image: golang:1.27.1
     shell: /bin/bash
     timeout: 20m
     env:
-      MIX_ENV: test
-      ERL_FLAGS: "+S 4:4"
-      MAKEFLAGS: "-j4"
+      GOMAXPROCS: "4"
     steps:
       - name: Checkout
         uses: checkout
-      - name: Install native test dependencies
-        run: |
-          mkdir -p /tmp/apt-archives/partial
-          chmod 0777 /tmp/apt-archives /tmp/apt-archives/partial
-          apt-get -o APT::Sandbox::User=root \
-            -o Dir::Cache::archives=/tmp/apt-archives update
-          DEBIAN_FRONTEND=noninteractive apt-get \
-            -o APT::Sandbox::User=root \
-            -o Dir::Cache::archives=/tmp/apt-archives \
-            install --yes --no-install-recommends \
-            build-essential ca-certificates git
-          rm -rf /var/lib/apt/lists/*
-      - name: Install Mix tooling
-        run: |
-          mix local.hex --force
-          mix local.rebar --force
-      - name: Restore Mix cache
+      - name: Restore Go cache
         uses: cache/restore
         with:
-          key: robine-id-mix-${{ checksum('mix.lock') }}
-          paths: [deps]
-      - name: Install dependencies
-        run: mix deps.get
-      - name: Run project verification
-        run: mix precommit
-      - name: Generate coverage report
-        run: |
-          set -euo pipefail
-          set +e
-          mix coverage | tee /tmp/robine-id-coverage.log
-          coverage_status=${PIPESTATUS[0]}
-          set -e
-
-          coverage_total=$(awk '/\| Total[[:space:]]*\|$/{gsub(/%/, "", $2); print $2}' /tmp/robine-id-coverage.log | tail -1)
-          if [[ -n "${coverage_total}" ]]; then
-            printf 'ROBINE_COVERAGE total=%s threshold=70 report=coverage-report\n' "${coverage_total}"
-          fi
-
-          exit "${coverage_status}"
+          key: robine-id-go-${{ checksum('go.sum') }}
+          paths: [/go/pkg/mod, /root/.cache/go-build]
+      - name: Download dependencies
+        run: go mod download
+      - name: Verify project
+        run: make check
       - name: Upload coverage report
         if: always
         uses: artifacts/upload
         with:
           name: coverage-report
-          paths: [cover]
+          paths: [coverage]
           retention-days: 14
-      - name: Save Mix cache
+      - name: Save Go cache
         uses: cache/save
         with:
-          key: robine-id-mix-${{ checksum('mix.lock') }}
-          paths: [deps]
+          key: robine-id-go-${{ checksum('go.sum') }}
+          paths: [/go/pkg/mod, /root/.cache/go-build]

@@ -37,16 +37,16 @@ Issuer token-policy fields are positive integer seconds no greater than 86,400. 
 
 ## Loading and Paths
 
-`ROBINE_ID_CONFIG` selects the root document; otherwise `config/robine_id.json` is used. Application documents are loaded from the adjacent `applications/` directory unless `ROBINE_ID_APPLICATIONS_DIR` overrides it. Relative database and signing-key paths resolve from the root file directory. Database storage MAY use an environment reference. A missing, unreadable, syntactically invalid, or semantically invalid startup document or applications directory MUST prevent readiness and application startup rather than activate partial defaults.
+`ROBINE_ID_CONFIG` selects an absolute local root document as a convenience. Otherwise `ROBINE_ID_BLOB_STORE`, `ROBINE_ID_STORAGE_ROOT`, and `ROBINE_ID_CONFIG_KEY` select the configuration backend and object. Application documents are loaded from `ROBINE_ID_APPLICATIONS_PREFIX`. Durable keys and account overrides use the independently selectable state blob backend. A missing, unreadable, syntactically invalid, or semantically invalid startup revision MUST prevent readiness and application startup rather than activate partial defaults.
 
 Each application document MUST be a JSON object containing `schema_version: 1`, `kind: "oidc_application"`, a stable non-empty `id`, and the fields defined by APPL-001. Files without a `.json` suffix are ignored. Application files are composed in lexicographic filename order and duplicate identifiers invalidate the complete revision.
 
 ## Commands
 
-- `mix robine_id.config.validate PATH` validates without activation.
-- `mix robine_id.config.preview PATH` calculates a plan without mutation.
-- `mix robine_id.config.apply PATH` validates and activates one revision.
-- `mix robine_id.config.effective` prints active non-secret state.
+- Server startup validates the complete root and application revision before accepting traffic.
+- The active configuration is checked at the configured reload interval.
+- An invalid update leaves the last valid revision active.
+- `/health/ready` exposes only the active non-secret revision fingerprint.
 
 Effective output MUST redact passwords, hashes, secret references, tokens, and private key material.
 

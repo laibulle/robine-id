@@ -79,11 +79,7 @@
       "window_seconds": 60
     }
   },
-  "storage": {
-    "database_path": "../robine_id_dev.db",
-    "pool_size": 5,
-    "signing_key_path": "../robine_id_signing_keys.bin"
-  },
+  "storage": {},
   "telemetry": {
     "log_level": "info"
   }

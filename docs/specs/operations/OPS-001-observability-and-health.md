@@ -17,7 +17,7 @@ Robine ID exposes operational signals that make failures diagnosable without com
 - Telemetry MUST use bounded-cardinality labels and MUST NOT include credentials, tokens, authorization codes, raw personal data, or client secrets.
 - Audit events MUST be emitted for security-relevant actions and configuration changes.
 - Operator-facing errors MUST identify actionable causes while public errors remain non-sensitive.
-- `GET /health/live` MUST return HTTP 200 with `{"status":"live"}` whenever the Phoenix endpoint can serve requests.
+- `GET /health/live` MUST return HTTP 200 with `{"status":"live"}` whenever the Go HTTP server can serve requests.
 - `GET /health/ready` MUST return HTTP 200 only when an active configuration exists and the configured database answers a trivial query.
 - A ready response MUST include the non-secret active revision fingerprint. A failure MUST return HTTP 503 with only `{"status":"not_ready"}`.
 - Every HTTP request MUST receive or generate an `x-request-id`; public protocol errors MAY expose it as the correlation reference.
@@ -29,7 +29,7 @@ Robine ID exposes operational signals that make failures diagnosable without com
 
 ## Metric Contract
 
-The application defines Phoenix request latency and exception metrics, Ecto query timing, VM memory and run-queue summaries, and bounded counters for security events, reconciliation outcomes, and token-exchange outcomes. Deployments MUST attach a compatible reporter if metrics are to leave the process; defining metrics alone does not export them.
+The application emits structured request and audit events with bounded fields. Deployments SHOULD collect container request latency, errors, memory, and CPU through their platform and MAY attach an OpenTelemetry exporter for application counters.
 
 Expected bounded labels are route or event names known to the application and small outcome enums such as `success`, `failure`, `rejected`, `activated`, and `unchanged`.
 

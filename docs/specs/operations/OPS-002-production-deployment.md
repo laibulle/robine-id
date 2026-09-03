@@ -6,55 +6,31 @@ MVP target
 
 ## Summary
 
-Robine ID runs as one Phoenix release behind a trusted HTTPS reverse proxy with explicit secrets, configuration, and persistent signing-key storage.
+Robine ID runs as an unprivileged Go container behind a trusted HTTPS ingress. Configuration and security state are supplied through explicit local or S3-compatible object stores.
 
 ## Requirements
 
-- Production MUST provide `SECRET_KEY_BASE` with deployment-specific high-entropy material.
-- `PHX_HOST` MUST match the public host used by configured issuer URLs.
-- `PHX_SERVER=true` MUST enable the HTTP server in a release; `PORT` and `POOL_SIZE` MAY tune runtime defaults.
-- `ROBINE_ID_CONFIG` SHOULD point to an operator-managed immutable configuration document.
-- `DATABASE_PATH` or the storage configuration MUST resolve to a writable SQLite path for readiness and future persistent adapters.
-- The signing-key path MUST be on a persistent, backed-up filesystem and writable only by the service account.
-- The deployment MUST preserve `SECRET_KEY_BASE` together with the encrypted signing-key file across restart and rollback.
-- TLS MUST terminate either in the endpoint or a trusted proxy. Forwarded HTTPS information MUST be accepted only from trusted infrastructure.
-- Production MUST force HTTPS and HSTS. Health-check routing MAY be exempted only when required inside a protected network.
-- Database migrations MUST complete before the release accepts production traffic.
-- Static assets MUST be built and digested with `mix assets.deploy` before assembling the release.
-- Startup MUST fail on missing required secrets, invalid configuration, unavailable key material, or unrecoverable migration failure.
-- The service MUST run as a non-root OS user with least filesystem privilege.
+- Production MUST provide a deployment-specific `SECRET_KEY_BASE` containing at least 32 high-entropy characters.
+- `PORT` MUST select the HTTP listener and defaults to `8080`.
+- `ROBINE_ID_BLOB_STORE` MUST select `local` or `s3` for configuration.
+- `ROBINE_ID_STATE_BLOB_STORE` MAY independently select the persistent signing-key and account backend.
+- Local signing-key state MUST live on a persistent, backed-up filesystem and use mode `0600`.
+- S3 state MUST be protected by least-privilege credentials and versioning or backup policy.
+- The deployment MUST preserve `SECRET_KEY_BASE` together with the encrypted signing-key object across restart and rollback.
+- TLS MUST terminate at the platform or a trusted reverse proxy and browser cookies MUST be Secure in production.
+- Startup MUST fail on a missing secret, invalid configuration, unavailable required objects, or corrupt signing-key material.
+- The service MUST run as a non-root OS user.
+- The release candidate MUST pass `make check`, including the race detector and at least 80% statement coverage.
 
-## Release Procedure
+## Release procedure
 
-1. Validate the candidate configuration with `mix robine_id.config.validate`.
-2. Run `mix precommit` and `mix assets.deploy` from a clean checkout.
-3. Build the production release with the target runtime versions.
-4. Provision the configuration, database location, signing-key volume, and secrets.
-5. Start one instance and wait for `/health/ready` to report the intended revision.
-6. Complete the real relying-party smoke flow: discovery, login, consent, callback, code exchange, UserInfo, and logout.
-7. Record the accessibility and interoperability checks from the specification index.
-8. Back up newly initialized signing-key material before considering the deployment recoverable.
+1. Run `make check` from a clean checkout.
+2. Build the production image and record its immutable digest.
+3. Provision configuration, state storage, secrets, and HTTPS ingress.
+4. Start one instance and wait for `/health/ready` to report the intended revision fingerprint.
+5. Complete the real relying-party flow through UserInfo and RP-initiated logout.
+6. Record accessibility checks and back up newly initialized signing-key state.
 
-## Rollback and Recovery
+## Scaling constraint
 
-- A rollback MUST preserve the same public issuer URL and compatible configuration schema.
-- Restoring signing keys requires both the encrypted file and the matching `SECRET_KEY_BASE`.
-- Losing access-token or session memory after restart is expected; clients and users reauthenticate.
-- A corrupt signing-key file MUST be restored from backup rather than silently replaced, because replacement breaks verification of outstanding ID tokens.
-- Configuration rollback SHOULD reapply a previously validated complete document, not edit active state manually.
-
-## Scaling Constraint
-
-The MVP is single-instance. Codes, access tokens, sessions, rate-limit counters, configuration history, and audit history are not coordinated between nodes. DNS clustering does not make these stores distributed. Horizontal scaling requires shared adapters, cross-node atomic code consumption, shared session/rate-limit state, and a coordinated signing-key strategy before it is supported.
-
-## Acceptance Criteria
-
-- A production release starts from documented environment and filesystem inputs without source-tree mutation.
-- Restart preserves issuer signing identity but invalidates only documented node-local state.
-- Readiness remains false until configuration and database checks succeed.
-- A restore drill proves that backed-up signing keys remain decryptable and published with the same `kid` values.
-- A real client completes the full MVP journey through the production proxy.
-
-## Non-Goals
-
-Kubernetes manifests, container images, zero-downtime multi-node upgrades, automated certificate issuance, secret-manager integrations, and disaster-recovery automation are platform-specific and outside the MVP specification.
+The built-in authorization-code, access-token, authenticated-session, and rate-limit adapters are process-local. Horizontal scaling requires shared implementations of those ports. Local and S3 blob adapters make configuration, keys, and account overrides portable but do not make the runtime protocol stores distributed.

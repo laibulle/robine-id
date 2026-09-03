@@ -1,0 +1,11 @@
+{{define "body"}}<main class="auth-shell">{{template "card" .}}</main>{{end}}
+{{define "card"}}<section id="auth-card" class="auth-card" aria-labelledby="consent-title">
+  {{template "brand-icon" .}}<p class="eyebrow">{{.ProductName}}</p>
+  <h1 id="consent-title">Authorize access?</h1><p class="auth-intro"><strong>{{.ClientName}}</strong> would like permission to:</p>
+  <ul class="consent-list">{{range .Scopes}}<li><span aria-hidden="true">✓</span>{{.}}</li>{{end}}</ul>
+  <form id="authorization-consent-form" class="consent-actions" method="post" action="/{{.IssuerID}}/authorize/consent" hx-post="/{{.IssuerID}}/authorize/consent" hx-target="#auth-card" hx-swap="outerHTML">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button class="primary-action" name="decision" value="approve" type="submit">Authorize</button>
+    <button class="secondary-action" name="decision" value="deny" type="submit">Cancel</button>
+  </form>
+</section>{{end}}

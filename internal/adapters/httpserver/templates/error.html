@@ -1,0 +1,2 @@
+{{define "body"}}<main class="auth-shell">{{template "card" .}}</main>{{end}}
+{{define "card"}}<section id="auth-card" class="auth-card" aria-labelledby="error-title"><div class="error-mark" aria-hidden="true">!</div><p class="eyebrow">{{.ProductName}}</p><h1 id="error-title">We couldn’t continue</h1><div id="protocol-error" class="error-summary standalone-error" role="alert">{{.Error}}</div><p class="correlation-reference">Reference: <code>{{.CorrelationID}}</code></p><a class="text-action" href="/">Return home</a></section>{{end}}

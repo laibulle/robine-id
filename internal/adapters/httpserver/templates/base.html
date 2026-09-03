@@ -1,0 +1,20 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}'>
+  <title>{{.Title}} · {{.ProductName}}</title>
+  <link rel="icon" href="/favicon.ico" sizes="64x64">
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/assets/portal.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <script defer src="/assets/htmx.min.js"></script>
+  <script defer src="/assets/app.js"></script>
+</head>
+<body>{{template "body" .}}</body>
+</html>{{end}}
+{{define "brand-icon"}}<img class="auth-brand-logo" src="/assets/brand/robine-mark.png" alt="" width="56" height="56">{{end}}
+{{define "wordmark"}}<img class="brand-logo" src="/assets/brand/robine-mark.png" alt="" width="42" height="42"><span class="product-name">{{.ProductName}}</span>{{end}}

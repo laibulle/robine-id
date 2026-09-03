@@ -1,0 +1,23 @@
+root = "."
+tmp_dir = ".dev/air"
+
+[build]
+cmd = "go build -o ./.dev/air/robine-id ./cmd/robine-id"
+entrypoint = ["./.dev/air/robine-id"]
+include_dir = ["cmd", "internal", "config", "priv/static"]
+include_ext = ["go", "html", "css", "js", "json", "svg", "png", "ico"]
+include_file = ["go.mod", "go.sum"]
+exclude_dir = [".dev", "coverage"]
+exclude_regex = ["_test\\.go"]
+exclude_unchanged = true
+delay = 200
+stop_on_error = true
+send_interrupt = true
+kill_delay = "2s"
+
+[misc]
+clean_on_exit = true
+
+[screen]
+clear_on_rebuild = false
+keep_scroll = true

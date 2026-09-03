@@ -1,6 +1,6 @@
 # Robine ID Specifications
 
-Robine ID is a configurable, idempotent OpenID Connect provider built with Elixir and Phoenix. These specifications define externally observable behavior and product requirements independently of implementation details.
+Robine ID is a configurable, idempotent OpenID Connect provider built with Go and progressively enhanced with HTMX. These specifications define externally observable behavior and product requirements independently of implementation details.
 
 ## Conventions
 
@@ -26,7 +26,6 @@ Robine ID is a configurable, idempotent OpenID Connect provider built with Elixi
 - [SECU-001 — Authentication Session Security](security/SECU-001-authentication-session-security.md)
 - [OPS-001 — Observability and Health](operations/OPS-001-observability-and-health.md)
 - [OPS-002 — Production Deployment](operations/OPS-002-production-deployment.md)
-- [OPS-003 — Embedded Provider](operations/OPS-003-embedded-provider.md)
 
 ## MVP Scope
 
@@ -58,21 +57,20 @@ Authorization codes, access-token grants, rate-limit counters, and authenticated
 
 | Specification | Automated evidence |
 | --- | --- |
-| OIDC-001 | `discover_provider_test.exs`, `discovery_controller_test.exs` |
-| OIDC-002 | `validate_authorization_request_test.exs`, `authorization_code_flow_test.exs`, `authorization_controller_test.exs` |
-| OIDC-003 | `token_and_key_management_test.exs`, `jwks_controller_test.exs` |
-| OIDC-004 | `user_info_controller_test.exs`, `authorization_code_flow_test.exs` |
-| OIDC-005 | `logout_controller_test.exs`, `security_test.exs` |
-| APPL-001 | `clients_test.exs`, `configuration_test.exs` |
-| CONF-001 | `configuration_test.exs` and the `robine_id.config.*` delivery gates |
-| CONF-002 | `configuration_test.exs`, `configuration/memory_store_test.exs` |
-| UX-001 | `authorization_controller_test.exs`, `logout_controller_test.exs`, `page_controller_test.exs` |
-| UX-002 | `experience_test.exs`, localized authorization controller tests |
-| IDEN-001 | `identity_test.exs`, authorization controller tests |
-| SECU-001 | `security_test.exs`, authorization and logout controller tests |
-| OPS-001 | `health_controller_test.exs` plus the real-server smoke gate |
+| OIDC-001 | `internal/application/provider_test.go`, `internal/adapters/httpserver/server_test.go` |
+| OIDC-002 | provider validation and complete HTMX authorization-flow tests |
+| OIDC-003 | provider JWT/JWKS tests and encrypted key-store tests |
+| OIDC-004 | provider and HTTP UserInfo tests |
+| OIDC-005 | ID-token verification and HTTP logout tests |
+| APPL-001 | strict configuration repository tests |
+| CONF-001 | configuration, local blob, and S3 blob adapter tests |
+| CONF-002 | last-valid-revision configuration tests |
+| UX-001 | HTTP fragment, login, consent, account, admin, and logout tests |
+| UX-002 | configuration validation and generated theme stylesheet tests |
+| IDEN-001 | provider authentication and account-management tests |
+| SECU-001 | session, limiter, cookie, code-reuse, and CSRF tests |
+| OPS-001 | health and middleware HTTP tests plus the container smoke gate |
 | OPS-002 | release build, readiness, restore drill, and real-client manual gates |
-| OPS-003 | `runtime_test.exs` plus the embedded-host controller integration tests |
 
 Before a release, perform these documented manual checks against the built production assets:
 
@@ -84,4 +82,4 @@ Before a release, perform these documented manual checks against the built produ
 
 ## Release Gate
 
-A release candidate is acceptable only when `mix precommit` and `mix assets.deploy` succeed, all automated acceptance evidence passes, the manual checks above are recorded, a real relying party completes the end-to-end flow, production secrets differ from development values, and the signing-key file is stored on a backed-up persistent volume.
+A release candidate is acceptable only when `make check` succeeds, all automated acceptance evidence passes, the manual checks above are recorded, a real relying party completes the end-to-end flow, production secrets differ from development values, and the signing-key object is stored in a backed-up local or S3-compatible backend.
